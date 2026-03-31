@@ -1,0 +1,9 @@
+default:
+  sync_max_events_per_run: 5
+  ingest_fight_details: true
+full_backfill:
+  sync_max_events_per_run: 500
+  ingest_fight_details: true
+quick:
+  sync_max_events_per_run: 1
+  ingest_fight_details: false

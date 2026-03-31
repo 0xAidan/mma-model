@@ -1,0 +1,5 @@
+kelly_fractional: 0.25
+kelly_max_fraction_of_bankroll: 0.05
+min_edge_vs_implied: 0.03
+sync_max_events_per_run: 5
+ingest_fight_details: true
