@@ -1,6 +1,6 @@
 """Tests for ufcstats HTML parsers."""
 
-from mma_model.ufcstats.parsers import parse_completed_events, parse_event_fights, parse_fight_totals
+from mma_model.ufcstats.parsers import parse_completed_events, parse_event_fights, parse_fight_totals, parse_fight_winner_id
 
 
 def test_parse_completed_events_minimal():
@@ -29,3 +29,8 @@ def test_parse_fight_totals_sample():
     assert len(totals) == 2
     assert totals[0].sig_str_landed == 86
     assert totals[0].sig_str_attempted == 189
+
+def test_parse_fight_winner_id_fixture():
+    html = open("tests/fixtures/fight_full.html", encoding="utf-8").read()
+    assert parse_fight_winner_id(html) == "76e2870ffafbe38f"
+

@@ -183,6 +183,23 @@ def _parse_ctrl(s: str) -> int:
     return 0
 
 
+
+def parse_fight_winner_id(html: str) -> Optional[str]:
+    """Winner fighter id from fight-details page (green W in header)."""
+    soup = BeautifulSoup(html, "lxml")
+    for pdiv in soup.select("div.b-fight-details__person"):
+        st = pdiv.select_one("i.b-fight-details__person-status")
+        if st is None:
+            continue
+        classes = st.get("class") or []
+        if not any("style_green" in c for c in classes):
+            continue
+        a = pdiv.select_one("a.b-fight-details__person-link")
+        if a and a.get("href"):
+            return _id_from_url(a["href"])
+    return None
+
+
 def parse_fight_totals(html: str) -> list[FighterTotals]:
     soup = BeautifulSoup(html, "lxml")
     tables = soup.select("table")
