@@ -18,14 +18,34 @@ pip install -e ".[dev]"
 cp .env.example .env
 mma-model init-db
 mma-model sync --profile quick   # 1 event, no fight-detail scrape
-mma-model sync --profile default # see feature_flags.yaml / profiles.yaml
+mma-model sync --profile default # events + fight-detail stats; see profiles.yaml
 ```
+
+### Train and predict (needs labeled fights from `default`-style sync)
+
+After `sync` with fight details, build a baseline model and score a fight:
+
+```bash
+mma-model train --output data/model_logistic.joblib --min-prior-fights 0
+mma-model predict-fight --fight-id <ufcstats_hex_id> --model data/model_logistic.joblib
+```
+
+Use `--min-prior-fights 0` on small databases (many fighters have no prior bouts in your DB). Raise it (e.g. `1` or `2`) once you have run `full_backfill` or a larger `sync_max_events_per_run`.
 
 With `ODDS_API_KEY` set:
 
 ```bash
 mma-model odds
 ```
+
+## What I need from you
+
+| Item | Required? | Notes |
+|------|-----------|--------|
+| **Nothing for core ETL + training** | — | UFC Stats is public; SQLite path works out of the box. |
+| **`ODDS_API_KEY`** | Optional | Only for `mma-model odds` (The Odds API). Get a key at [the-odds-api.com](https://the-odds-api.com/) and put it in `.env`. |
+| **GitHub** | Done if the repo is yours | `main` includes CI; pushes run `pytest`. |
+| **Review / priorities** | Optional | Say if you want next: more backfill, a small HTTP API, or calibration vs closing lines. |
 
 ## Configuration
 
