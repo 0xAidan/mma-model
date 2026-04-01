@@ -35,9 +35,19 @@ class UFCStatsClient:
         return r.text
 
 
+def fetch_events_list_page(
+    client: UFCStatsClient,
+    *,
+    segment: str = "completed",
+    page: int | str = "all",
+) -> str:
+    """Fetch events index: segment is `completed` or `upcoming`. page=1,2,… or `all`."""
+    return client.get_text(f"{client.BASE}/statistics/events/{segment}?page={page}")
+
+
 def fetch_completed_events_page(client: UFCStatsClient, page: int | str = "all") -> str:
-    """Fetch completed events list. Use page=1,2,… for pagination or 'all' for one large HTML."""
-    return client.get_text(f"{client.BASE}/statistics/events/completed?page={page}")
+    """Backward-compatible alias for completed events only."""
+    return fetch_events_list_page(client, segment="completed", page=page)
 
 
 def fetch_url(client: UFCStatsClient, url: str) -> str:

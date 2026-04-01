@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from mma_model.config import feature_flags, profile
 from mma_model.db.models import Event, Fight, Fighter, FightFighterStats, IngestCursor
-from mma_model.ufcstats.client import UFCStatsClient, fetch_completed_events_page, fetch_url
+from mma_model.ufcstats.client import UFCStatsClient, fetch_events_list_page, fetch_url
 from mma_model.ufcstats.parsers import (
     EventRow,
     parse_completed_events,
@@ -18,7 +18,8 @@ from mma_model.ufcstats.parsers import (
     parse_fight_winner_id,
 )
 
-CURSOR_COMPLETED_EVENTS = "ufcstats_completed_next_page"
+def _cursor_key_for_segment(segment: str) -> str:
+    return f"ufcstats_{segment}_next_page"
 
 
 def _cursor_next_page(session: Session, name: str) -> int:
@@ -44,15 +45,18 @@ def _coerce_list_page(val: Any) -> int | str:
 def fetch_completed_events_for_sync(
     client: UFCStatsClient,
     *,
+    events_list: str,
     mode: str,
     one_shot_page: int | str,
     start_page: int,
     pages_per_run: int,
 ) -> tuple[list[EventRow], dict[str, Any]]:
     """Load EventRow list for this sync. Paginated mode dedupes by event id and preserves order."""
-    meta: dict[str, Any] = {"mode": mode}
+    meta: dict[str, Any] = {"mode": mode, "events_list": events_list}
     if mode == "one_shot":
-        html = fetch_completed_events_page(client, page=_coerce_list_page(one_shot_page))
+        html = fetch_events_list_page(
+            client, segment=events_list, page=_coerce_list_page(one_shot_page)
+        )
         events = parse_completed_events(html)
         meta["cursor_next_page"] = 1
         meta["pagination_exhausted"] = True
@@ -66,7 +70,7 @@ def fetch_completed_events_for_sync(
     reached_end = False
     next_cursor = start_page
     for p in range(start_page, start_page + pages_per_run):
-        html = fetch_completed_events_page(client, page=p)
+        html = fetch_events_list_page(client, segment=events_list, page=p)
         rows = parse_completed_events(html)
         if not rows:
             reached_end = True
@@ -114,6 +118,8 @@ def sync_pipeline(
     flags = {**feature_flags(), **profile(profile_name)}
     max_events = int(flags.get("sync_max_events_per_run", 5))
     ingest_details = bool(flags.get("ingest_fight_details", True))
+    events_list = str(flags.get("sync_events_list", "completed"))
+    cursor_name = _cursor_key_for_segment(events_list)
     list_mode = str(flags.get("sync_event_list_mode", "one_shot"))
     one_shot_page = flags.get("sync_completed_list_page", "all")
     pages_per_run = int(flags.get("sync_pages_per_run", 10))
@@ -122,7 +128,7 @@ def sync_pipeline(
         if reset_cursor:
             start_page = 1
         elif resume:
-            start_page = _cursor_next_page(session, CURSOR_COMPLETED_EVENTS)
+            start_page = _cursor_next_page(session, cursor_name)
         else:
             start_page = 1
     else:
@@ -130,6 +136,7 @@ def sync_pipeline(
 
     events, ev_meta = fetch_completed_events_for_sync(
         client,
+        events_list=events_list,
         mode=list_mode,
         one_shot_page=one_shot_page,
         start_page=start_page,
@@ -140,12 +147,13 @@ def sync_pipeline(
         events = events[:max_events]
 
     if list_mode == "paginated":
-        _set_cursor_page(session, CURSOR_COMPLETED_EVENTS, int(ev_meta["cursor_next_page"]))
+        _set_cursor_page(session, cursor_name, int(ev_meta["cursor_next_page"]))
 
     stats: dict[str, Any] = {
         "events": 0,
         "fights": 0,
         "fight_details": 0,
+        "sync_events_list": events_list,
         "sync_event_list_mode": list_mode,
         "sync_events_considered": len(events),
         **{k: v for k, v in ev_meta.items() if k in ("cursor_next_page", "pagination_exhausted", "note")},

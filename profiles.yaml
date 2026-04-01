@@ -26,3 +26,10 @@ quick:
   ingest_fight_details: false
   sync_event_list_mode: one_shot
   sync_completed_list_page: all
+upcoming_weekend:
+  # Next event on the upcoming list (nearest date). Use when the card is not on "completed" yet.
+  sync_events_list: upcoming
+  sync_max_events_per_run: 1
+  ingest_fight_details: true
+  sync_event_list_mode: one_shot
+  sync_completed_list_page: all

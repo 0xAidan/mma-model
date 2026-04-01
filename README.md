@@ -24,6 +24,7 @@ The completed-events list is available as **`page=all`** (one large HTML) or **p
 | **`full_backfill`** | **Paginated**: fetches `sync_pages_per_run` pages per run, saves **`ingest_cursors`** so the next run can continue. Use: `mma-model sync --profile full_backfill` then **`mma-model sync --profile full_backfill --resume`** repeatedly until the cursor resets (empty page). |
 | **`one_shot_all`** | One request to `page=all`, **`sync_max_events_per_run: 0`** = process every event returned in that HTML (typically hundreds). |
 | **`one_shot_500`** | Same as older “full” single-shot: first **500** events from `page=all`. |
+| **`upcoming_weekend`** | **`sync_events_list: upcoming`** — ingests the **next** scheduled card (first row on the upcoming list), e.g. for predictions before results exist. Fight **Totals** stay empty until after the event. |
 
 **Note:** Large backfills take time and many HTTP requests (delay defaults to **0.75s** between requests).
 
@@ -83,7 +84,7 @@ mma-model odds
 |------|---------|
 | `.env` | `MMA_DATABASE_URL`, `ODDS_API_KEY`, scrape delay / user-agent |
 | `feature_flags.yaml` | Default sync limits, Kelly caps |
-| `profiles.yaml` | Named profiles: `default`, `quick`, `full_backfill` (paginated + resume), `one_shot_all`, `one_shot_500` |
+| `profiles.yaml` | Named profiles: `default`, `quick`, `full_backfill`, `one_shot_all`, `one_shot_500`, `upcoming_weekend` (`sync_events_list: upcoming`) |
 
 ## Scraping
 
