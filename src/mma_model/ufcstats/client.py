@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import httpx
 
@@ -36,7 +35,8 @@ class UFCStatsClient:
         return r.text
 
 
-def fetch_completed_events_page(client: UFCStatsClient, page: Optional[str] = "all") -> str:
+def fetch_completed_events_page(client: UFCStatsClient, page: int | str = "all") -> str:
+    """Fetch completed events list. Use page=1,2,… for pagination or 'all' for one large HTML."""
     return client.get_text(f"{client.BASE}/statistics/events/completed?page={page}")
 
 

@@ -1,9 +1,28 @@
 default:
   sync_max_events_per_run: 5
   ingest_fight_details: true
+  sync_event_list_mode: one_shot
+  sync_completed_list_page: all
 full_backfill:
+  # Paginated completed-events list (~25 events/page). Run repeatedly with: mma-model sync --profile full_backfill --resume
+  sync_max_events_per_run: 0
+  ingest_fight_details: true
+  sync_event_list_mode: paginated
+  sync_pages_per_run: 40
+one_shot_all:
+  # Single HTML fetch (page=all), no cap — good for one-shot max ingest if the site returns full list
+  sync_max_events_per_run: 0
+  ingest_fight_details: true
+  sync_event_list_mode: one_shot
+  sync_completed_list_page: all
+one_shot_500:
+  # Same as previous default full_backfill: first 500 events from page=all
   sync_max_events_per_run: 500
   ingest_fight_details: true
+  sync_event_list_mode: one_shot
+  sync_completed_list_page: all
 quick:
   sync_max_events_per_run: 1
   ingest_fight_details: false
+  sync_event_list_mode: one_shot
+  sync_completed_list_page: all

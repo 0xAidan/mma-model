@@ -1,6 +1,6 @@
 """Tests for ufcstats HTML parsers."""
 
-from mma_model.ufcstats.parsers import parse_completed_events, parse_event_fights, parse_fight_totals, parse_fight_winner_id
+from mma_model.ufcstats.parsers import parse_completed_events, parse_fight_totals, parse_fight_winner_id
 
 
 def test_parse_completed_events_minimal():

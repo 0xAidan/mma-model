@@ -90,7 +90,6 @@ def parse_event_fights(html: str) -> list[EventFightRow]:
         fb_id = _id_from_url(fb["href"])
         win_flag = tr.select_one("a.b-flag_style_green")
         winner_id: Optional[str] = fa_id if win_flag else None
-        wtxt = tr.select_one("td.l-page_align_left p.b-fight-details__table-text")
         wc = ""
         for p in tr.select("td.l-page_align_left p.b-fight-details__table-text"):
             t = p.get_text(" ", strip=True)
@@ -105,7 +104,6 @@ def parse_event_fights(html: str) -> list[EventFightRow]:
             ):
                 method = m
                 break
-        rnd_el = tr.select("td.b-fight-details__table-col")[-2] if len(tr.select("td")) > 2 else None
         fight_round: Optional[int] = None
         time_str: Optional[str] = None
         cols = tr.select("td.b-fight-details__table-col")
@@ -226,7 +224,6 @@ def parse_fight_totals(html: str) -> list[FighterTotals]:
     for c in cells[1:]:
         texts = [p.get_text(strip=True) for p in c.select("p.b-fight-details__table-text")]
         col_vals.append(texts)
-    n = 2
     for idx in range(2):
         nm = name_ps[idx].get_text(strip=True)
         fid = _id_from_url(name_ps[idx].get("href", ""))

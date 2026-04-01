@@ -91,6 +91,16 @@ class FightFighterStats(Base):
     fight: Mapped["Fight"] = relationship(back_populates="stats")
 
 
+class IngestCursor(Base):
+    """Resume state for paginated UFC Stats completed-events scraping."""
+
+    __tablename__ = "ingest_cursors"
+
+    cursor_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    next_page: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
 

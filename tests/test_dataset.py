@@ -1,7 +1,7 @@
 """Dataset builder smoke tests."""
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from mma_model.db.models import Base
 from mma_model.predict.dataset import build_training_arrays
