@@ -8,7 +8,24 @@ from sqlalchemy.orm import Session
 from mma_model.config import feature_flags, profile
 from mma_model.db.models import Event, Fight, Fighter, FightFighterStats
 from mma_model.ufcstats.client import UFCStatsClient, fetch_completed_events_page, fetch_url
-from mma_model.ufcstats.parsers import parse_completed_events, parse_event_fights, parse_fight_totals
+from mma_model.ufcstats.parsers import (
+    parse_completed_events,
+    parse_event_fights,
+    parse_fight_totals,
+    parse_fight_winner_id,
+)
+
+
+def _canonical_fighter_pair(
+    fighter_a_id: str,
+    fighter_a_name: str,
+    fighter_b_id: str,
+    fighter_b_name: str,
+) -> tuple[str, str, str, str]:
+    """Sort by fighter id so fighter_a is stable; avoids winner-always-A from UFC page order."""
+    if fighter_a_id <= fighter_b_id:
+        return fighter_a_id, fighter_a_name, fighter_b_id, fighter_b_name
+    return fighter_b_id, fighter_b_name, fighter_a_id, fighter_a_name
 
 
 def upsert_fighter(session: Session, fid: str, name: str) -> None:
@@ -43,14 +60,20 @@ def sync_pipeline(session: Session, client: UFCStatsClient, profile_name: str = 
         event_html = fetch_url(client, ev.url)
         fights = parse_event_fights(event_html)
         for f in fights:
-            upsert_fighter(session, f.fighter_a_id, f.fighter_a_name)
-            upsert_fighter(session, f.fighter_b_id, f.fighter_b_name)
-            session.merge(
+            fa_id, fa_name, fb_id, fb_name = _canonical_fighter_pair(
+                f.fighter_a_id,
+                f.fighter_a_name,
+                f.fighter_b_id,
+                f.fighter_b_name,
+            )
+            upsert_fighter(session, fa_id, fa_name)
+            upsert_fighter(session, fb_id, fb_name)
+            fight_row = session.merge(
                 Fight(
                     id=f.fight_id,
                     event_id=ev.ufcstats_id,
-                    fighter_a_id=f.fighter_a_id,
-                    fighter_b_id=f.fighter_b_id,
+                    fighter_a_id=fa_id,
+                    fighter_b_id=fb_id,
                     winner_id=f.winner_id,
                     weight_class=f.weight_class or None,
                     method=f.method or None,
@@ -85,9 +108,10 @@ def sync_pipeline(session: Session, client: UFCStatsClient, profile_name: str = 
                                 ctrl_seconds=t.ctrl_seconds,
                             )
                         )
-                    fight = session.get(Fight, f.fight_id)
-                    if fight:
-                        fight.detail_ingested = True
+                    fight_row.detail_ingested = True
+                    wid = parse_fight_winner_id(fh)
+                    if wid:
+                        fight_row.winner_id = wid
                     stats["fight_details"] += 1
 
     return stats
