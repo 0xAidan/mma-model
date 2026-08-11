@@ -1,0 +1,156 @@
+{
+  "bouts": {
+    "all": 440,
+    "brazil": 15,
+    "standard": 425
+  },
+  "built_at": "2026-08-11T20:00:00+00:00",
+  "by_calendar_year": {
+    "2017": {
+      "bouts": {
+        "all": 40,
+        "standard": 40
+      },
+      "cards": {
+        "all": 8,
+        "standard": 8
+      }
+    },
+    "2018": {
+      "bouts": {
+        "all": 55,
+        "brazil": 15,
+        "standard": 40
+      },
+      "cards": {
+        "all": 11,
+        "brazil": 3,
+        "standard": 8
+      }
+    },
+    "2019": {
+      "bouts": {
+        "all": 49,
+        "standard": 49
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    },
+    "2020": {
+      "bouts": {
+        "all": 48,
+        "standard": 48
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    },
+    "2021": {
+      "bouts": {
+        "all": 50,
+        "standard": 50
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    },
+    "2022": {
+      "bouts": {
+        "all": 49,
+        "standard": 49
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    },
+    "2023": {
+      "bouts": {
+        "all": 49,
+        "standard": 49
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    },
+    "2024": {
+      "bouts": {
+        "all": 49,
+        "standard": 49
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    },
+    "2025": {
+      "bouts": {
+        "all": 51,
+        "standard": 51
+      },
+      "cards": {
+        "all": 10,
+        "standard": 10
+      }
+    }
+  },
+  "cards": {
+    "all": 89,
+    "brazil": 3,
+    "standard": 86
+  },
+  "current_results": {
+    "decisive": 431,
+    "draw": 1,
+    "no_contest": 8
+  },
+  "event_night_results": {
+    "decisive": 438,
+    "draw": 1,
+    "no_contest": 1
+  },
+  "expected": {
+    "bouts": {
+      "all": 440,
+      "brazil": 15,
+      "standard": 425
+    },
+    "cards": {
+      "all": 89,
+      "brazil": 3,
+      "standard": 86
+    },
+    "contract_id": "dwcs_expected_universe",
+    "contract_version": "1.0.0",
+    "current_results": {
+      "decisive": 431,
+      "draw": 1,
+      "no_contest": 8
+    },
+    "event_night_results": {
+      "decisive": 438,
+      "draw": 1,
+      "no_contest": 1
+    },
+    "pinned_hash": "e27626347016cf9d8a648f405eb3d4808be1a3ccb83ce19bd67c57da01c64c6f",
+    "version_states": {
+      "assumed_equal_to_current": 431,
+      "reversed_to_no_contest": 7,
+      "unchanged": 2
+    }
+  },
+  "manifest_id": "dwcs_universe",
+  "manifest_version": "1.0.0",
+  "schema_version": 1,
+  "through_year": 2025,
+  "version_states": {
+    "assumed_equal_to_current": 431,
+    "reversed_to_no_contest": 7,
+    "unchanged": 2
+  }
+}
