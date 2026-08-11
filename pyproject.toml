@@ -34,14 +34,27 @@ mma-model = "mma_model.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"mma_model.evaluation" = ["dwcs_v1.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "slow: packaging / install smoke tests (still run in default CI)",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-# Correctness-first gate for CI. Broader style rules expand as modules are cleaned.
+# Repository-wide gate stays correctness-first because pre-existing modules carry
+# style debt unrelated to DWCS-001. Broader rules are enforced on evaluation code
+# via the focused CI command documented below.
 select = ["E4", "E7", "E9", "F"]
+
+# Focused stricter lint for DWCS evaluation contract code/tests:
+#   ruff check src/mma_model/evaluation tests/test_evaluation_contract.py \
+#              tests/test_evaluation_contract_packaging.py \
+#              --select E,F,I,UP,B,SIM

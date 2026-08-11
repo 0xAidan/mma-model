@@ -5,6 +5,7 @@ from mma_model.evaluation.contract import (
     CONTRACT_ID,
     EXPECTED_CONTRACT_VERSION,
     EXPECTED_SCHEMA_VERSION,
+    PINNED_CONTRACT_HASH,
     ContractHashMismatch,
     ContractSchemaMismatch,
     ContractValidationError,
@@ -15,9 +16,12 @@ from mma_model.evaluation.contract import (
     compute_contract_hash,
     contract_path,
     fair_decimal_odds,
+    holdout_ucb_delta_log_loss_passes,
     load_evaluation_contract,
     mutable_fact_allowed_at_cutoff,
+    package_contract_resource_path,
     strong_value_decimal_price,
+    visible_contract_path,
 )
 
 __all__ = [
@@ -25,6 +29,7 @@ __all__ = [
     "CONTRACT_ID",
     "EXPECTED_CONTRACT_VERSION",
     "EXPECTED_SCHEMA_VERSION",
+    "PINNED_CONTRACT_HASH",
     "ContractHashMismatch",
     "ContractSchemaMismatch",
     "ContractValidationError",
@@ -35,7 +40,10 @@ __all__ = [
     "compute_contract_hash",
     "contract_path",
     "fair_decimal_odds",
+    "holdout_ucb_delta_log_loss_passes",
     "load_evaluation_contract",
     "mutable_fact_allowed_at_cutoff",
+    "package_contract_resource_path",
     "strong_value_decimal_price",
+    "visible_contract_path",
 ]

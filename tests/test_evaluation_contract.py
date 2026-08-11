@@ -7,23 +7,36 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from mma_model.evaluation.contract import (
     CONTRACT_ID,
     EXPECTED_CONTRACT_VERSION,
     EXPECTED_SCHEMA_VERSION,
+    PINNED_CONTRACT_HASH,
+    BettingMetric,
+    BoundComparison,
     ContractHashMismatch,
     ContractSchemaMismatch,
     ContractValidationError,
     ContractVersionMismatch,
+    OutcomeMetric,
+    RecommendationClass,
     actionable_decimal_price,
     compute_contract_hash,
     contract_path,
     fair_decimal_odds,
+    holdout_ucb_delta_log_loss_passes,
     load_evaluation_contract,
     mutable_fact_allowed_at_cutoff,
+    package_contract_resource_path,
     strong_value_decimal_price,
+    visible_contract_path,
 )
+
+# Literal pinned digest from the committed contract bytes. Do not derive this in-test
+# from the payload under assertion; update only with an intentional contract bump.
+PINNED_DIGEST_LITERAL = "af0ad518a6417ac7d67e5f56fe836ab58afe55d8ac70813bf6045307ea6fb2cf"
 
 
 @pytest.fixture
@@ -31,28 +44,51 @@ def contract():
     return load_evaluation_contract()
 
 
-def test_contract_file_exists_at_canonical_path():
-    path = contract_path()
-    assert path.is_file()
-    assert path.name == "dwcs_v1.json"
-    assert path.parent.name == "evaluation"
+def test_pinned_digest_constant_matches_literal():
+    assert PINNED_CONTRACT_HASH == PINNED_DIGEST_LITERAL
+    assert len(PINNED_DIGEST_LITERAL) == 64
 
 
-def test_valid_load_returns_expected_identity(contract):
+def test_visible_config_path_matches_package_bytes():
+    visible = visible_contract_path()
+    packaged = package_contract_resource_path()
+    assert visible.exists()
+    assert packaged.exists()
+    assert visible.resolve() == packaged.resolve()
+    assert visible.read_bytes() == packaged.read_bytes()
+
+
+def test_valid_default_load_verifies_pinned_digest(contract):
     assert contract.schema_version == EXPECTED_SCHEMA_VERSION
     assert contract.contract_id == CONTRACT_ID
     assert contract.contract_version == EXPECTED_CONTRACT_VERSION
-    assert len(contract.content_hash) == 64
+    assert contract.content_hash == PINNED_DIGEST_LITERAL
+
+
+def test_default_load_hard_fails_when_canonical_bytes_tampered(monkeypatch: pytest.MonkeyPatch):
+    """Tampering packaged bytes under the same version must hard-fail via pinned digest."""
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
+    payload["description"] = "tampered under same version"
+
+    def _tampered_payload() -> dict:
+        return payload
+
+    monkeypatch.setattr(
+        "mma_model.evaluation.contract._read_package_payload",
+        _tampered_payload,
+    )
+    with pytest.raises(ContractHashMismatch):
+        load_evaluation_contract()
 
 
 def test_holdout_2025_is_locked(contract):
-    assert contract.splits.holdout.seasons == [2025]
+    assert contract.splits.holdout.seasons == (2025,)
     assert contract.splits.holdout.locked is True
-    assert contract.splits.validation.seasons == [2024]
+    assert contract.splits.validation.seasons == (2024,)
     assert contract.splits.validation.locked is False
-    assert contract.splits.development.seasons == [2017, 2018, 2019, 2020, 2021, 2022, 2023]
-    assert contract.splits.grouping == "event_card"
-    assert contract.splits.outer_fold == "rolling_origin_one_card_at_a_time"
+    assert contract.splits.development.seasons == (2017, 2018, 2019, 2020, 2021, 2022, 2023)
+    assert contract.splits.grouping.value == "event_card"
+    assert contract.splits.outer_fold.value == "rolling_origin_one_card_at_a_time"
     assert contract.splits.target_cards == 89
 
 
@@ -64,7 +100,10 @@ def test_universe_counts_and_brazil_sensitivity(contract):
     assert contract.universe.brazil.cards == 3
     assert contract.universe.brazil.bouts == 15
     assert contract.universe.brazil.series_variant == "dwcs_brazil"
-    assert contract.sensitivity.report_universes == ["all_dwcs", "standard_only"]
+    assert [u.value for u in contract.sensitivity.report_universes] == [
+        "all_dwcs",
+        "standard_only",
+    ]
 
 
 def test_prediction_cutoff_and_card_identity(contract):
@@ -105,14 +144,19 @@ def test_price_policy_and_priced_only_betting_metrics(contract):
         is True
     )
     assert contract.metrics.price_target_rows_never_receive_synthetic_betting_performance is True
-    assert contract.metrics.priced_rows_require == "timestamped_observed_or_user_recorded_price"
-    assert "flat_1_unit_roi" in contract.metrics.betting_priced_only
-    assert "clv" in contract.metrics.betting_priced_only
-    assert "joint_log_loss" in contract.metrics.outcome
-    assert "accuracy_descriptive_only" in contract.metrics.outcome
+    assert (
+        contract.metrics.priced_rows_require.value
+        == "timestamped_observed_or_user_recorded_price"
+    )
+    assert set(contract.metrics.betting_priced_only) == set(BettingMetric)
+    assert BettingMetric.FLAT_1_UNIT_ROI in contract.metrics.betting_priced_only
+    assert BettingMetric.CLV in contract.metrics.betting_priced_only
+    assert OutcomeMetric.JOINT_LOG_LOSS in contract.metrics.outcome
+    assert OutcomeMetric.ECE in contract.metrics.outcome
+    assert OutcomeMetric.ACCURACY_DESCRIPTIVE_ONLY in contract.metrics.outcome
 
 
-def test_recommendation_thresholds(contract):
+def test_recommendation_thresholds_and_exact_round(contract):
     rec = contract.recommendation
     assert rec.actionable_ev_target == 0.05
     assert rec.strong_value_ev_target == 0.1
@@ -122,80 +166,120 @@ def test_recommendation_thresholds(contract):
     assert rec.max_confirmed_value_markets_per_matchup == 1
     assert rec.actionable_decimal_price == "max(1 / p25, 1.05 / p50)"
     assert rec.strong_value_decimal_price == "max(1 / p25, 1.10 / p50)"
-    assert set(rec.classifications) == {"confirmed_value", "price_target", "no_bet"}
+    assert set(rec.classifications) == set(RecommendationClass)
 
 
-def test_actionable_and_strong_value_price_formulas_match_contract():
+def test_actionable_and_strong_value_price_formulas_match_contract(contract):
     p50 = 0.55
     p25 = 0.48
+    rec = contract.recommendation
     assert fair_decimal_odds(p50) == pytest.approx(1.0 / p50)
-    assert actionable_decimal_price(p50, p25) == pytest.approx(max(1.0 / p25, 1.05 / p50))
-    assert strong_value_decimal_price(p50, p25) == pytest.approx(max(1.0 / p25, 1.10 / p50))
-    # When p25 is much lower, conservative break-even dominates.
+    assert actionable_decimal_price(p50, p25, ev_target=rec.actionable_ev_target) == pytest.approx(
+        max(1.0 / p25, 1.05 / p50)
+    )
+    assert strong_value_decimal_price(
+        p50, p25, ev_target=rec.strong_value_ev_target
+    ) == pytest.approx(max(1.0 / p25, 1.10 / p50))
     low_p25 = 0.30
     assert actionable_decimal_price(p50, low_p25) == pytest.approx(1.0 / low_p25)
 
 
-def test_confidence_intervals_contract(contract):
-    assert contract.confidence_intervals.bootstrap_refits == 200
-    assert contract.confidence_intervals.bootstrap_unit == "event_block"
-    assert contract.confidence_intervals.levels == [0.9, 0.95]
+def test_event_block_interval_levels_are_unambiguous(contract):
+    ci = contract.confidence_intervals
+    assert ci.bootstrap_refits == 200
+    assert ci.bootstrap_unit.value == "event_block"
+    assert ci.probability_and_ev.bootstrap_unit.value == "event_block"
+    assert ci.probability_and_ev.interval_levels == (0.9, 0.95)
+    assert ci.betting_metrics.bootstrap_unit.value == "event_block"
+    assert ci.betting_metrics.interval_levels == (0.9, 0.95)
+    assert ci.betting_metrics.note is not None
+    assert "event-block" in ci.betting_metrics.note.lower()
 
 
-def test_contract_is_immutable(contract):
-    with pytest.raises(Exception):
+def test_strict_ucb_bound_is_strictly_below(contract):
+    gate = contract.go_live_gates.moneyline.holdout_2025_event_block_90pct_ucb_delta_log_loss
+    assert gate.comparison is BoundComparison.LT
+    assert gate.strict_upper_bound == 0.02
+    assert holdout_ucb_delta_log_loss_passes(0.019999, contract) is True
+    assert holdout_ucb_delta_log_loss_passes(0.02, contract) is False
+    assert holdout_ucb_delta_log_loss_passes(0.021, contract) is False
+    assert contract.go_live_gates.moneyline.ece_max == 0.08
+
+
+def test_contract_field_assignment_raises_validation_error(contract):
+    with pytest.raises(ValidationError):
         contract.contract_version = "9.9.9"  # type: ignore[misc]
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         contract.splits.holdout.locked = False  # type: ignore[misc]
 
 
-def test_normal_load_does_not_mutate_contract_file(tmp_path: Path):
-    src = contract_path()
-    copy = tmp_path / "dwcs_v1.json"
-    original = src.read_bytes()
-    copy.write_bytes(original)
-    loaded = load_evaluation_contract(path=copy)
-    assert loaded.contract_version == EXPECTED_CONTRACT_VERSION
-    assert copy.read_bytes() == original
+def test_nested_sequence_mutation_raises(contract):
+    seasons = contract.splits.development.seasons
+    assert isinstance(seasons, tuple)
+    with pytest.raises(AttributeError):
+        seasons.append(2026)  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        seasons[0] = 2099  # type: ignore[index]
+    metrics = contract.metrics.betting_priced_only
+    with pytest.raises(AttributeError):
+        metrics.append(BettingMetric.CLV)  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        metrics[0] = BettingMetric.CLV  # type: ignore[index]
+
+
+def test_normal_load_does_not_mutate_contract_file():
+    path = contract_path()
+    original = path.read_bytes()
+    loaded = load_evaluation_contract()
+    assert loaded.content_hash == PINNED_DIGEST_LITERAL
+    assert path.read_bytes() == original
 
 
 def test_schema_mismatch_hard_fails(tmp_path: Path):
-    payload = json.loads(contract_path().read_text(encoding="utf-8"))
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
     payload["schema_version"] = 999
     path = tmp_path / "bad_schema.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ContractSchemaMismatch):
-        load_evaluation_contract(path=path)
+        load_evaluation_contract(path=path, enforce_pinned_digest=False)
 
 
 def test_version_mismatch_hard_fails(tmp_path: Path):
-    payload = json.loads(contract_path().read_text(encoding="utf-8"))
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
     payload["contract_version"] = "0.0.0-wrong"
     path = tmp_path / "bad_version.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ContractVersionMismatch):
-        load_evaluation_contract(path=path)
+        load_evaluation_contract(path=path, enforce_pinned_digest=False)
 
 
-def test_hash_mismatch_on_tampering_hard_fails(tmp_path: Path):
-    payload = json.loads(contract_path().read_text(encoding="utf-8"))
-    good_hash = compute_contract_hash(payload)
-    payload["description"] = "tampered"
-    path = tmp_path / "tampered.json"
+def test_path_load_with_same_version_but_altered_content_fails_pinned_digest(tmp_path: Path):
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
+    payload["description"] = "altered"
+    path = tmp_path / "altered.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ContractHashMismatch):
-        load_evaluation_contract(path=path, expected_hash=good_hash)
+        load_evaluation_contract(path=path)
 
 
 def test_invalid_payload_hard_fails(tmp_path: Path):
     path = tmp_path / "invalid.json"
     path.write_text(json.dumps({"schema_version": 1, "contract_id": CONTRACT_ID}), encoding="utf-8")
     with pytest.raises((ContractVersionMismatch, ContractValidationError)):
-        load_evaluation_contract(path=path)
+        load_evaluation_contract(path=path, enforce_pinned_digest=False)
 
 
-def test_content_hash_is_stable_for_canonical_payload():
-    payload = json.loads(contract_path().read_text(encoding="utf-8"))
-    assert compute_contract_hash(payload) == compute_contract_hash(payload)
-    loaded = load_evaluation_contract(expected_hash=compute_contract_hash(payload))
-    assert loaded.content_hash == compute_contract_hash(payload)
+def test_protocol_reject_unlocked_holdout(tmp_path: Path):
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
+    payload["splits"]["holdout"]["locked"] = False
+    # Keep hash check off so protocol validation is the failure mode under test.
+    path = tmp_path / "unlocked_holdout.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ContractValidationError):
+        load_evaluation_contract(path=path, enforce_pinned_digest=False)
+
+
+def test_compute_hash_helper_matches_pinned_literal_for_committed_file():
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
+    # Compare helper output to the literal constant, not to a second in-test hash.
+    assert compute_contract_hash(payload) == PINNED_DIGEST_LITERAL

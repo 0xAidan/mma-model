@@ -57,7 +57,11 @@ here in DWCS-001.
    CLV require timestamped observed or user-recorded prices; price-target-only rows
    never receive synthetic betting performance.
 9. At most one official pick per matchup; otherwise `No bet`.
-10. Config hashes from `config/` are stamped on outputs; evaluation contract is immutable to normal model runs.
+10. Config hashes from `config/` are stamped on outputs; evaluation contract is
+    immutable to normal model runs. Authoritative contract bytes ship inside the
+    package (`mma_model.evaluation`); `config/evaluation/dwcs_v1.json` is the
+    plan-visible symlink to that same file. Default loads always verify
+    `PINNED_CONTRACT_HASH`.
 
 ## Known current defects (documented, not fixed here)
 

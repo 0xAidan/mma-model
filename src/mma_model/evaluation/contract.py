@@ -1,25 +1,63 @@
 """Strict loader for the frozen DWCS evaluation contract (DWCS-001).
 
-Normal model runs must load this contract read-only. Version, schema, and hash
-mismatches hard-fail so later evaluators cannot silently drift.
+The authoritative contract bytes live in package data
+(`mma_model/evaluation/dwcs_v1.json`). The plan-visible path
+`config/evaluation/dwcs_v1.json` is a symlink to that same file in the
+checkout so there is one source of truth and no silent duplicate drift.
+
+Default loads always verify the canonical SHA-256 digest pinned in
+``PINNED_CONTRACT_HASH``. Content changes require updating both
+``contract_version`` and ``PINNED_CONTRACT_HASH``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import datetime
+from enum import StrEnum
+from importlib import resources
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Final, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from mma_model.config import get_settings
 
-CONTRACT_FILENAME = "dwcs_v1.json"
-CONTRACT_ID = "dwcs_evaluation"
-EXPECTED_SCHEMA_VERSION = 1
-EXPECTED_CONTRACT_VERSION = "1.0.0"
+CONTRACT_FILENAME: Final = "dwcs_v1.json"
+CONTRACT_ID: Final = "dwcs_evaluation"
+EXPECTED_SCHEMA_VERSION: Final = 1
+EXPECTED_CONTRACT_VERSION: Final = "1.0.1"
+# Canonical SHA-256 of config/evaluation/dwcs_v1.json (== package data bytes).
+# Update only together with an intentional contract_version bump.
+PINNED_CONTRACT_HASH: Final = (
+    "af0ad518a6417ac7d67e5f56fe836ab58afe55d8ac70813bf6045307ea6fb2cf"
+)
+
+REQUIRED_DEVELOPMENT_SEASONS: Final[tuple[int, ...]] = (
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+)
+REQUIRED_VALIDATION_SEASONS: Final[tuple[int, ...]] = (2024,)
+REQUIRED_HOLDOUT_SEASONS: Final[tuple[int, ...]] = (2025,)
+REQUIRED_INTERVAL_LEVELS: Final[tuple[float, ...]] = (0.9, 0.95)
+
+FAIR_DECIMAL_ODDS_FORMULA: Final = "1 / p50"
+ACTIONABLE_DECIMAL_PRICE_FORMULA: Final = "max(1 / p25, 1.05 / p50)"
+STRONG_VALUE_DECIMAL_PRICE_FORMULA: Final = "max(1 / p25, 1.10 / p50)"
 
 
 class EvaluationContractError(Exception):
@@ -27,11 +65,11 @@ class EvaluationContractError(Exception):
 
 
 class ContractValidationError(EvaluationContractError):
-    """Contract JSON failed schema validation."""
+    """Contract JSON failed schema or protocol validation."""
 
 
 class ContractVersionMismatch(EvaluationContractError):
-    """Contract version did not match the expected frozen version."""
+    """Contract version or id did not match the expected frozen identity."""
 
 
 class ContractSchemaMismatch(EvaluationContractError):
@@ -39,7 +77,102 @@ class ContractSchemaMismatch(EvaluationContractError):
 
 
 class ContractHashMismatch(EvaluationContractError):
-    """Contract content hash did not match the expected digest."""
+    """Contract content hash did not match the pinned digest."""
+
+
+class SplitGrouping(StrEnum):
+    EVENT_CARD = "event_card"
+
+
+class OuterFold(StrEnum):
+    ROLLING_ORIGIN_ONE_CARD = "rolling_origin_one_card_at_a_time"
+
+
+class ReportUniverse(StrEnum):
+    ALL_DWCS = "all_dwcs"
+    STANDARD_ONLY = "standard_only"
+
+
+class TerminalAtom(StrEnum):
+    A_KO_TKO = "a_ko_tko"
+    A_SUBMISSION = "a_submission"
+    A_OTHER_STOPPAGE = "a_other_stoppage"
+    A_DECISION = "a_decision"
+    B_KO_TKO = "b_ko_tko"
+    B_SUBMISSION = "b_submission"
+    B_OTHER_STOPPAGE = "b_other_stoppage"
+    B_DECISION = "b_decision"
+    DRAW = "draw"
+
+
+class SettlementOnlyLabel(StrEnum):
+    NO_CONTEST = "no_contest"
+    VOID = "void"
+
+
+class BaselineM0(StrEnum):
+    FIFTY_FIFTY = "fifty_fifty"
+    SEQUENTIAL_RATING = "sequential_rating"
+    NO_VIG_MARKET = "no_vig_market"
+
+
+class BaselineM1(StrEnum):
+    RIDGE_LOGISTIC = "ridge_logistic_moneyline"
+
+
+class OutcomeMetric(StrEnum):
+    JOINT_LOG_LOSS = "joint_log_loss"
+    MARKET_LOG_LOSS = "market_log_loss"
+    BRIER = "brier"
+    CALIBRATION_INTERCEPT = "calibration_intercept"
+    CALIBRATION_SLOPE = "calibration_slope"
+    RELIABILITY_BINS = "reliability_bins"
+    ECE = "ece"
+    ACCURACY_DESCRIPTIVE_ONLY = "accuracy_descriptive_only"
+    SKILL_VS_EACH_BASELINE = "skill_vs_each_baseline"
+
+
+class BettingMetric(StrEnum):
+    QUALIFYING_BETS = "qualifying_bets"
+    TURNOVER = "turnover"
+    FLAT_1_UNIT_ROI = "flat_1_unit_roi"
+    QUARTER_KELLY_ROI = "quarter_kelly_roi_capped_at_1_percent_bankroll"
+    CLV = "clv"
+    MAXIMUM_DRAWDOWN = "maximum_drawdown"
+    LONGEST_LOSING_RUN = "longest_losing_run"
+    BY_MARKET_SPLITS = "by_market_splits"
+    BY_SEASON_SPLITS = "by_season_splits"
+
+
+class SelectionMetric(StrEnum):
+    AVAILABILITY = "availability"
+    ABSTENTION_RATE = "abstention_rate"
+
+
+class PricedRowsRequire(StrEnum):
+    TIMESTAMPED_OBSERVED_OR_USER_RECORDED = "timestamped_observed_or_user_recorded_price"
+
+
+class BootstrapUnit(StrEnum):
+    EVENT_BLOCK = "event_block"
+
+
+class RankConfirmedBy(StrEnum):
+    HIGHEST_P25_EV = "highest_p25_ev"
+
+
+class RecommendationClass(StrEnum):
+    CONFIRMED_VALUE = "confirmed_value"
+    PRICE_TARGET = "price_target"
+    NO_BET = "no_bet"
+
+
+class FailedFamilyStatus(StrEnum):
+    EXPERIMENTAL = "experimental"
+
+
+class BoundComparison(StrEnum):
+    LT = "lt"
 
 
 class _FrozenModel(BaseModel):
@@ -57,12 +190,12 @@ class UniverseCounts(_FrozenModel):
 
 
 class BrazilUniverse(UniverseCounts):
-    series_variant: str
+    series_variant: Literal["dwcs_brazil"]
     year: int
 
 
 class UniverseSpec(_FrozenModel):
-    series: str
+    series: Literal["dwcs"]
     seasons: SeasonBounds
     all_dwcs: UniverseCounts
     standard_only: UniverseCounts
@@ -70,13 +203,20 @@ class UniverseSpec(_FrozenModel):
 
 
 class SplitWindow(_FrozenModel):
-    seasons: list[int]
+    seasons: tuple[int, ...]
     locked: bool
+
+    @field_validator("seasons", mode="before")
+    @classmethod
+    def _tupleize_seasons(cls, value: Any) -> tuple[int, ...]:
+        if isinstance(value, list):
+            return tuple(int(v) for v in value)
+        return cast(tuple[int, ...], value)
 
 
 class SplitsSpec(_FrozenModel):
-    grouping: str
-    outer_fold: str
+    grouping: SplitGrouping
+    outer_fold: OuterFold
     target_cards: int
     development: SplitWindow
     validation: SplitWindow
@@ -84,102 +224,152 @@ class SplitsSpec(_FrozenModel):
 
 
 class MutableFactRules(_FrozenModel):
-    effective_at_strictly_before_cutoff: bool
-    observed_at_at_or_before_cutoff: bool
+    effective_at_strictly_before_cutoff: Literal[True]
+    observed_at_at_or_before_cutoff: Literal[True]
 
 
 class PointInTimeSpec(_FrozenModel):
-    prediction_cutoff_minutes_before_scheduled_start: int
-    identical_cutoff_per_card: bool
+    prediction_cutoff_minutes_before_scheduled_start: Literal[60]
+    identical_cutoff_per_card: Literal[True]
     mutable_fact_rules: MutableFactRules
-    forbid_same_card_results: bool
-    forbid_later_corrections_before_adjudication: bool
-    forbid_current_fighter_aggregates: bool
-    forbid_post_cutoff_odds_snapshots: bool
-    proxy_scheduled_start_excludes_exact_closing_line_analysis: bool
+    forbid_same_card_results: Literal[True]
+    forbid_later_corrections_before_adjudication: Literal[True]
+    forbid_current_fighter_aggregates: Literal[True]
+    forbid_post_cutoff_odds_snapshots: Literal[True]
+    proxy_scheduled_start_excludes_exact_closing_line_analysis: Literal[True]
 
 
 class SensitivitySpec(_FrozenModel):
-    report_universes: list[str]
+    report_universes: tuple[ReportUniverse, ...]
+
+    @field_validator("report_universes", mode="before")
+    @classmethod
+    def _tupleize(cls, value: Any) -> tuple[Any, ...]:
+        return tuple(value)
 
 
 class BaselineSpec(_FrozenModel):
-    M0: list[str]
-    M1: str
+    M0: tuple[BaselineM0, ...]
+    M1: BaselineM1
+
+    @field_validator("M0", mode="before")
+    @classmethod
+    def _tupleize_m0(cls, value: Any) -> tuple[Any, ...]:
+        return tuple(value)
 
 
 class LabelsSpec(_FrozenModel):
-    terminal_atoms: list[str]
-    settlement_only_excluded_from_win_fitting: list[str]
-    half_round_intervals_for_three_round_bout: int
+    terminal_atoms: tuple[TerminalAtom, ...]
+    settlement_only_excluded_from_win_fitting: tuple[SettlementOnlyLabel, ...]
+    half_round_intervals_for_three_round_bout: Literal[6]
     baselines: BaselineSpec
+
+    @field_validator("terminal_atoms", "settlement_only_excluded_from_win_fitting", mode="before")
+    @classmethod
+    def _tupleize(cls, value: Any) -> tuple[Any, ...]:
+        return tuple(value)
 
 
 class MetricsSpec(_FrozenModel):
-    outcome: list[str]
-    betting_priced_only: list[str]
-    selection: list[str]
-    priced_rows_require: str
-    price_target_rows_never_receive_synthetic_betting_performance: bool
+    outcome: tuple[OutcomeMetric, ...]
+    betting_priced_only: tuple[BettingMetric, ...]
+    selection: tuple[SelectionMetric, ...]
+    priced_rows_require: PricedRowsRequire
+    price_target_rows_never_receive_synthetic_betting_performance: Literal[True]
+
+    @field_validator("outcome", "betting_priced_only", "selection", mode="before")
+    @classmethod
+    def _tupleize(cls, value: Any) -> tuple[Any, ...]:
+        return tuple(value)
+
+
+class IntervalBandSpec(_FrozenModel):
+    bootstrap_unit: BootstrapUnit
+    interval_levels: tuple[float, ...]
+    note: str | None = None
+
+    @field_validator("interval_levels", mode="before")
+    @classmethod
+    def _tupleize_levels(cls, value: Any) -> tuple[float, ...]:
+        return tuple(float(v) for v in value)
 
 
 class ConfidenceIntervalsSpec(_FrozenModel):
-    bootstrap_refits: int
-    bootstrap_unit: str
-    levels: list[float]
+    bootstrap_refits: Literal[200]
+    bootstrap_unit: BootstrapUnit
+    probability_and_ev: IntervalBandSpec
+    betting_metrics: IntervalBandSpec
 
 
 class RecommendationSpec(_FrozenModel):
-    max_confirmed_value_markets_per_matchup: int
-    rank_confirmed_by: str
-    emit_no_bet_when_gates_fail: bool
-    fair_decimal_odds: str
-    actionable_ev_target: float
-    strong_value_ev_target: float
-    actionable_decimal_price: str
-    strong_value_decimal_price: str
-    confirmed_value_min_prob_ev_positive: float
-    exact_round_actionable_ev_target: float
-    exact_round_min_prob_ev_positive: float
-    classifications: list[str]
-    unpriced_target_is_not_best_available_market: bool
-    american_odds_renderer_expresses_or_better: bool
+    max_confirmed_value_markets_per_matchup: Literal[1]
+    rank_confirmed_by: RankConfirmedBy
+    emit_no_bet_when_gates_fail: Literal[True]
+    fair_decimal_odds: Literal["1 / p50"]
+    actionable_ev_target: Literal[0.05]
+    strong_value_ev_target: Literal[0.1]
+    actionable_decimal_price: Literal["max(1 / p25, 1.05 / p50)"]
+    strong_value_decimal_price: Literal["max(1 / p25, 1.10 / p50)"]
+    confirmed_value_min_prob_ev_positive: Literal[0.7]
+    exact_round_actionable_ev_target: Literal[0.1]
+    exact_round_min_prob_ev_positive: Literal[0.75]
+    classifications: tuple[RecommendationClass, ...]
+    unpriced_target_is_not_best_available_market: Literal[True]
+    american_odds_renderer_expresses_or_better: Literal[True]
+
+    @field_validator("classifications", mode="before")
+    @classmethod
+    def _tupleize_classifications(cls, value: Any) -> tuple[Any, ...]:
+        return tuple(value)
 
 
 class PricePolicySpec(_FrozenModel):
-    bookmaker_odds_optional_enrichment: bool
-    missing_bet365_does_not_block_core_guidance: bool
-    sportsbook_agnostic_fair_actionable_strong_value_required: bool
-    exact_ev_roi_clv_require_timestamped_price: bool
-    price_target_only_rows_never_receive_synthetic_betting_performance: bool
+    bookmaker_odds_optional_enrichment: Literal[True]
+    missing_bet365_does_not_block_core_guidance: Literal[True]
+    sportsbook_agnostic_fair_actionable_strong_value_required: Literal[True]
+    exact_ev_roi_clv_require_timestamped_price: Literal[True]
+    price_target_only_rows_never_receive_synthetic_betting_performance: Literal[True]
 
 
 class DataGateSpec(_FrozenModel):
-    target_cards: int
-    target_bouts: int
+    target_cards: Literal[89]
+    target_bouts: Literal[440]
     min_cross_source_reconciliation: float
     min_result_agreement: float
-    max_unresolved_identity_conflicts: int
-    max_leakage_invariant_failures: int
+    max_unresolved_identity_conflicts: Literal[0]
+    max_leakage_invariant_failures: Literal[0]
+
+
+class StrictUpperBound(_FrozenModel):
+    """Numeric gate with an unambiguous comparison operator."""
+
+    strict_upper_bound: float
+    comparison: BoundComparison
+    meaning: str
+
+    def passes(self, value: float) -> bool:
+        if self.comparison is BoundComparison.LT:
+            return value < self.strict_upper_bound
+        raise EvaluationContractError(f"Unsupported comparison: {self.comparison!r}")
 
 
 class MoneylineGateSpec(_FrozenModel):
     max_unexplained_feature_exclusion_rate_decisive: float
-    holdout_2025_delta_log_loss_vs_m1_non_positive: bool
-    holdout_2025_event_block_90pct_ucb_delta_log_loss_max: float
+    holdout_2025_delta_log_loss_vs_m1_must_be_non_positive: Literal[True]
+    holdout_2025_event_block_90pct_ucb_delta_log_loss: StrictUpperBound
     odds_backed_2020_plus_max_worse_than_no_vig_log_loss: float
-    odds_backed_2020_plus_positive_skill_vs_data_only_baseline: bool
+    odds_backed_2020_plus_positive_skill_vs_data_only_baseline: Literal[True]
     calibration_slope_min: float
     calibration_slope_max: float
     calibration_intercept_min: float
     calibration_intercept_max: float
     ece_max: float
     min_qualifying_historical_priced_bets: int
-    positive_mean_same_book_clv: bool
-    clv_90pct_lower_bound_at_or_above_zero: bool
-    positive_flat_stake_roi: bool
+    positive_mean_same_book_clv: Literal[True]
+    clv_90pct_lower_bound_at_or_above_zero: Literal[True]
+    positive_flat_stake_roi: Literal[True]
     max_simulated_bankroll_drawdown_quarter_kelly: float
-    consecutive_live_paper_cards: int
+    consecutive_live_paper_cards: Literal[3]
 
 
 class MarketFamilyGateSpec(_FrozenModel):
@@ -187,8 +377,8 @@ class MarketFamilyGateSpec(_FrozenModel):
     method_min_priced_oos: int
     exact_round_min_priced_oos: int
     exact_round_min_realized_per_active_bucket: int
-    failed_family_status: str
-    failed_family_may_not_emit_confirmed_value_or_price_target: bool
+    failed_family_status: FailedFamilyStatus
+    failed_family_may_not_emit_confirmed_value_or_price_target: Literal[True]
 
 
 class GoLiveGatesSpec(_FrozenModel):
@@ -216,10 +406,113 @@ class EvaluationContract(_FrozenModel):
     go_live_gates: GoLiveGatesSpec
     content_hash: str = Field(description="SHA-256 of canonical contract JSON bytes")
 
+    @model_validator(mode="after")
+    def _validate_protocol_invariants(self) -> EvaluationContract:
+        if self.splits.development.seasons != REQUIRED_DEVELOPMENT_SEASONS:
+            raise ValueError(
+                f"development seasons must be {REQUIRED_DEVELOPMENT_SEASONS}, "
+                f"got {self.splits.development.seasons}"
+            )
+        if self.splits.development.locked:
+            raise ValueError("development split must not be locked")
+        if self.splits.validation.seasons != REQUIRED_VALIDATION_SEASONS:
+            raise ValueError(
+                f"validation seasons must be {REQUIRED_VALIDATION_SEASONS}, "
+                f"got {self.splits.validation.seasons}"
+            )
+        if self.splits.validation.locked:
+            raise ValueError("validation split must not be locked")
+        if self.splits.holdout.seasons != REQUIRED_HOLDOUT_SEASONS:
+            raise ValueError(
+                f"holdout seasons must be {REQUIRED_HOLDOUT_SEASONS}, "
+                f"got {self.splits.holdout.seasons}"
+            )
+        if not self.splits.holdout.locked:
+            raise ValueError("holdout 2025 must be locked")
+        if self.splits.grouping is not SplitGrouping.EVENT_CARD:
+            raise ValueError("splits.grouping must be event_card")
+        if self.splits.outer_fold is not OuterFold.ROLLING_ORIGIN_ONE_CARD:
+            raise ValueError("splits.outer_fold must be rolling_origin_one_card_at_a_time")
+        if self.splits.target_cards != 89:
+            raise ValueError("splits.target_cards must be 89")
 
-def contract_path(*, root: Path | None = None) -> Path:
+        if set(self.sensitivity.report_universes) != {
+            ReportUniverse.ALL_DWCS,
+            ReportUniverse.STANDARD_ONLY,
+        }:
+            raise ValueError("sensitivity.report_universes must be all_dwcs and standard_only")
+
+        if OutcomeMetric.ECE not in self.metrics.outcome:
+            raise ValueError("metrics.outcome must include ece")
+        required_betting = set(BettingMetric)
+        if set(self.metrics.betting_priced_only) != required_betting:
+            raise ValueError("metrics.betting_priced_only must match the frozen betting metric set")
+        if (
+            self.metrics.priced_rows_require
+            is not PricedRowsRequire.TIMESTAMPED_OBSERVED_OR_USER_RECORDED
+        ):
+            raise ValueError("priced rows must require timestamped observed/user-recorded prices")
+
+        ci = self.confidence_intervals
+        if ci.bootstrap_unit is not BootstrapUnit.EVENT_BLOCK:
+            raise ValueError("confidence_intervals.bootstrap_unit must be event_block")
+        for band_name, band in (
+            ("probability_and_ev", ci.probability_and_ev),
+            ("betting_metrics", ci.betting_metrics),
+        ):
+            if band.bootstrap_unit is not BootstrapUnit.EVENT_BLOCK:
+                raise ValueError(f"{band_name}.bootstrap_unit must be event_block")
+            if band.interval_levels != REQUIRED_INTERVAL_LEVELS:
+                raise ValueError(
+                    f"{band_name}.interval_levels must be {REQUIRED_INTERVAL_LEVELS}, "
+                    f"got {band.interval_levels}"
+                )
+
+        rec = self.recommendation
+        if set(rec.classifications) != set(RecommendationClass):
+            raise ValueError("recommendation.classifications must be the full frozen set")
+        if rec.exact_round_actionable_ev_target != rec.strong_value_ev_target:
+            raise ValueError("exact-round actionable EV target must equal strong_value_ev_target")
+        if abs((1.0 + rec.actionable_ev_target) - 1.05) > 1e-12:
+            raise ValueError("actionable_ev_target must be consistent with 1.05 / p50")
+        if abs((1.0 + rec.strong_value_ev_target) - 1.10) > 1e-12:
+            raise ValueError("strong_value_ev_target must be consistent with 1.10 / p50")
+
+        bound = self.go_live_gates.moneyline.holdout_2025_event_block_90pct_ucb_delta_log_loss
+        if bound.comparison is not BoundComparison.LT:
+            raise ValueError("holdout UCB comparison must be strict lt")
+        if bound.strict_upper_bound != 0.02:
+            raise ValueError("holdout UCB strict_upper_bound must be 0.02")
+        if self.go_live_gates.moneyline.ece_max != 0.08:
+            raise ValueError("moneyline.ece_max must be 0.08")
+
+        return self
+
+
+def package_contract_resource_path() -> Path:
+    """Filesystem path to the packaged authoritative contract resource."""
+    root = resources.files("mma_model.evaluation")
+    resource = root.joinpath(CONTRACT_FILENAME)
+    with resources.as_file(resource) as path:
+        return Path(path)
+
+
+def visible_contract_path(*, root: Path | None = None) -> Path:
+    """Plan-visible checkout path (`config/evaluation/dwcs_v1.json`)."""
     base = root if root is not None else get_settings().project_root
     return base / "config" / "evaluation" / CONTRACT_FILENAME
+
+
+def contract_path(*, root: Path | None = None) -> Path:
+    """Resolve the contract path for tooling.
+
+    Prefer the plan-visible checkout path when present (symlink to package data);
+    otherwise use the packaged resource (non-editable / wheel installs).
+    """
+    visible = visible_contract_path(root=root)
+    if visible.exists():
+        return visible
+    return package_contract_resource_path()
 
 
 def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
@@ -247,6 +540,24 @@ def _read_payload(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _read_package_payload() -> dict[str, Any]:
+    root = resources.files("mma_model.evaluation")
+    resource = root.joinpath(CONTRACT_FILENAME)
+    try:
+        raw = resource.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, AttributeError) as exc:
+        raise EvaluationContractError(
+            f"Unable to read packaged evaluation contract resource {CONTRACT_FILENAME}"
+        ) from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ContractValidationError("Packaged evaluation contract is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ContractValidationError("Evaluation contract root must be a JSON object")
+    return payload
+
+
 def load_evaluation_contract(
     *,
     path: Path | None = None,
@@ -254,15 +565,22 @@ def load_evaluation_contract(
     expected_contract_version: str = EXPECTED_CONTRACT_VERSION,
     expected_contract_id: str = CONTRACT_ID,
     expected_hash: str | None = None,
+    enforce_pinned_digest: bool = True,
     root: Path | None = None,
 ) -> EvaluationContract:
     """Load and validate the frozen evaluation contract.
 
-    Hard-fails on schema validation errors and on schema/version/id/hash mismatch.
-    Returns a frozen pydantic model; callers cannot mutate fields in place.
+    Default / canonical loads always verify ``PINNED_CONTRACT_HASH``.
+    ``enforce_pinned_digest=False`` is for deliberate negative tests only.
     """
-    resolved = path if path is not None else contract_path(root=root)
-    payload = _read_payload(resolved)
+    if path is not None:
+        payload = _read_payload(path)
+    elif root is not None:
+        payload = _read_payload(contract_path(root=root))
+    else:
+        # Canonical default: packaged resource (works for wheel and editable installs).
+        payload = _read_package_payload()
+
     content_hash = compute_contract_hash(payload)
 
     schema_version = payload.get("schema_version")
@@ -282,6 +600,12 @@ def load_evaluation_contract(
     if contract_id != expected_contract_id:
         raise ContractVersionMismatch(
             f"contract_id mismatch: got {contract_id!r}, expected {expected_contract_id!r}"
+        )
+
+    if enforce_pinned_digest and content_hash != PINNED_CONTRACT_HASH:
+        raise ContractHashMismatch(
+            f"content hash mismatch versus pinned digest: got {content_hash}, "
+            f"expected {PINNED_CONTRACT_HASH}"
         )
 
     if expected_hash is not None and content_hash != expected_hash:
@@ -325,8 +649,12 @@ def mutable_fact_allowed_at_cutoff(
     require_observed_at_or_before: bool = True,
 ) -> bool:
     """Point-in-time gate for mutable facts relative to a card cutoff."""
-    if require_effective_strictly_before and not (effective_at < cutoff):
-        return False
-    if require_observed_at_or_before and not (observed_at <= cutoff):
-        return False
-    return True
+    effective_ok = (not require_effective_strictly_before) or (effective_at < cutoff)
+    observed_ok = (not require_observed_at_or_before) or (observed_at <= cutoff)
+    return effective_ok and observed_ok
+
+
+def holdout_ucb_delta_log_loss_passes(ucb: float, contract: EvaluationContract) -> bool:
+    """Apply the strict holdout UCB gate (ucb < +0.02)."""
+    gate = contract.go_live_gates.moneyline.holdout_2025_event_block_90pct_ucb_delta_log_loss
+    return gate.passes(ucb)

@@ -8,29 +8,45 @@ with price-target-only rows.
 
 | Field | Value |
 |-------|--------|
-| **File** | `config/evaluation/dwcs_v1.json` |
+| **Authoritative bytes** | Packaged resource `mma_model/evaluation/dwcs_v1.json` |
+| **Plan-visible path** | `config/evaluation/dwcs_v1.json` (symlink to the packaged file in checkout) |
 | **Loader** | `mma_model.evaluation.load_evaluation_contract` |
 | **Schema version** | `1` |
-| **Contract id / version** | `dwcs_evaluation` / `1.0.0` |
-| **Mutability** | Read-only for normal model runs; frozen pydantic model at runtime |
-| **Hash** | SHA-256 of canonical JSON (`sort_keys`, compact separators); stamped on evaluator outputs later |
-| **Failure mode** | Schema / version / id / hash mismatch **hard-fails** |
+| **Contract id / version** | `dwcs_evaluation` / `1.0.1` |
+| **Mutability** | Frozen pydantic models; nested sequences are tuples (no append/item-assign) |
+| **Pinned digest** | `PINNED_CONTRACT_HASH` in `contract.py`; default loads **always** verify it |
+| **Hash algorithm** | SHA-256 of canonical JSON (`sort_keys`, compact separators) |
+| **Failure mode** | Schema / version / id / protocol / pinned-hash mismatch **hard-fails** |
+
+Content changes require bumping `contract_version` **and** updating
+`PINNED_CONTRACT_HASH`. There is one authoritative byte source; the visible
+config path must resolve to the same bytes (enforced by tests). Wheel installs
+load the packaged resource via `importlib.resources`.
 
 ### Locked protocol highlights
 
 - Universes: all-DWCS 89 cards / 440 bouts; standard-only 86 / 425; Brazil 3 / 15.
-- Splits: card-grouped rolling-origin; development 2017–2023; validation 2024;
-  **locked holdout 2025**.
-- Prediction cutoff: scheduled start minus **60 minutes**; identical cutoff for every
-  bout on a card.
+- Splits: **event-card** rolling-origin; development **2017–2023**; validation
+  **2024**; **locked holdout 2025**.
+- Prediction cutoff: scheduled start minus **60 minutes**; identical cutoff for
+  every bout on a card.
 - Mutable facts require `effective_at < cutoff` and `observed_at <= cutoff`.
 - Outcome metrics include joint/market log loss, Brier, calibration
-  intercept/slope, reliability bins, descriptive accuracy, skill vs baselines.
+  intercept/slope, reliability bins, **ECE**, descriptive accuracy, skill vs
+  baselines.
 - Betting metrics (ROI, CLV, drawdown, …) apply only to rows with timestamped
   observed or user-recorded prices.
 - Price-target-only rows never receive synthetic betting performance.
 - Bookmaker odds are optional enrichment; missing Bet365 does not block core
   fair / actionable / strong-value guidance.
+
+### Confidence intervals (event-block)
+
+- Offline bootstrap refits: **200**, unit **`event_block`** (not fight-iid).
+- Probability / EV intervals: event-block at **90%** and **95%**.
+- Betting-metric intervals (ROI/CLV/drawdown/etc.): event-block at **90%** and
+  **95%**, encoded separately under
+  `confidence_intervals.betting_metrics`.
 
 ### Recommendation price formulas (encoded)
 
@@ -40,6 +56,13 @@ with price-target-only rows.
 - Confirmed-value gate (when a timestamped offer exists): offered price meets
   actionable threshold and bootstrap `P(EV > 0) ≥ 0.70` (exact round uses 0.10 EV
   target and `≥ 0.75`).
+
+### Strict holdout UCB gate
+
+`go_live_gates.moneyline.holdout_2025_event_block_90pct_ucb_delta_log_loss` uses
+`comparison: "lt"` with `strict_upper_bound: 0.02`. Pass only when the
+event-block 90% UCB on delta log loss versus M1 is **strictly below** `+0.02`
+(`ucb < 0.02`). Equality at `0.02` fails.
 
 ## Existing prototype stores (retained, not yet DWCS-canonical)
 
