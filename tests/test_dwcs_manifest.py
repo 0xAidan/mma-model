@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "spikes" / "build_dwcs_manifest.py"
 SOURCE_DIR = REPO_ROOT / "tests" / "fixtures" / "manifests" / "source"
 MINI_DIR = REPO_ROOT / "tests" / "fixtures" / "manifests" / "mini"
 MANIFEST_DIR = REPO_ROOT / "data" / "manifests"
+EXPECTED_PATH = REPO_ROOT / "config" / "manifests" / "dwcs_expected_universe_v1.json"
 
 
 def _load_module() -> Any:
@@ -26,11 +29,23 @@ def _load_module() -> Any:
     return module
 
 
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 @pytest.fixture(scope="module")
 def build() -> Any:
     if not SCRIPT_PATH.is_file():
         pytest.fail(f"missing build script: {SCRIPT_PATH}")
     return _load_module()
+
+
+@pytest.fixture(scope="module")
+def expected(build: Any) -> dict[str, Any]:
+    return build.load_expected_universe(EXPECTED_PATH)
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +66,16 @@ def test_normalize_and_canonical_pair_are_deterministic(build: Any) -> None:
     assert build.normalize_fighter_name("José Mauro") == "jose mauro"
     assert build.canonical_participant_pair(["Bravo", "Alpha"]) == ("alpha", "bravo")
     assert build.canonical_participant_pair(["Alpha", "Bravo"]) == ("alpha", "bravo")
+
+
+def test_pinned_expected_universe_is_single_source(build: Any, expected: dict[str, Any]) -> None:
+    digest = build.compute_expected_universe_hash(expected)
+    assert digest == build.PINNED_EXPECTED_UNIVERSE_HASH
+    assert expected["contract_id"] == "dwcs_expected_universe"
+    assert expected["cards"]["all"] == 89
+    assert expected["bouts"]["all"] == 440
+    with pytest.raises(build.ExpectedUniverseError, match="hash mismatch"):
+        build.load_expected_universe(EXPECTED_PATH, expected_hash="0" * 64)
 
 
 def test_duplicate_pair_within_event_raises(build: Any) -> None:
@@ -98,6 +123,7 @@ def test_mini_universe_draw_nc_reversal_cancellation_replacement(build: Any) -> 
     assert reversed_bout["event_night_result"]["class"] == "decisive"
     assert reversed_bout["current_result"]["class"] == "no_contest"
     assert reversed_bout["version_state"] == "reversed_to_no_contest"
+    assert reversed_bout["reconciliation_provenance"]["citation_only"] is True
 
     standard_event = next(e for e in event_rows if e["espn_event_id"] == "mini-e1")
     kinds = {row["kind"] for row in standard_event["cancellations_replacements"]}
@@ -109,48 +135,154 @@ def test_mini_universe_draw_nc_reversal_cancellation_replacement(build: Any) -> 
     assert "bouts.all" in paths
 
 
-def test_full_universe_counts_from_committed_fixtures(
-    build: Any, built_universe: Path
-) -> None:
-    counts = json.loads((built_universe / "dwcs_counts_v1.json").read_text(encoding="utf-8"))
-    mismatches = json.loads(
-        (built_universe / "dwcs_mismatches_v1.json").read_text(encoding="utf-8")
-    )
-    events = build.read_jsonl(built_universe / "dwcs_events_v1.jsonl")
-    bouts = build.read_jsonl(built_universe / "dwcs_bouts_v1.jsonl")
-
-    assert mismatches["ok"] is True
-    assert counts["cards"]["all"] == build.EXPECTED_ALL_CARDS
-    assert counts["bouts"]["all"] == build.EXPECTED_ALL_BOUTS
-    assert counts["cards"]["standard"] == build.EXPECTED_STANDARD_CARDS
-    assert counts["bouts"]["standard"] == build.EXPECTED_STANDARD_BOUTS
-    assert counts["event_night_results"] == build.EXPECTED_EVENT_NIGHT
-    assert counts["current_results"] == build.EXPECTED_CURRENT
-    assert len(events) == build.EXPECTED_ALL_CARDS
-    assert len(bouts) == build.EXPECTED_ALL_BOUTS
-
-
-def test_no_duplicate_pairs_and_referential_integrity(
-    build: Any, built_universe: Path
+def test_independent_full_universe_counters(
+    build: Any, built_universe: Path, expected: dict[str, Any]
 ) -> None:
     events = build.read_jsonl(built_universe / "dwcs_events_v1.jsonl")
     bouts = build.read_jsonl(built_universe / "dwcs_bouts_v1.jsonl")
-    event_ids = {row["event_id"] for row in events}
+
+    card_variants = Counter(str(e["series_variant"]) for e in events)
+    bout_variants = Counter(str(b["series_variant"]) for b in bouts)
+    event_night = Counter(str(b["event_night_result"]["class"]) for b in bouts)
+    current = Counter(str(b["current_result"]["class"]) for b in bouts)
+    version_states = Counter(str(b["version_state"]) for b in bouts)
+
+    assert len(events) == expected["cards"]["all"]
+    assert len(bouts) == expected["bouts"]["all"]
+    assert card_variants["standard"] == expected["cards"]["standard"]
+    assert card_variants["brazil"] == expected["cards"]["brazil"]
+    assert bout_variants["standard"] == expected["bouts"]["standard"]
+    assert bout_variants["brazil"] == expected["bouts"]["brazil"]
+    assert dict(event_night) == expected["event_night_results"]
+    assert dict(current) == expected["current_results"]
+    assert dict(version_states) == expected["version_states"]
+
+    season_cards: dict[str, Counter[str]] = defaultdict(Counter)
+    for event in events:
+        season_cards[str(event["calendar_year"])][str(event["series_variant"])] += 1
+    for year, season_expected in expected["season_cards"].items():
+        assert season_cards[year]["standard"] == season_expected["standard"]
+        assert season_cards[year]["brazil"] == season_expected["brazil"]
+
+    event_ids = {e["event_id"] for e in events}
+    bout_ids = [b["bout_id"] for b in bouts]
     assert len(event_ids) == len(events)
-    assert len({row["bout_id"] for row in bouts}) == len(bouts)
+    assert len(set(bout_ids)) == len(bout_ids)
 
-    pairs_by_event: dict[str, set[tuple[str, str]]] = {}
+    pairs_by_event: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for bout in bouts:
         assert bout["event_id"] in event_ids
         assert bout["ufcstats_bout_id"] is None
         assert bout["publication_timestamp"] is None
-        pair = tuple(bout["canonical_participant_pair"])
-        bucket = pairs_by_event.setdefault(bout["event_id"], set())
-        assert pair not in bucket
-        bucket.add(pair)
-        left = bout["participants"][0]["normalized_name"]
-        right = bout["participants"][1]["normalized_name"]
-        assert left <= right
+        pair = (bout["canonical_participant_pair"][0], bout["canonical_participant_pair"][1])
+        assert pair not in pairs_by_event[bout["event_id"]]
+        pairs_by_event[bout["event_id"]].add(pair)
+        assert (
+            bout["participants"][0]["normalized_name"]
+            <= bout["participants"][1]["normalized_name"]
+        )
+
+
+def test_corruption_drops_event_fails_verify(build: Any, tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(SOURCE_DIR, source)
+    events = build.read_jsonl(source / build.EVENTS_FACTS_NAME)
+    _write_jsonl(source / build.EVENTS_FACTS_NAME, events[1:])
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match="verification failed"):
+        build.run_build(
+            source_dir=source,
+            out_dir=out,
+            through_year=2025,
+            refresh_espn=False,
+            verify=True,
+            built_at="2026-08-11T00:00:00+00:00",
+        )
+    report = json.loads((out / "dwcs_mismatches_v1.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    paths = {row["path"] for row in report["mismatches"]}
+    assert "cards.all" in paths
+
+
+def test_corruption_mutates_bout_result_fails_verify(build: Any, tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(SOURCE_DIR, source)
+    bouts = build.read_jsonl(source / build.BOUTS_FACTS_NAME)
+    target = next(b for b in bouts if b["current_result_class"] == "decisive")
+    target["current_result_class"] = "no_contest"
+    target["current_result_name"] = "no-contest"
+    target["current_result_display"] = "No Contest"
+    for part in target["participants"]:
+        part["winner"] = False
+    _write_jsonl(source / build.BOUTS_FACTS_NAME, bouts)
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match="verification failed"):
+        build.run_build(
+            source_dir=source,
+            out_dir=out,
+            through_year=2025,
+            refresh_espn=False,
+            verify=True,
+            built_at="2026-08-11T00:00:00+00:00",
+        )
+    report = json.loads((out / "dwcs_mismatches_v1.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    paths = {row["path"] for row in report["mismatches"]}
+    assert "current_results.decisive" in paths or "current_results.no_contest" in paths
+
+
+def test_corruption_removes_recon_fails_verify(build: Any, tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    shutil.copytree(SOURCE_DIR, source)
+    recon = build.read_jsonl(source / build.RECON_FACTS_NAME)
+    # Drop a reversal overlay so event-night collapses toward current NC counts.
+    remaining = [row for row in recon if row["version_state"] != "reversed_to_no_contest"]
+    _write_jsonl(source / build.RECON_FACTS_NAME, remaining)
+    out = tmp_path / "out"
+    with pytest.raises(SystemExit, match="verification failed"):
+        build.run_build(
+            source_dir=source,
+            out_dir=out,
+            through_year=2025,
+            refresh_espn=False,
+            verify=True,
+            built_at="2026-08-11T00:00:00+00:00",
+        )
+    report = json.loads((out / "dwcs_mismatches_v1.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False
+    paths = {row["path"] for row in report["mismatches"]}
+    assert (
+        "event_night_results.decisive" in paths
+        or "version_states.reversed_to_no_contest" in paths
+    )
+
+
+def test_reconciliation_provenance_validated_offline(build: Any) -> None:
+    recon = build.read_jsonl(SOURCE_DIR / build.RECON_FACTS_NAME)
+    build.validate_reconciliation_provenance(recon)
+    for row in recon:
+        assert row["citation_only"] is True
+        assert row["evidence_checked_at"]
+        assert row["evidence_grade"]
+        assert "does not fetch" in row["evidence_limitations"].lower()
+        assert all(build.is_valid_https_url(url) for url in row["evidence_urls"])
+        assert any(item.get("kind") == "contemporaneous_news" for item in row["evidence"])
+
+    bad = dict(recon[0])
+    bad["evidence_urls"] = ["http://insecure.example/x"]
+    with pytest.raises(ValueError, match="invalid evidence_urls"):
+        build.validate_reconciliation_provenance([bad])
+
+
+def test_open_gaps_deferred_to_later_tickets(built_universe: Path) -> None:
+    report = json.loads(
+        (built_universe / "dwcs_mismatches_v1.json").read_text(encoding="utf-8")
+    )
+    by_path = {row["path"]: row for row in report["open_gaps"]}
+    assert "DWCS-103" in by_path["ufc_ufcstats_ids"]["deferred_to"]
+    assert "DWCS-104" in by_path["ufc_ufcstats_ids"]["deferred_to"]
+    assert "DWCS-103" in by_path["full_cancellation_replacement_ledger"]["deferred_to"]
+    assert by_path["ufc_ufcstats_ids"]["severity"] == "incomplete_not_done"
 
 
 def test_deterministic_rerun_is_byte_stable(build: Any, tmp_path: Path) -> None:
@@ -212,8 +344,8 @@ def test_cli_verify_offline(tmp_path: Path) -> None:
 
 def test_source_fixtures_are_minimal_and_secret_free(build: Any) -> None:
     events, bouts, recon, _cancels = build.load_source_bundle(SOURCE_DIR)
-    assert len(events) == build.EXPECTED_ALL_CARDS
-    assert len(bouts) == build.EXPECTED_ALL_BOUTS
+    assert len(events) == 89
+    assert len(bouts) == 440
     assert len(recon) == 9
     blob = json.dumps([events, bouts, recon])
     for fragment in ("api_key", "authorization", "password", "secret"):
@@ -222,6 +354,7 @@ def test_source_fixtures_are_minimal_and_secret_free(build: Any) -> None:
         assert "competitions" not in row
         assert "geoBroadcasts" not in row
         assert "highlights" not in row
+        assert "current_result_class" in row
 
 
 def test_committed_repo_manifests_match_builder_when_present(build: Any) -> None:

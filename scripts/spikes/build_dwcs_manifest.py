@@ -15,6 +15,7 @@ and must never scrape prohibited HTML sources.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -23,7 +24,8 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
+from urllib.parse import urlparse
 
 import httpx
 
@@ -33,6 +35,9 @@ SeriesVariant = Literal["standard", "brazil"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE_DIR = REPO_ROOT / "tests" / "fixtures" / "manifests" / "source"
 DEFAULT_OUT_DIR = REPO_ROOT / "data" / "manifests"
+DEFAULT_EXPECTED_UNIVERSE_PATH = (
+    REPO_ROOT / "config" / "manifests" / "dwcs_expected_universe_v1.json"
+)
 EVENTS_FACTS_NAME = "espn_events_facts_v1.jsonl"
 BOUTS_FACTS_NAME = "espn_bouts_facts_v1.jsonl"
 RECON_FACTS_NAME = "event_night_reconciliations_v1.jsonl"
@@ -42,14 +47,35 @@ MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_ID = "dwcs_universe"
 MANIFEST_VERSION = "1.0.0"
 
-EXPECTED_ALL_CARDS = 89
-EXPECTED_ALL_BOUTS = 440
-EXPECTED_STANDARD_CARDS = 86
-EXPECTED_STANDARD_BOUTS = 425
-EXPECTED_BRAZIL_CARDS = 3
-EXPECTED_BRAZIL_BOUTS = 15
-EXPECTED_EVENT_NIGHT = {"decisive": 438, "draw": 1, "no_contest": 1}
-EXPECTED_CURRENT = {"decisive": 431, "draw": 1, "no_contest": 8}
+EXPECTED_CONTRACT_ID: Final = "dwcs_expected_universe"
+EXPECTED_CONTRACT_VERSION: Final = "1.0.0"
+EXPECTED_SCHEMA_VERSION: Final = 1
+# Canonical JSON digest of config/manifests/dwcs_expected_universe_v1.json.
+# Update only with an intentional contract_version bump.
+PINNED_EXPECTED_UNIVERSE_HASH: Final = (
+    "e27626347016cf9d8a648f405eb3d4808be1a3ccb83ce19bd67c57da01c64c6f"
+)
+
+HTTPS_URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(?::\d+)?(?:/[^\s]*)?$")
+ALLOWED_EVIDENCE_KINDS = frozenset(
+    {
+        "contemporaneous_news",
+        "official_athlete_bio",
+        "official_recap",
+        "commission_notice",
+        "test_fixture",
+    }
+)
+ALLOWED_EVIDENCE_GRADES = frozenset(
+    {
+        "contemporaneous_news",
+        "official_athlete_bio",
+        "official_recap",
+        "commission_notice",
+        "test_fixture",
+        "citation_only_official",
+    }
+)
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
 ESPN_CORE_STATUS = (
@@ -66,6 +92,125 @@ SECRET_KEY_FRAGMENTS = (
     "secret",
     "credential",
 )
+
+
+class ExpectedUniverseError(Exception):
+    """Pinned expected-universe contract failed validation."""
+
+
+def compute_expected_universe_hash(payload: Mapping[str, Any]) -> str:
+    """SHA-256 of canonical JSON for the expected-universe contract."""
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def load_expected_universe(
+    path: Path | None = None,
+    *,
+    expected_hash: str | None = PINNED_EXPECTED_UNIVERSE_HASH,
+) -> dict[str, Any]:
+    """Load the single-source pinned research-target contract."""
+    contract_path = path or DEFAULT_EXPECTED_UNIVERSE_PATH
+    payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ExpectedUniverseError("expected-universe contract must be a JSON object")
+    if payload.get("contract_id") != EXPECTED_CONTRACT_ID:
+        raise ExpectedUniverseError(
+            f"contract_id mismatch: {payload.get('contract_id')!r}"
+        )
+    if payload.get("contract_version") != EXPECTED_CONTRACT_VERSION:
+        raise ExpectedUniverseError(
+            f"contract_version mismatch: {payload.get('contract_version')!r}"
+        )
+    if payload.get("schema_version") != EXPECTED_SCHEMA_VERSION:
+        raise ExpectedUniverseError(
+            f"schema_version mismatch: {payload.get('schema_version')!r}"
+        )
+    digest = compute_expected_universe_hash(payload)
+    if expected_hash is not None and digest != expected_hash:
+        raise ExpectedUniverseError(
+            f"pinned expected-universe hash mismatch: got {digest}, want {expected_hash}"
+        )
+    return payload
+
+
+def is_valid_https_url(url: str) -> bool:
+    """Validate citation URL shape offline (no network fetch)."""
+    if not HTTPS_URL_RE.match(url):
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and bool(parsed.netloc) and "@" not in parsed.netloc
+
+
+def validate_reconciliation_provenance(rows: Sequence[Mapping[str, Any]]) -> None:
+    """Validate citation structure/provenance fields without fetching pages."""
+    for index, row in enumerate(rows, start=1):
+        comp_id = row.get("espn_competition_id")
+        evidence = row.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError(
+                f"reconciliation {comp_id or index}: evidence[] is required"
+            )
+        urls = row.get("evidence_urls")
+        if not isinstance(urls, list) or not urls:
+            raise ValueError(
+                f"reconciliation {comp_id or index}: evidence_urls[] is required"
+            )
+        evidence_url_set = []
+        for item in evidence:
+            if not isinstance(item, Mapping):
+                raise ValueError(
+                    f"reconciliation {comp_id or index}: evidence item must be object"
+                )
+            url = str(item.get("url") or "")
+            kind = str(item.get("kind") or "")
+            if not is_valid_https_url(url):
+                raise ValueError(
+                    f"reconciliation {comp_id or index}: invalid evidence URL {url!r}"
+                )
+            if kind not in ALLOWED_EVIDENCE_KINDS:
+                raise ValueError(
+                    f"reconciliation {comp_id or index}: unsupported evidence kind {kind!r}"
+                )
+            if item.get("citation_only") is not True:
+                raise ValueError(
+                    f"reconciliation {comp_id or index}: evidence.citation_only must be true"
+                )
+            evidence_url_set.append(url)
+        for url in urls:
+            if not isinstance(url, str) or not is_valid_https_url(url):
+                raise ValueError(
+                    f"reconciliation {comp_id or index}: invalid evidence_urls entry {url!r}"
+                )
+        if sorted(evidence_url_set) != sorted(str(u) for u in urls):
+            raise ValueError(
+                f"reconciliation {comp_id or index}: evidence[].url must match evidence_urls"
+            )
+        grade = str(row.get("evidence_grade") or "")
+        if grade not in ALLOWED_EVIDENCE_GRADES:
+            raise ValueError(
+                f"reconciliation {comp_id or index}: unsupported evidence_grade {grade!r}"
+            )
+        if row.get("citation_only") is not True:
+            raise ValueError(
+                f"reconciliation {comp_id or index}: citation_only must be true"
+            )
+        checked_at = str(row.get("evidence_checked_at") or "")
+        if not checked_at:
+            raise ValueError(
+                f"reconciliation {comp_id or index}: evidence_checked_at is required"
+            )
+        limitations = str(row.get("evidence_limitations") or "")
+        if "does not fetch" not in limitations.lower():
+            raise ValueError(
+                f"reconciliation {comp_id or index}: evidence_limitations must state "
+                "that CI does not fetch external pages"
+            )
 
 
 def normalize_fighter_name(name: str) -> str:
@@ -334,10 +479,12 @@ def build_manifests(
     cancellations_replacements: Sequence[Mapping[str, Any]] | None = None,
     through_year: int,
     built_at: str | None = None,
+    expected_universe: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     """Normalize facts into versioned event/bout manifests plus reports."""
     built = built_at or datetime.now(UTC).replace(microsecond=0).isoformat()
     cancel_rows = list(cancellations_replacements or [])
+    validate_reconciliation_provenance(reconciliations)
 
     events_by_id = {str(row["espn_event_id"]): dict(row) for row in events_facts}
     if len(events_by_id) != len(events_facts):
@@ -438,6 +585,7 @@ def build_manifests(
 
         current_class = str(bout.get("current_result_class") or "unknown")
         recon = recon_by_comp.get(espn_competition_id)
+        provenance: dict[str, Any] | None = None
         if recon is not None:
             event_night_class = str(recon.get("event_night_result_class") or "unknown")
             version_state = str(recon.get("version_state") or "documented")
@@ -445,6 +593,13 @@ def build_manifests(
             event_night_winner_name = recon.get("event_night_winner_name")
             evidence_urls = list(recon.get("evidence_urls") or [])
             recon_notes = recon.get("notes")
+            provenance = {
+                "citation_only": True,
+                "evidence_checked_at": recon.get("evidence_checked_at"),
+                "evidence_grade": recon.get("evidence_grade"),
+                "evidence_limitations": recon.get("evidence_limitations"),
+                "evidence": list(recon.get("evidence") or []),
+            }
             # Guard: reconciliation current class must match ESPN current class.
             recon_current = str(recon.get("current_result_class") or "")
             if recon_current and recon_current != current_class:
@@ -470,69 +625,69 @@ def build_manifests(
                     event_night_winner_name = winners[0].get("display_name")
 
         event_row = events_by_id[espn_event_id]
-        bout_manifest.append(
-            {
-                "schema_version": MANIFEST_SCHEMA_VERSION,
-                "manifest_id": MANIFEST_ID,
-                "manifest_version": MANIFEST_VERSION,
-                "bout_id": f"dwcs:bout:espn:{espn_competition_id}",
-                "event_id": f"dwcs:event:espn:{espn_event_id}",
+        bout_row: dict[str, Any] = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "manifest_id": MANIFEST_ID,
+            "manifest_version": MANIFEST_VERSION,
+            "bout_id": f"dwcs:bout:espn:{espn_competition_id}",
+            "event_id": f"dwcs:event:espn:{espn_event_id}",
+            "espn_event_id": espn_event_id,
+            "espn_competition_id": espn_competition_id,
+            "ufcstats_bout_id": None,
+            "series_variant": event_row.get("series_variant"),
+            "calendar_year": event_row.get("calendar_year"),
+            "season_number": event_row.get("season_number"),
+            "week_number": event_row.get("week_number"),
+            "status": "occurred",
+            "occurrence_timestamp": bout.get("occurrence_start"),
+            "occurrence_end_timestamp": bout.get("occurrence_end"),
+            "publication_timestamp": None,
+            "weight_class": bout.get("weight_class"),
+            "participants": [
+                {
+                    "espn_athlete_id": part.get("espn_athlete_id") or None,
+                    "display_name": part.get("display_name"),
+                    "normalized_name": normalize_fighter_name(
+                        str(part.get("display_name") or "")
+                    ),
+                    "current_winner_flag": part.get("winner"),
+                }
+                for part in participants
+            ],
+            "canonical_participant_pair": list(pair),
+            "event_night_result": {
+                "class": event_night_class,
+                "winner_espn_athlete_id": event_night_winner_id,
+                "winner_display_name": event_night_winner_name,
+            },
+            "current_result": {
+                "class": current_class,
+                "espn_result_name": bout.get("current_result_name"),
+                "espn_result_display": bout.get("current_result_display"),
+            },
+            "version_state": version_state,
+            "reconciliation_evidence_urls": evidence_urls,
+            "reconciliation_notes": recon_notes,
+            "reconciliation_provenance": provenance,
+            "source_ids": {
                 "espn_event_id": espn_event_id,
                 "espn_competition_id": espn_competition_id,
                 "ufcstats_bout_id": None,
-                "series_variant": event_row.get("series_variant"),
-                "calendar_year": event_row.get("calendar_year"),
-                "season_number": event_row.get("season_number"),
-                "week_number": event_row.get("week_number"),
-                "status": "occurred",
-                "occurrence_timestamp": bout.get("occurrence_start"),
-                "occurrence_end_timestamp": bout.get("occurrence_end"),
-                "publication_timestamp": None,
-                "weight_class": bout.get("weight_class"),
-                "participants": [
-                    {
-                        "espn_athlete_id": part.get("espn_athlete_id") or None,
-                        "display_name": part.get("display_name"),
-                        "normalized_name": normalize_fighter_name(
-                            str(part.get("display_name") or "")
-                        ),
-                        "current_winner_flag": part.get("winner"),
-                    }
-                    for part in participants
-                ],
-                "canonical_participant_pair": list(pair),
-                "event_night_result": {
-                    "class": event_night_class,
-                    "winner_espn_athlete_id": event_night_winner_id,
-                    "winner_display_name": event_night_winner_name,
-                },
-                "current_result": {
-                    "class": current_class,
-                    "espn_result_name": bout.get("current_result_name"),
-                    "espn_result_display": bout.get("current_result_display"),
-                },
-                "version_state": version_state,
-                "reconciliation_evidence_urls": evidence_urls,
-                "reconciliation_notes": recon_notes,
-                "source_ids": {
-                    "espn_event_id": espn_event_id,
-                    "espn_competition_id": espn_competition_id,
-                    "ufcstats_bout_id": None,
-                },
-                "source_urls": {
-                    "espn_fightcenter": (bout.get("source") or {}).get("fightcenter_url"),
-                    "espn_competition_status": (bout.get("source") or {}).get(
-                        "competition_status_url"
-                    ),
-                },
-                "data_quality_flags": _quality_flags_for_bout(
-                    bout,
-                    has_recon=recon is not None,
-                    version_state=version_state,
+            },
+            "source_urls": {
+                "espn_fightcenter": (bout.get("source") or {}).get("fightcenter_url"),
+                "espn_competition_status": (bout.get("source") or {}).get(
+                    "competition_status_url"
                 ),
-                "built_at": built,
-            }
-        )
+            },
+            "data_quality_flags": _quality_flags_for_bout(
+                bout,
+                has_recon=recon is not None,
+                version_state=version_state,
+            ),
+            "built_at": built,
+        }
+        bout_manifest.append(bout_row)
 
     # Attach actual occurred bout counts onto events for referential clarity.
     bouts_per_event = Counter(row["espn_event_id"] for row in bout_manifest)
@@ -544,6 +699,7 @@ def build_manifests(
         bout_manifest,
         through_year=through_year,
         built_at=built,
+        expected_universe=expected_universe,
     )
     return event_manifest, bout_manifest, counts, mismatches
 
@@ -554,8 +710,10 @@ def summarize(
     *,
     through_year: int,
     built_at: str,
+    expected_universe: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Deterministic season counts and mismatch report."""
+    expected = dict(expected_universe or load_expected_universe())
     by_year_cards: dict[str, Counter[str]] = defaultdict(Counter)
     by_year_bouts: dict[str, Counter[str]] = defaultdict(Counter)
     for event in events:
@@ -571,6 +729,7 @@ def summarize(
 
     event_night = Counter(str(b["event_night_result"]["class"]) for b in bouts)
     current = Counter(str(b["current_result"]["class"]) for b in bouts)
+    version_states = Counter(str(b.get("version_state") or "unknown") for b in bouts)
     standard_events = [e for e in events if e.get("series_variant") == "standard"]
     brazil_events = [e for e in events if e.get("series_variant") == "brazil"]
     standard_bouts = [b for b in bouts if b.get("series_variant") == "standard"]
@@ -594,6 +753,7 @@ def summarize(
         },
         "event_night_results": dict(sorted(event_night.items())),
         "current_results": dict(sorted(current.items())),
+        "version_states": dict(sorted(version_states.items())),
         "by_calendar_year": {
             year: {
                 "cards": dict(sorted(by_year_cards[year].items())),
@@ -602,54 +762,73 @@ def summarize(
             for year in sorted(set(by_year_cards) | set(by_year_bouts))
         },
         "expected": {
-            "cards": {
-                "all": EXPECTED_ALL_CARDS,
-                "standard": EXPECTED_STANDARD_CARDS,
-                "brazil": EXPECTED_BRAZIL_CARDS,
-            },
-            "bouts": {
-                "all": EXPECTED_ALL_BOUTS,
-                "standard": EXPECTED_STANDARD_BOUTS,
-                "brazil": EXPECTED_BRAZIL_BOUTS,
-            },
-            "event_night_results": dict(EXPECTED_EVENT_NIGHT),
-            "current_results": dict(EXPECTED_CURRENT),
+            "contract_id": expected.get("contract_id"),
+            "contract_version": expected.get("contract_version"),
+            "pinned_hash": PINNED_EXPECTED_UNIVERSE_HASH,
+            "cards": dict(expected["cards"]),
+            "bouts": dict(expected["bouts"]),
+            "event_night_results": dict(expected["event_night_results"]),
+            "current_results": dict(expected["current_results"]),
+            "version_states": dict(expected["version_states"]),
         },
     }
 
     mismatches: list[dict[str, Any]] = []
 
-    def expect_equal(path: str, actual: Any, expected: Any) -> None:
-        if actual != expected:
+    def expect_equal(path: str, actual: Any, expected_value: Any) -> None:
+        if actual != expected_value:
             mismatches.append(
                 {
                     "path": path,
                     "actual": actual,
-                    "expected": expected,
+                    "expected": expected_value,
                     "severity": "mismatch",
                 }
             )
 
-    if through_year >= 2025:
-        expect_equal("cards.all", counts["cards"]["all"], EXPECTED_ALL_CARDS)
-        expect_equal("cards.standard", counts["cards"]["standard"], EXPECTED_STANDARD_CARDS)
-        expect_equal("cards.brazil", counts["cards"]["brazil"], EXPECTED_BRAZIL_CARDS)
-        expect_equal("bouts.all", counts["bouts"]["all"], EXPECTED_ALL_BOUTS)
+    if through_year >= int(expected.get("through_year") or 2025):
+        expect_equal("cards.all", counts["cards"]["all"], expected["cards"]["all"])
         expect_equal(
-            "bouts.standard", counts["bouts"]["standard"], EXPECTED_STANDARD_BOUTS
+            "cards.standard", counts["cards"]["standard"], expected["cards"]["standard"]
         )
-        expect_equal("bouts.brazil", counts["bouts"]["brazil"], EXPECTED_BRAZIL_BOUTS)
-        for key, expected in EXPECTED_EVENT_NIGHT.items():
+        expect_equal(
+            "cards.brazil", counts["cards"]["brazil"], expected["cards"]["brazil"]
+        )
+        expect_equal("bouts.all", counts["bouts"]["all"], expected["bouts"]["all"])
+        expect_equal(
+            "bouts.standard", counts["bouts"]["standard"], expected["bouts"]["standard"]
+        )
+        expect_equal(
+            "bouts.brazil", counts["bouts"]["brazil"], expected["bouts"]["brazil"]
+        )
+        for key, expected_value in expected["event_night_results"].items():
             expect_equal(
                 f"event_night_results.{key}",
                 event_night.get(key, 0),
-                expected,
+                expected_value,
             )
-        for key, expected in EXPECTED_CURRENT.items():
+        for key, expected_value in expected["current_results"].items():
             expect_equal(
                 f"current_results.{key}",
                 current.get(key, 0),
-                expected,
+                expected_value,
+            )
+        for key, expected_value in expected["version_states"].items():
+            expect_equal(
+                f"version_states.{key}",
+                version_states.get(key, 0),
+                expected_value,
+            )
+        for year, season_expected in (expected.get("season_cards") or {}).items():
+            expect_equal(
+                f"season_cards.{year}.standard",
+                by_year_cards[str(year)].get("standard", 0),
+                season_expected.get("standard", 0),
+            )
+            expect_equal(
+                f"season_cards.{year}.brazil",
+                by_year_cards[str(year)].get("brazil", 0),
+                season_expected.get("brazil", 0),
             )
 
     # Structural / referential checks always run.
@@ -720,24 +899,41 @@ def summarize(
             )
 
     # Explicit unverifiable fields (not failures unless verify requires otherwise).
+    # Null IDs / incomplete ledgers are NOT complete; Phase 1 must consume deferred tickets.
     open_gaps = [
         {
-            "path": "ufcstats_ids",
-            "actual": "unmapped",
-            "expected": "lawful_mapped_ids_when_available",
-            "severity": "unverifiable_without_approved_ufcstats_mapping",
+            "path": "ufc_ufcstats_ids",
+            "actual": "unmapped_null",
+            "expected": "lawful_mapped_provider_ids",
+            "severity": "incomplete_not_done",
+            "deferred_to": ["DWCS-103", "DWCS-104"],
+            "notes": (
+                "UFC.com / UFCStats event and bout IDs remain null. DWCS-103 must map "
+                "provider IDs against the frozen manifest; DWCS-104 handles unresolved "
+                "identity resolution. Phase 1 must not treat nulls as complete."
+            ),
         },
         {
             "path": "publication_timestamps",
             "actual": None,
             "expected": "evidenced_publication_time",
-            "severity": "unverifiable_from_espn_scoreboard_alone",
+            "severity": "incomplete_not_done",
+            "deferred_to": ["DWCS-103"],
+            "notes": (
+                "Publication timestamps are unknown from scoreboard-derived facts and "
+                "remain null (never invented)."
+            ),
         },
         {
             "path": "full_cancellation_replacement_ledger",
             "actual": "scoreboard_occurred_bouts_only",
             "expected": "complete_announced_card_diff",
-            "severity": "unverifiable_without_licensed_schedule_history",
+            "severity": "incomplete_not_done",
+            "deferred_to": ["DWCS-103"],
+            "notes": (
+                "ESPN scoreboard facts expose occurred bouts only. Complete "
+                "cancellation/replacement classification belongs to DWCS-103 history ingest."
+            ),
         },
     ]
 
@@ -753,6 +949,11 @@ def summarize(
         "open_gaps": open_gaps,
         "source_caveats": [
             (
+                "Committed ESPN fixtures are minimal pre-classified factual fields extracted "
+                "from undocumented public site/core JSON, not raw payloads and not proof that "
+                "the live API still returns the same universe."
+            ),
+            (
                 "ESPN site/core JSON is an undocumented public read-only secondary "
                 "reconciliation source for this Phase 0 spike, not a production dependency."
             ),
@@ -761,8 +962,14 @@ def summarize(
                 "to build or refresh these manifests."
             ),
             (
-                "UFC athlete pages and other linked official/public articles were used only "
-                "as cited evidence for event-night vs current result reconciliations."
+                "Reconciliation evidence URLs are citation-only. CI validates URL shape and "
+                "required provenance fields offline; it does not fetch external pages or "
+                "machine-verify article content/liveness."
+            ),
+            (
+                "Optional manual/network check: "
+                "`python scripts/spikes/build_dwcs_manifest.py --through 2025 "
+                "--refresh-espn --verify` (not part of default CI)."
             ),
         ],
     }
@@ -793,6 +1000,7 @@ def load_source_bundle(source_dir: Path) -> tuple[
     events = read_jsonl(source_dir / EVENTS_FACTS_NAME)
     bouts = read_jsonl(source_dir / BOUTS_FACTS_NAME)
     recon = read_jsonl(source_dir / RECON_FACTS_NAME)
+    validate_reconciliation_provenance(recon)
     cancel_path = source_dir / CANCEL_FACTS_NAME
     cancels = read_jsonl(cancel_path) if cancel_path.is_file() else []
     return events, bouts, recon, cancels
@@ -806,10 +1014,12 @@ def run_build(
     refresh_espn: bool,
     verify: bool,
     built_at: str | None = None,
+    expected_universe_path: Path | None = None,
 ) -> dict[str, Any]:
     if refresh_espn:
         refresh_espn_facts(source_dir=source_dir, through_year=through_year)
 
+    expected = load_expected_universe(expected_universe_path)
     events_facts, bouts_facts, recon, cancels = load_source_bundle(source_dir)
     events, bouts, counts, mismatches = build_manifests(
         events_facts=events_facts,
@@ -818,6 +1028,7 @@ def run_build(
         cancellations_replacements=cancels,
         through_year=through_year,
         built_at=built_at,
+        expected_universe=expected,
     )
     assert_no_secrets(events)
     assert_no_secrets(bouts)

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "contract_id": "dwcs_expected_universe",
+  "contract_version": "1.0.0",
+  "description": "Pinned DWCS-002 research targets for the completed 2017–2025 universe. Content changes require bumping contract_version and PINNED_EXPECTED_UNIVERSE_HASH together.",
+  "through_year": 2025,
+  "cards": {
+    "all": 89,
+    "standard": 86,
+    "brazil": 3
+  },
+  "bouts": {
+    "all": 440,
+    "standard": 425,
+    "brazil": 15
+  },
+  "event_night_results": {
+    "decisive": 438,
+    "draw": 1,
+    "no_contest": 1
+  },
+  "current_results": {
+    "decisive": 431,
+    "draw": 1,
+    "no_contest": 8
+  },
+  "version_states": {
+    "assumed_equal_to_current": 431,
+    "reversed_to_no_contest": 7,
+    "unchanged": 2
+  },
+  "season_cards": {
+    "2017": {"standard": 8, "brazil": 0},
+    "2018": {"standard": 8, "brazil": 3},
+    "2019": {"standard": 10, "brazil": 0},
+    "2020": {"standard": 10, "brazil": 0},
+    "2021": {"standard": 10, "brazil": 0},
+    "2022": {"standard": 10, "brazil": 0},
+    "2023": {"standard": 10, "brazil": 0},
+    "2024": {"standard": 10, "brazil": 0},
+    "2025": {"standard": 10, "brazil": 0}
+  }
+}
