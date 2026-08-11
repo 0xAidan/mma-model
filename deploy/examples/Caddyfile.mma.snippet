@@ -1,0 +1,27 @@
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+# Merge this as an additional site block into the EXISTING host Caddyfile.
+# Do not start a second reverse proxy. Existing host Caddy keeps public HTTP/HTTPS.
+
+mma.shermandavison.com {
+	# Generate with: caddy hash-password
+	# Commit only placeholders — never a live hash or plaintext password.
+	basic_auth {
+		mma_dashboard REDACTED_HASH_PLACEHOLDER
+	}
+
+	root * /srv/mma/public
+	encode gzip zstd
+	file_server
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# Tighten further in the deploy ticket after measuring asset needs.
+		# Content-Security-Policy "default-src 'self'"
+	}
+
+	log {
+		output stdout
+	}
+}
