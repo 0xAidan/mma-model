@@ -1,0 +1,12 @@
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+
+[Unit]
+Description=MMA model backup timer (EXAMPLE ONLY — NOT INSTALLED)
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=mma-backup.service
+
+[Install]
+WantedBy=timers.target

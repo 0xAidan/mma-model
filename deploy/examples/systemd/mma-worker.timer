@@ -1,0 +1,12 @@
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+
+[Unit]
+Description=MMA model worker timer (EXAMPLE ONLY — NOT INSTALLED)
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+Unit=mma-worker.service
+
+[Install]
+WantedBy=timers.target

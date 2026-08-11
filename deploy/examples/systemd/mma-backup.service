@@ -1,0 +1,15 @@
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+# Nightly backup one-shot shape. Concrete restic target is chosen in a later ticket.
+
+[Unit]
+Description=MMA model backup one-shot (EXAMPLE ONLY — NOT INSTALLED)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/mma
+ExecStart=/usr/bin/flock -n /run/mma-backup.lock /usr/bin/docker compose -f /srv/mma/docker-compose.yml run --rm worker mma-model --help
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

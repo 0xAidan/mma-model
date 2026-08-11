@@ -1,0 +1,19 @@
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+# One-shot worker under flock. Reuses host Docker Engine + existing Caddy.
+# Rollback: previous image digest remains pullable; unit does not alter Caddy.
+
+[Unit]
+Description=MMA model worker one-shot (EXAMPLE ONLY — NOT INSTALLED)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/mma
+# Overlap lock rejects concurrent writers.
+ExecStart=/usr/bin/flock -n /run/mma-worker.lock /usr/bin/docker compose -f /srv/mma/docker-compose.yml run --rm worker mma-model --help
+Nice=10
+# Secrets come from /etc/mma-model/mma.env via compose env_file (mode 0600).
+
+[Install]
+WantedBy=multi-user.target

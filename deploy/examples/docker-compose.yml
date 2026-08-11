@@ -1,0 +1,20 @@
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+# Worker-only Compose topology. Never publish ports, never expose, never host-net.
+# No public app/DB listeners. Reuse existing host Caddy for HTTPS.
+#
+# Rollback: retain the prior image digest and retarget `image:` to that digest.
+
+services:
+  worker:
+    image: ghcr.io/OWNER/mma-model@sha256:DIGEST_PLACEHOLDER_REPLACE_AFTER_CI_PUBLISH
+    pull_policy: never
+    read_only: true
+    tmpfs:
+      - /tmp
+    env_file:
+      - /etc/mma-model/mma.env
+    volumes:
+      - /srv/mma/data:/data
+      - /srv/mma/public:/public
+    working_dir: /app
+    # Intentional invariant: no published ports, expose, or host networking.
