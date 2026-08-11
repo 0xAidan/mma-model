@@ -58,7 +58,7 @@
       "status": "present"
     }
   ],
-  "captured_at": "2026-08-11T20:24:23Z",
+  "captured_at": "2026-08-11T20:32:02Z",
   "decision": {
     "bet365_dwcs_status": "scoped_absent",
     "bet365_observation_scope": {
@@ -70,14 +70,28 @@
         "bet365",
         "bet365_au"
       ],
+      "bookmaker_keys_requested": [
+        "bet365",
+        "bet365_au",
+        "draftkings",
+        "fanduel",
+        "betmgm",
+        "williamhill_us"
+      ],
+      "catalog_context": {
+        "bet365_au": "The Odds API currently lists bet365_au as paid-tier and limited to AFL/NRL h2h/spreads/totals coverage. MMA absence on a live query may reflect provider/catalog/plan coverage and is not evidence that the underlying sportsbook universally lacks DWCS. The live event query remains the only event-specific evidence; do not infer beyond it."
+      },
+      "effective_query_mode": "bookmakers",
       "provider": "the_odds_api",
-      "regions": "us,uk,eu,au"
+      "query_mode_note": "The Odds API bookmakers parameter takes precedence when both bookmakers and regions are sent; regions_requested is informational and does not itself scope the bookmaker probe.",
+      "regions_effective_for_bookmaker_probe": null,
+      "regions_requested": "us,uk,eu,au"
     },
     "confirmed_manual_sample_count": 0,
     "manual_sample_count": 0,
     "observed": true,
     "path": "the_odds_api_reference_fallback",
-    "rationale": "Bet365\u00d7DWCS was not observed for the queried provider/region/bookmaker-key scope; this is scoped absence only (not universal Bet365 absence). The Odds API provided observed DWCS h2h reference moneyline; core v1 uses sportsbook-agnostic actionable price targets when an automatic book line is unavailable. Scoped to provider=the_odds_api, regions=us,uk,eu,au, bookmaker_keys=['bet365', 'bet365_au'].",
+    "rationale": "Bet365\u00d7DWCS was not observed for the queried bookmaker keys on The Odds API; this is scoped absence only (not universal Bet365 absence). When bookmakers and regions are both sent, bookmakers takes precedence, so region selection does not itself scope the bookmaker probe. Catalog notes that bet365_au is paid-tier and currently limited to AFL/NRL may explain MMA non-observation and must not be treated as sportsbook-wide DWCS absence. The Odds API provided observed DWCS h2h reference moneyline; core v1 uses sportsbook-agnostic actionable price targets when an automatic book line is unavailable. Observation scope: provider=the_odds_api, effective_query_mode=bookmakers, bookmaker_keys_queried=['bet365', 'bet365_au'], regions_requested=us,uk,eu,au, regions_effective_for_bookmaker_probe=None.",
     "the_odds_api_dwcs_events_found": 5
   },
   "events": [
@@ -91,13 +105,13 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "479",
-          "x-requests-used": "21"
+          "x-requests-remaining": "471",
+          "x-requests-used": "29"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           }
         ],
@@ -161,13 +175,13 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "483",
-          "x-requests-used": "17"
+          "x-requests-remaining": "475",
+          "x-requests-used": "25"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           }
         ],
@@ -231,13 +245,13 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "482",
-          "x-requests-used": "18"
+          "x-requests-remaining": "474",
+          "x-requests-used": "26"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           }
         ],
@@ -301,13 +315,13 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "480",
-          "x-requests-used": "20"
+          "x-requests-remaining": "472",
+          "x-requests-used": "28"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           }
         ],
@@ -371,13 +385,13 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "481",
-          "x-requests-used": "19"
+          "x-requests-remaining": "473",
+          "x-requests-used": "27"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           }
         ],
@@ -441,38 +455,38 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "478",
-          "x-requests-used": "22"
+          "x-requests-remaining": "470",
+          "x-requests-used": "30"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "draftkings",
-            "last_update": "2026-08-11T20:23:31Z",
+            "last_update": "2026-08-11T20:31:16Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "draftkings",
-            "last_update": "2026-08-11T20:23:31Z",
+            "last_update": "2026-08-11T20:31:16Z",
             "market_key": "totals"
           },
           {
             "bookmaker_key": "williamhill_us",
-            "last_update": "2026-08-11T20:24:03Z",
+            "last_update": "2026-08-11T20:28:39Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "williamhill_us",
-            "last_update": "2026-08-11T20:24:03Z",
+            "last_update": "2026-08-11T20:28:39Z",
             "market_key": "totals"
           },
           {
             "bookmaker_key": "betmgm",
-            "last_update": "2026-08-11T20:23:53Z",
+            "last_update": "2026-08-11T20:31:51Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           }
         ],
@@ -536,38 +550,38 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "477",
-          "x-requests-used": "23"
+          "x-requests-remaining": "469",
+          "x-requests-used": "31"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "draftkings",
-            "last_update": "2026-08-11T20:23:31Z",
+            "last_update": "2026-08-11T20:31:16Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "draftkings",
-            "last_update": "2026-08-11T20:23:31Z",
+            "last_update": "2026-08-11T20:31:16Z",
             "market_key": "totals"
           },
           {
             "bookmaker_key": "williamhill_us",
-            "last_update": "2026-08-11T20:24:03Z",
+            "last_update": "2026-08-11T20:28:39Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "williamhill_us",
-            "last_update": "2026-08-11T20:24:03Z",
+            "last_update": "2026-08-11T20:28:39Z",
             "market_key": "totals"
           },
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "betmgm",
-            "last_update": "2026-08-11T20:23:53Z",
+            "last_update": "2026-08-11T20:31:51Z",
             "market_key": "h2h"
           }
         ],
@@ -631,38 +645,38 @@
         "error": null,
         "headers": {
           "x-requests-last": "1",
-          "x-requests-remaining": "476",
-          "x-requests-used": "24"
+          "x-requests-remaining": "468",
+          "x-requests-used": "32"
         },
         "market_timestamps": [
           {
             "bookmaker_key": "draftkings",
-            "last_update": "2026-08-11T20:23:31Z",
+            "last_update": "2026-08-11T20:31:16Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "draftkings",
-            "last_update": "2026-08-11T20:23:31Z",
+            "last_update": "2026-08-11T20:31:16Z",
             "market_key": "totals"
           },
           {
             "bookmaker_key": "williamhill_us",
-            "last_update": "2026-08-11T20:24:03Z",
+            "last_update": "2026-08-11T20:28:39Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "williamhill_us",
-            "last_update": "2026-08-11T20:24:03Z",
+            "last_update": "2026-08-11T20:28:39Z",
             "market_key": "totals"
           },
           {
             "bookmaker_key": "fanduel",
-            "last_update": "2026-08-11T20:24:06Z",
+            "last_update": "2026-08-11T20:32:02Z",
             "market_key": "h2h"
           },
           {
             "bookmaker_key": "betmgm",
-            "last_update": "2026-08-11T20:23:53Z",
+            "last_update": "2026-08-11T20:31:51Z",
             "market_key": "h2h"
           }
         ],
@@ -1080,8 +1094,8 @@
   "events_list": {
     "headers": {
       "x-requests-last": "0",
-      "x-requests-remaining": "484",
-      "x-requests-used": "16"
+      "x-requests-remaining": "476",
+      "x-requests-used": "24"
     },
     "schema_keys": [
       "away_team",
@@ -1093,7 +1107,7 @@
     ]
   },
   "field_notes": {
-    "bet365_scope": "Bet365 observations are scoped to provider, regions, and configured bookmaker aliases/keys (including bet365_au). Scoped absence is never universal Bet365 absence.",
+    "bet365_scope": "Bet365 observations record provider, configured aliases/keys (including bet365_au), and effective query mode. When bookmakers is sent with regions, bookmakers takes precedence and regions do not themselves scope the bookmaker probe. Scoped absence is never universal Bet365 absence. Catalog notes that bet365_au is paid-tier and currently limited to AFL/NRL are interpretation context only; the live event query remains the only event-specific evidence.",
     "historical_replay": "Static product note: historical snapshots may exist on paid tiers; matrix cells stay unknown until capture/trial evidence sets the flag.",
     "lock_events": "Static capability note: Bet365 streaming lock events require authenticated trial evidence; never inferred from missing credentials.",
     "quota": "Quota captured from /events and/or event-market response headers x-requests-remaining / x-requests-used / x-requests-last when present.",
@@ -1170,8 +1184,22 @@
           "bet365",
           "bet365_au"
         ],
+        "bookmaker_keys_requested": [
+          "bet365",
+          "bet365_au",
+          "draftkings",
+          "fanduel",
+          "betmgm",
+          "williamhill_us"
+        ],
+        "catalog_context": {
+          "bet365_au": "The Odds API currently lists bet365_au as paid-tier and limited to AFL/NRL h2h/spreads/totals coverage. MMA absence on a live query may reflect provider/catalog/plan coverage and is not evidence that the underlying sportsbook universally lacks DWCS. The live event query remains the only event-specific evidence; do not infer beyond it."
+        },
+        "effective_query_mode": "bookmakers",
         "provider": "the_odds_api",
-        "regions": "us,uk,eu,au"
+        "query_mode_note": "The Odds API bookmakers parameter takes precedence when both bookmakers and regions are sent; regions_requested is informational and does not itself scope the bookmaker probe.",
+        "regions_effective_for_bookmaker_probe": null,
+        "regions_requested": "us,uk,eu,au"
       },
       "bet365_present_on_dwcs": false,
       "bet365_query_status": "ok",
@@ -1193,8 +1221,8 @@
       "monthly_quote_usd": null,
       "quota": {
         "x-requests-last": "0",
-        "x-requests-remaining": "484",
-        "x-requests-used": "16"
+        "x-requests-remaining": "476",
+        "x-requests-used": "24"
       },
       "regions": "us,uk,eu,au",
       "rights_notes": null,

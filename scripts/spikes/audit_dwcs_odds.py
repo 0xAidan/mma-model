@@ -292,6 +292,61 @@ def queried_bet365_keys(
     return queried
 
 
+BET365_AU_CATALOG_CONTEXT = (
+    "The Odds API currently lists bet365_au as paid-tier and limited to AFL/NRL "
+    "h2h/spreads/totals coverage. MMA absence on a live query may reflect "
+    "provider/catalog/plan coverage and is not evidence that the underlying "
+    "sportsbook universally lacks DWCS. The live event query remains the only "
+    "event-specific evidence; do not infer beyond it."
+)
+
+
+def build_bet365_observation_scope(
+    *,
+    provider: str,
+    regions: str | None,
+    bookmaker_keys: Sequence[str],
+    aliases: Sequence[str],
+) -> dict[str, Any]:
+    """Record how Bet365 was probed, including Odds API parameter precedence.
+
+    When both ``bookmakers`` and ``regions`` are sent, The Odds API gives
+    ``bookmakers`` priority. Region selection must not be described as the
+    effective bookmaker-probe scope in that mode.
+    """
+    requested_bookmakers = [
+        str(key).strip() for key in bookmaker_keys if str(key).strip()
+    ]
+    queried = queried_bet365_keys(requested_bookmakers, aliases=aliases)
+    regions_requested = regions
+    if requested_bookmakers:
+        effective_query_mode = "bookmakers"
+        query_mode_note = (
+            "The Odds API bookmakers parameter takes precedence when both "
+            "bookmakers and regions are sent; regions_requested is informational "
+            "and does not itself scope the bookmaker probe."
+        )
+        regions_effective_for_bookmaker_probe = None
+    else:
+        effective_query_mode = "regions"
+        query_mode_note = (
+            "No bookmakers parameter was supplied; the bookmaker probe is scoped "
+            "by the regions parameter."
+        )
+        regions_effective_for_bookmaker_probe = regions_requested
+    return {
+        "provider": provider,
+        "effective_query_mode": effective_query_mode,
+        "bookmaker_keys_requested": requested_bookmakers,
+        "bookmaker_keys_queried": queried,
+        "regions_requested": regions_requested,
+        "regions_effective_for_bookmaker_probe": regions_effective_for_bookmaker_probe,
+        "aliases_configured": list(aliases),
+        "query_mode_note": query_mode_note,
+        "catalog_context": {"bet365_au": BET365_AU_CATALOG_CONTEXT},
+    }
+
+
 def resolve_bet365_alias_statuses(
     presence: Mapping[str, Mapping[str, Any]],
     *,
@@ -323,13 +378,13 @@ def summarize_scoped_bet365_observation(
     aliases: Sequence[str],
 ) -> dict[str, Any]:
     """Summarize Bet365×DWCS evidence without claiming universal absence."""
-    queried = queried_bet365_keys(bookmaker_keys, aliases=aliases)
-    scope = {
-        "provider": provider,
-        "regions": regions,
-        "bookmaker_keys_queried": queried,
-        "aliases_configured": list(aliases),
-    }
+    scope = build_bet365_observation_scope(
+        provider=provider,
+        regions=regions,
+        bookmaker_keys=bookmaker_keys,
+        aliases=aliases,
+    )
+    queried = list(scope["bookmaker_keys_queried"])
     flat: list[PresenceStatus] = [
         status
         for row in alias_status_rows
@@ -563,12 +618,12 @@ def build_request_failed_artifact(
     """Artifact for top-level /events HTTP, timeout, or payload failures."""
     safe_reason = sanitize_provider_error(failure_reason)
     aliases = normalize_bookmaker_aliases(bet365_aliases)
-    scope = {
-        "provider": "the_odds_api",
-        "regions": regions,
-        "bookmaker_keys_queried": queried_bet365_keys(bookmaker_keys, aliases=aliases),
-        "aliases_configured": aliases,
-    }
+    scope = build_bet365_observation_scope(
+        provider="the_odds_api",
+        regions=regions,
+        bookmaker_keys=bookmaker_keys,
+        aliases=aliases,
+    )
     events_meta = dict(events_list_meta or {})
     events_list = {
         "headers": {
@@ -655,8 +710,10 @@ def build_request_failed_artifact(
                 "Historical replay was not evaluated from this failed capture."
             ),
             "bet365_scope": (
-                "Bet365 observations are scoped to provider, regions, and configured "
-                "bookmaker aliases/keys; request failure is not scoped absence."
+                "Bet365 observations record effective query mode. When bookmakers is "
+                "sent with regions, bookmakers takes precedence and regions do not "
+                "themselves scope the bookmaker probe. Request failure is not scoped "
+                "absence. Catalog notes for bet365_au are interpretation context only."
             ),
         },
         "redacted": redact,
@@ -815,9 +872,12 @@ def decide_provider_path(
     scope_note = ""
     if isinstance(odds_scope, Mapping):
         scope_note = (
-            f" Scoped to provider={odds_scope.get('provider')}, "
-            f"regions={odds_scope.get('regions')}, "
-            f"bookmaker_keys={odds_scope.get('bookmaker_keys_queried')}."
+            f" Observation scope: provider={odds_scope.get('provider')}, "
+            f"effective_query_mode={odds_scope.get('effective_query_mode')}, "
+            f"bookmaker_keys_queried={odds_scope.get('bookmaker_keys_queried')}, "
+            f"regions_requested={odds_scope.get('regions_requested')}, "
+            f"regions_effective_for_bookmaker_probe="
+            f"{odds_scope.get('regions_effective_for_bookmaker_probe')}."
         )
 
     if bet365_status == "present" and matrix.get("rights", {}).get("status") == "pass":
@@ -831,9 +891,13 @@ def decide_provider_path(
         path = "the_odds_api_reference_fallback"
         if bet365_status == "scoped_absent":
             rationale = (
-                "Bet365×DWCS was not observed for the queried provider/region/"
-                "bookmaker-key scope; this is scoped absence only (not universal "
-                "Bet365 absence). The Odds API provided observed DWCS h2h reference "
+                "Bet365×DWCS was not observed for the queried bookmaker keys on The "
+                "Odds API; this is scoped absence only (not universal Bet365 absence). "
+                "When bookmakers and regions are both sent, bookmakers takes precedence, "
+                "so region selection does not itself scope the bookmaker probe. Catalog "
+                "notes that bet365_au is paid-tier and currently limited to AFL/NRL may "
+                "explain MMA non-observation and must not be treated as sportsbook-wide "
+                "DWCS absence. The Odds API provided observed DWCS h2h reference "
                 "moneyline; core v1 uses sportsbook-agnostic actionable price targets "
                 "when an automatic book line is unavailable."
                 + scope_note
@@ -1111,9 +1175,13 @@ def build_coverage_summary(
                 "cells stay unknown until capture/trial evidence sets the flag."
             ),
             "bet365_scope": (
-                "Bet365 observations are scoped to provider, regions, and configured "
-                "bookmaker aliases/keys (including bet365_au). Scoped absence is never "
-                "universal Bet365 absence."
+                "Bet365 observations record provider, configured aliases/keys "
+                "(including bet365_au), and effective query mode. When bookmakers is "
+                "sent with regions, bookmakers takes precedence and regions do not "
+                "themselves scope the bookmaker probe. Scoped absence is never "
+                "universal Bet365 absence. Catalog notes that bet365_au is paid-tier "
+                "and currently limited to AFL/NRL are interpretation context only; the "
+                "live event query remains the only event-specific evidence."
             ),
         },
         "redacted": redact,
@@ -1359,7 +1427,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_BET365_ALIASES),
         help=(
             "Comma-separated The Odds API bookmaker keys treated as Bet365 "
-            "(e.g. bet365,bet365_au). Absence is scoped to these keys and --regions."
+            "(e.g. bet365,bet365_au). When --bookmakers is set, The Odds API gives "
+            "that parameter precedence over --regions for the bookmaker probe."
         ),
     )
     parser.add_argument(

@@ -13,19 +13,35 @@ scrape as fallback.
 
 Prove actual provider, bookmaker, market, timestamp, suspension/lock, and quota
 behavior on the current or next DWCS card. Determine which markets can show
-automatic offered prices and which must show fair and actionable price targets.
+automatic offered prices and which must fall back to sportsbook-agnostic price
+targets (downstream of this spike).
 
 ## Bet365 catalog identity (The Odds API)
 
-The Odds API catalogs Bet365 Australia as `bet365_au` scoped to region `au`.
+The Odds API catalogs Bet365 Australia as `bet365_au` (AU bookmakers list).
 Do **not** treat a hardcoded bare `bet365` key under `us,uk,eu` as universal
 Bet365 coverage evidence.
 
 - Configurable aliases default to `bet365,bet365_au`.
-- Default regions include `au` (`us,uk,eu,au`).
-- Absence is always scoped to **provider + regions + queried bookmaker keys**.
-- Universal Bet365 status stays `unresolved` unless positive evidence exists.
+- Default CLI regions include `au` (`us,uk,eu,au`) for informational request
+  context.
+- When both `bookmakers` and `regions` are sent, The Odds API gives
+  **`bookmakers` precedence**. Observation scope records
+  `effective_query_mode=bookmakers` and sets
+  `regions_effective_for_bookmaker_probe=null` so region selection is not
+  described as scoping the bookmaker probe.
+- Absence is always scoped to the effective probe (provider + queried bookmaker
+  keys in bookmakers mode). Universal Bet365 status stays `unresolved` unless
+  positive evidence exists.
 - Request failures are never collapsed into absence.
+
+### Catalog interpretation context (not event evidence)
+
+The Odds API bookmaker catalog currently lists `bet365_au` as **paid-tier** and
+**limited to AFL/NRL** `h2h` / spreads / totals. Therefore MMA non-observation
+on a live DWCS query may reflect provider/catalog/plan coverage rather than
+proof that the underlying sportsbook universally lacks DWCS. The live event
+query remains the only event-specific evidence; do not infer beyond it.
 
 ## Live capture: Season 10 Episode 1
 
@@ -33,14 +49,16 @@ The original `T-3h` capture on 2026-08-11 reconciled all five matchups from the
 [official UFC card](https://www.ufc.com/news/dana-white-contender-series-season-10-episode-1-preview-athletes-bouts-start-times-streaming)
 to The Odds API events.
 
-Corrective recapture `T-3h-corrective` (2026-08-11) queried regions
-`us,uk,eu,au` and Bet365 aliases `bet365,bet365_au`:
+Corrective recapture `T-3h-corrective` (2026-08-11) sent regions
+`us,uk,eu,au` together with an explicit `bookmakers` list that included
+`bet365_au` (and bare `bet365`). Effective query mode is `bookmakers`:
 
 - All five official DWCS bouts reconciled as `present`.
 - FanDuel `h2h` remained present on reconciled DWCS events (`markets_observed`
   includes `h2h`).
-- Bet365/`bet365_au` h2h was not observed in that provider/region/key scope →
-  `bet365_dwcs_status=scoped_absent` (not universal Bet365 absence).
+- Bet365/`bet365_au` h2h was not observed for those queried bookmaker keys →
+  `bet365_dwcs_status=scoped_absent` (not universal Bet365 absence; catalog
+  AFL/NRL/paid-tier limits are interpretation context only).
 - `totals`, `method`, and `round` were absent for the tracked bookmakers when
   evaluated.
 - Event timestamps, quota headers, and sanitized per-market `last_update`
@@ -50,9 +68,8 @@ Corrective recapture `T-3h-corrective` (2026-08-11) queried regions
 
 The evidence gate therefore selects `the_odds_api_reference_fallback`; it does
 not authorize a licensed Bet365-primary path. This is an acceptable core-product
-path: The Odds API can provide reference and historical moneyline context while
-the dashboard provides book-agnostic actionable prices for the user to compare
-against any sportsbook.
+path for line enrichment: The Odds API can provide reference moneyline context
+while downstream product surfaces publish sportsbook-agnostic price targets.
 
 ## Committed artifact integrity
 
@@ -64,6 +81,9 @@ prices, or a provider decision.
 
 ## Commands
 
+Example replay of the committed corrective capture (snapshot label matches the
+artifact):
+
 ```bash
 # Official bout list: bout_id, fighter_a, fighter_b, scheduled_start (UTC ISO)
 python scripts/spikes/audit_dwcs_odds.py \
@@ -73,7 +93,7 @@ python scripts/spikes/audit_dwcs_odds.py \
   --bet365-aliases bet365,bet365_au \
   --redact \
   --official-bouts tests/fixtures/spikes/dwcs_s10e1_official_bouts.json \
-  --snapshot-label T-3h \
+  --snapshot-label T-3h-corrective \
   --out output/research/odds-coverage-summary.json
 
 pytest tests/spikes/test_audit_dwcs_odds.py -q
@@ -117,7 +137,7 @@ Bet365 DWCS aggregate status:
 | Status | Meaning |
 |--------|---------|
 | `present` | At least one configured Bet365 alias showed h2h on a reconciled DWCS event |
-| `scoped_absent` | Successful discovery found no queried Bet365 aliases in the scoped regions/keys |
+| `scoped_absent` | Successful discovery found no queried Bet365 aliases for the effective probe |
 | `request_failed` | Discovery/request failed; distinct from absence |
 | `unresolved` | Insufficient evidence for a universal Bet365 claim |
 
@@ -170,12 +190,10 @@ From the governing product rule (odds are optional enrichment):
 1. A licensed bookmaker adapter is optional enrichment **only if** Phase 0 shows
    evidence-backed DWCS coverage and acceptable rights notes.
 2. The Odds API remains a valid reference/historical moneyline source even when
-   Bet365 is absent for the queried scope.
-3. Every qualified model output must be able to publish a sportsbook-agnostic fair
-   price, minimum actionable price, and strong-value price without a live quote.
+   Bet365 is absent for the queried bookmaker keys.
+3. Missing automatic lines disable exact current EV, ROI, and CLV; they do not
+   block downstream sportsbook-agnostic price-target recommendations.
 4. Do not invent coverage or label consensus books as Bet365.
-5. Missing automatic lines disable exact current EV, ROI, and CLV; they do not
-   block price-target recommendations.
 
 `decision.path` values:
 
@@ -189,7 +207,25 @@ sportsbook-agnostic product. `hard_blocker` means the audit itself could not
 establish usable line-enrichment evidence; it does not mean the model cannot
 publish price targets once its data and calibration gates pass.
 
-## Actionable price policy
+## Secrets
+
+Committed artifacts must use `--redact`. Redaction removes API keys, auth
+headers, and price fields. Never commit `.env`, sportsbook credentials, or full
+licensed vendor payloads.
+
+## Handoff
+
+Attach the sanitized matrix and vendor rights/price notes to DWCS-200 / DWCS-202.
+The downstream implementation must treat automatic bookmaker lines as optional
+enrichment and actionable price thresholds as the required fallback.
+Out of scope for this ticket: production ingestion, betting recommendations,
+orchestration prompts, and scraping fallbacks.
+
+### Downstream handoff policy: actionable prices (not implemented by DWCS-000)
+
+DWCS-000 records evidence and decision-path semantics only. The formulas below
+are handoff policy for later tickets; this spike does **not** compute or render
+them.
 
 For calibrated median win probability `p50`, conservative 25th-percentile
 probability `p25`, and target EV `t`:
@@ -204,7 +240,7 @@ minimum_actionable_decimal = max(
 )
 ```
 
-The dashboard converts decimal thresholds to American odds and displays:
+Downstream product converts decimal thresholds to American odds and displays:
 
 - **Fair price:** break-even odds from `p50`; informational, not actionable.
 - **Actionable at:** `minimum_actionable_decimal` using the standard 5% target EV.
@@ -222,16 +258,3 @@ Outcome accuracy and calibration can grade every model prediction. ROI and CLV
 must include only recommendations with a timestamped observed or user-recorded
 price. Threshold-only rows are reported separately and never assigned synthetic
 profit.
-
-## Secrets
-
-Committed artifacts must use `--redact`. Redaction removes API keys, auth
-headers, and price fields. Never commit `.env`, sportsbook credentials, or full
-licensed vendor payloads.
-
-## Handoff
-
-Attach the sanitized matrix and vendor rights/price notes to DWCS-200 / DWCS-202.
-The downstream implementation must treat automatic bookmaker lines as optional
-enrichment and actionable price thresholds as the required fallback.
-Out of scope for this ticket: production ingestion and betting recommendations.

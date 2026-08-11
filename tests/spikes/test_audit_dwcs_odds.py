@@ -825,8 +825,37 @@ def test_bet365_au_alias_presence_is_recognized(audit: Any) -> None:
     assert "-110" not in blob
 
 
+def test_observation_scope_records_bookmakers_precedence(audit: Any) -> None:
+    """When bookmakers is sent, regions do not claim to scope the probe."""
+    scope = audit.build_bet365_observation_scope(
+        provider="the_odds_api",
+        regions="us,uk,eu,au",
+        bookmaker_keys=["bet365", "bet365_au", "fanduel"],
+        aliases=["bet365", "bet365_au"],
+    )
+    assert scope["effective_query_mode"] == "bookmakers"
+    assert scope["regions_requested"] == "us,uk,eu,au"
+    assert scope["regions_effective_for_bookmaker_probe"] is None
+    assert scope["bookmaker_keys_queried"] == ["bet365", "bet365_au"]
+    assert "bet365_au" in scope["bookmaker_keys_requested"]
+    assert "precedence" in scope["query_mode_note"].lower()
+    assert "afl" in scope["catalog_context"]["bet365_au"].lower()
+    assert "nrl" in scope["catalog_context"]["bet365_au"].lower()
+    assert "paid" in scope["catalog_context"]["bet365_au"].lower()
+
+    regions_only = audit.build_bet365_observation_scope(
+        provider="the_odds_api",
+        regions="au",
+        bookmaker_keys=[],
+        aliases=["bet365_au"],
+    )
+    assert regions_only["effective_query_mode"] == "regions"
+    assert regions_only["regions_effective_for_bookmaker_probe"] == "au"
+    assert regions_only["bookmaker_keys_queried"] == []
+
+
 def test_scoped_absence_is_not_universal_bet365_absence(audit: Any) -> None:
-    """Absence for queried keys/regions must stay scoped, never universal."""
+    """Absence for queried bookmaker keys must stay scoped, never universal."""
     official = [
         {
             "bout_id": "bout-1",
@@ -874,7 +903,9 @@ def test_scoped_absence_is_not_universal_bet365_absence(audit: Any) -> None:
     provider = summary["providers"]["the_odds_api"]
     scope = provider["bet365_observation_scope"]
     assert scope["provider"] == "the_odds_api"
-    assert scope["regions"] == "us,uk,eu"
+    assert scope["effective_query_mode"] == "bookmakers"
+    assert scope["regions_requested"] == "us,uk,eu"
+    assert scope["regions_effective_for_bookmaker_probe"] is None
     assert "bet365" in scope["bookmaker_keys_queried"]
     assert "bet365_au" not in scope["bookmaker_keys_queried"]
     assert provider["bet365_present_on_dwcs"] is False
@@ -883,6 +914,8 @@ def test_scoped_absence_is_not_universal_bet365_absence(audit: Any) -> None:
     rationale = summary["decision"]["rationale"].lower()
     assert "scoped" in rationale
     assert "not universal" in rationale
+    assert "bookmakers takes precedence" in rationale
+    assert "effective_query_mode=bookmakers" in rationale
     assert summary["decision"]["path"] == "the_odds_api_reference_fallback"
 
 
