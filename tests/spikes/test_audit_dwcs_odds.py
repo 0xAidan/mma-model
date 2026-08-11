@@ -234,11 +234,12 @@ def test_pass_fail_matrix_and_decision_gate(audit: Any) -> None:
 
     decision = audit.decide_provider_path(evidence, matrix)
     assert decision["bet365_dwcs_status"] in {
-        "absent",
+        "scoped_absent",
         "present",
         "unresolved",
         "request_failed",
     }
+    assert decision["bet365_dwcs_status"] != "absent"
     assert decision["path"] in {
         "licensed_bet365_primary",
         "the_odds_api_reference_fallback",
@@ -750,3 +751,299 @@ def test_build_coverage_summary_schema(audit: Any) -> None:
     assert '"price"' not in blob
     assert "apiKey" not in blob
     assert "api_key" not in blob
+
+
+def test_bet365_au_alias_presence_is_recognized(audit: Any) -> None:
+    """Catalog identity bet365_au must count as Bet365 presence on DWCS."""
+    official = [
+        {
+            "bout_id": "bout-1",
+            "fighter_a": "Alpha One",
+            "fighter_b": "Beta Two",
+            "scheduled_start": "2026-08-12T00:00:00Z",
+        }
+    ]
+    events = [
+        {
+            "id": "evt-1",
+            "home_team": "Alpha One",
+            "away_team": "Beta Two",
+            "commence_time": "2026-08-12T00:00:00Z",
+        }
+    ]
+    summary = audit.build_coverage_summary(
+        sport="mma_mixed_martial_arts",
+        provider="the_odds_api",
+        captured_at="2026-08-11T18:00:00Z",
+        snapshot_label="T-1h",
+        official_bouts=official,
+        provider_events=events,
+        markets_by_event={
+            "evt-1": {
+                "status": "ok",
+                "bookmakers": [
+                    {
+                        "key": "bet365_au",
+                        "title": "Bet365 AU",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "last_update": "2026-08-11T17:55:00Z",
+                                "outcomes": [
+                                    {"name": "Alpha One", "price": -110},
+                                    {"name": "Beta Two", "price": -110},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+                "headers": {
+                    "x-requests-remaining": "490",
+                    "x-requests-used": "10",
+                    "x-requests-last": "1",
+                },
+                "schema_keys": ["id", "bookmakers"],
+            }
+        },
+        regions="au",
+        bookmaker_keys=["bet365", "bet365_au", "fanduel"],
+        market_keys=["h2h", "totals"],
+        manual_bet365_samples=[],
+        vendor_notes={},
+        bet365_aliases=["bet365", "bet365_au"],
+        redact=True,
+    )
+    provider = summary["providers"]["the_odds_api"]
+    assert provider["bet365_present_on_dwcs"] is True
+    assert provider["bet365_query_status"] == "ok"
+    assert summary["decision"]["bet365_dwcs_status"] == "present"
+    assert summary["events"][0]["market_discovery"]["presence"]["bet365_au"]["h2h"] == (
+        "present"
+    )
+    blob = json.dumps(summary)
+    assert '"price"' not in blob
+    assert "-110" not in blob
+
+
+def test_observation_scope_records_bookmakers_precedence(audit: Any) -> None:
+    """When bookmakers is sent, regions do not claim to scope the probe."""
+    scope = audit.build_bet365_observation_scope(
+        provider="the_odds_api",
+        regions="us,uk,eu,au",
+        bookmaker_keys=["bet365", "bet365_au", "fanduel"],
+        aliases=["bet365", "bet365_au"],
+    )
+    assert scope["effective_query_mode"] == "bookmakers"
+    assert scope["regions_requested"] == "us,uk,eu,au"
+    assert scope["regions_effective_for_bookmaker_probe"] is None
+    assert scope["bookmaker_keys_queried"] == ["bet365", "bet365_au"]
+    assert "bet365_au" in scope["bookmaker_keys_requested"]
+    assert "precedence" in scope["query_mode_note"].lower()
+    assert "afl" in scope["catalog_context"]["bet365_au"].lower()
+    assert "nrl" in scope["catalog_context"]["bet365_au"].lower()
+    assert "paid" in scope["catalog_context"]["bet365_au"].lower()
+
+    regions_only = audit.build_bet365_observation_scope(
+        provider="the_odds_api",
+        regions="au",
+        bookmaker_keys=[],
+        aliases=["bet365_au"],
+    )
+    assert regions_only["effective_query_mode"] == "regions"
+    assert regions_only["regions_effective_for_bookmaker_probe"] == "au"
+    assert regions_only["bookmaker_keys_queried"] == []
+
+
+def test_scoped_absence_is_not_universal_bet365_absence(audit: Any) -> None:
+    """Absence for queried bookmaker keys must stay scoped, never universal."""
+    official = [
+        {
+            "bout_id": "bout-1",
+            "fighter_a": "Alpha One",
+            "fighter_b": "Beta Two",
+            "scheduled_start": "2026-08-12T00:00:00Z",
+        }
+    ]
+    events = [
+        {
+            "id": "evt-1",
+            "home_team": "Alpha One",
+            "away_team": "Beta Two",
+            "commence_time": "2026-08-12T00:00:00Z",
+        }
+    ]
+    summary = audit.build_coverage_summary(
+        sport="mma_mixed_martial_arts",
+        provider="the_odds_api",
+        captured_at="2026-08-11T18:00:00Z",
+        snapshot_label="T-3h",
+        official_bouts=official,
+        provider_events=events,
+        markets_by_event={
+            "evt-1": {
+                "status": "ok",
+                "bookmakers": [
+                    {
+                        "key": "fanduel",
+                        "markets": [{"key": "h2h", "last_update": "2026-08-11T18:00:00Z"}],
+                    }
+                ],
+                "headers": {},
+                "schema_keys": ["id", "bookmakers"],
+            }
+        },
+        regions="us,uk,eu",
+        bookmaker_keys=["bet365", "fanduel"],
+        market_keys=["h2h"],
+        manual_bet365_samples=[],
+        vendor_notes={},
+        bet365_aliases=["bet365", "bet365_au"],
+        redact=True,
+    )
+    provider = summary["providers"]["the_odds_api"]
+    scope = provider["bet365_observation_scope"]
+    assert scope["provider"] == "the_odds_api"
+    assert scope["effective_query_mode"] == "bookmakers"
+    assert scope["regions_requested"] == "us,uk,eu"
+    assert scope["regions_effective_for_bookmaker_probe"] is None
+    assert "bet365" in scope["bookmaker_keys_queried"]
+    assert "bet365_au" not in scope["bookmaker_keys_queried"]
+    assert provider["bet365_present_on_dwcs"] is False
+    assert summary["decision"]["bet365_dwcs_status"] == "scoped_absent"
+    assert summary["decision"]["bet365_dwcs_status"] != "absent"
+    rationale = summary["decision"]["rationale"].lower()
+    assert "scoped" in rationale
+    assert "not universal" in rationale
+    assert "bookmakers takes precedence" in rationale
+    assert "effective_query_mode=bookmakers" in rationale
+    assert summary["decision"]["path"] == "the_odds_api_reference_fallback"
+
+
+def test_request_failure_remains_distinct_from_scoped_absence(audit: Any) -> None:
+    official = [
+        {
+            "bout_id": "bout-1",
+            "fighter_a": "Alpha One",
+            "fighter_b": "Beta Two",
+            "scheduled_start": "2026-08-12T00:00:00Z",
+        }
+    ]
+    events = [
+        {
+            "id": "evt-1",
+            "home_team": "Alpha One",
+            "away_team": "Beta Two",
+            "commence_time": "2026-08-12T00:00:00Z",
+        }
+    ]
+    summary = audit.build_coverage_summary(
+        sport="mma_mixed_martial_arts",
+        provider="the_odds_api",
+        captured_at="2026-08-11T18:00:00Z",
+        snapshot_label="T-1h",
+        official_bouts=official,
+        provider_events=events,
+        markets_by_event={
+            "evt-1": {
+                "status": "request_failed",
+                "error": "timeout",
+                "bookmakers": [],
+                "headers": {},
+                "schema_keys": [],
+            }
+        },
+        regions="au",
+        bookmaker_keys=["bet365_au"],
+        market_keys=["h2h"],
+        manual_bet365_samples=[],
+        vendor_notes={},
+        bet365_aliases=["bet365", "bet365_au"],
+        redact=True,
+    )
+    assert summary["providers"]["the_odds_api"]["bet365_present_on_dwcs"] is None
+    assert summary["providers"]["the_odds_api"]["bet365_query_status"] == "request_failed"
+    assert summary["decision"]["bet365_dwcs_status"] == "request_failed"
+    assert summary["decision"]["bet365_dwcs_status"] != "scoped_absent"
+    assert summary["decision"]["bet365_dwcs_status"] != "absent"
+
+
+def test_sanitized_market_last_update_timestamps_are_retained(audit: Any) -> None:
+    official = [
+        {
+            "bout_id": "bout-1",
+            "fighter_a": "Alpha One",
+            "fighter_b": "Beta Two",
+            "scheduled_start": "2026-08-12T00:00:00Z",
+        }
+    ]
+    events = [
+        {
+            "id": "evt-1",
+            "home_team": "Alpha One",
+            "away_team": "Beta Two",
+            "commence_time": "2026-08-12T00:00:00Z",
+        }
+    ]
+    summary = audit.build_coverage_summary(
+        sport="mma_mixed_martial_arts",
+        provider="the_odds_api",
+        captured_at="2026-08-11T18:00:00Z",
+        snapshot_label="T-1h",
+        official_bouts=official,
+        provider_events=events,
+        markets_by_event={
+            "evt-1": {
+                "status": "ok",
+                "bookmakers": [
+                    {
+                        "key": "bet365_au",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "last_update": "2026-08-11T17:40:00Z",
+                                "outcomes": [{"name": "Alpha One", "price": 1.91}],
+                            }
+                        ],
+                    },
+                    {
+                        "key": "fanduel",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "last_update": "2026-08-11T17:41:00Z",
+                                "outcomes": [{"name": "Beta Two", "price": 2.10}],
+                            }
+                        ],
+                    },
+                ],
+                "headers": {},
+                "schema_keys": ["id", "bookmakers"],
+            }
+        },
+        regions="au",
+        bookmaker_keys=["bet365_au", "fanduel"],
+        market_keys=["h2h"],
+        manual_bet365_samples=[],
+        vendor_notes={},
+        bet365_aliases=["bet365_au"],
+        redact=True,
+    )
+    timestamps = summary["events"][0]["market_discovery"]["market_timestamps"]
+    by_book = {row["bookmaker_key"]: row for row in timestamps}
+    assert by_book["bet365_au"]["market_key"] == "h2h"
+    assert by_book["bet365_au"]["last_update"] == "2026-08-11T17:40:00Z"
+    assert by_book["fanduel"]["last_update"] == "2026-08-11T17:41:00Z"
+    assert summary["timestamp_fields_documented"] is True
+    blob = json.dumps(summary)
+    assert "1.91" not in blob
+    assert "2.10" not in blob
+    assert '"price"' not in blob
+    assert all("outcomes" not in row for row in timestamps)
+    assert '"outcomes"' not in blob
+
+
+def test_default_bet365_aliases_include_bet365_au(audit: Any) -> None:
+    assert "bet365_au" in audit.DEFAULT_BET365_ALIASES
+    assert "bet365" in audit.DEFAULT_BET365_ALIASES
+    assert "au" in audit.DEFAULT_REGIONS.split(",")
+    assert "bet365_au" in audit.DEFAULT_BOOKMAKERS
