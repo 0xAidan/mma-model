@@ -8,6 +8,25 @@ to this decision.
 This document records method, citations, gates, and the handoff contract. It does
 **not** invent provider coverage from catalogs or product pages.
 
+## Phase 0 acceptance posture (important)
+
+Phase 0 **permits** an explicit hard blocker when credentials or written vendor
+quotes are missing. That is a documented missing-credential risk, not a silent
+pass.
+
+For this PR, acceptance evidence is:
+
+1. A reproducible committed scorecard in `capture_mode=fixtures` with
+   `live_measurements_claimed=false`, null live numerators, and
+   `decision.path=hard_blocker` while keys remain absent.
+2. A corrected, fixture-testable **executable measurement path** (event/bout
+   coverage, outcome agreement, difficult-identity probe, PIT/features,
+   API-Sports non-overlap, fallback adoption gates).
+
+It is **not** acceptance of measured BALLDONTLIE/API-Sports provider coverage
+and **not invented** live coverage. Do not overclaim the ticket’s first metric
+criterion as “coverage measured in production” when credentials were absent.
+
 ## Goal
 
 Choose exactly one primary licensed/official stats+identity source for DWCS
@@ -20,10 +39,11 @@ HTML, UFCStats HTML, or Bet365 scraping.
 | Input | Role |
 |-------|------|
 | `data/manifests/dwcs_bouts_v1.jsonl` | Frozen DWCS-002 universe (89 cards / 440 bouts) |
-| 2023–2025 bout slice | Audit universe for entrants + event/bout denominators |
-| Deterministic 50 difficult-identity sample | Identity stress set (see scorecard) |
+| 2023–2025 bout slice | Audit universe: **30 unique events**, 149 bouts |
+| Deterministic 50 difficult-identity sample | Identity stress set (seeded ranking) |
 | Public provider docs/terms | Rights, list price, documented fields only |
 | Optional `BALLDONTLIE_API_KEY` / `API_SPORTS_KEY` | Live measured probes only when present |
+| Optional vendor-notes JSON | SportsDataIO / Combat Registry written quote gates |
 
 DWCS-002 caveats carried forward: Phase 1 must ingest the frozen manifests first;
 null UFCStats IDs and publication timestamps remain open gaps for later tickets;
@@ -31,85 +51,86 @@ prohibited scraping stays rejected.
 
 ## Difficult-identity sample (deterministic)
 
-Selection is encoded in `scripts/spikes/audit_stats_sources.py` and echoed in the
-scorecard:
+Selection is encoded in `scripts/spikes/audit_stats_sources.py`:
 
 1. Collect unique 2023–2025 DWCS entrants (ESPN athlete id, else normalized name).
-2. Score identity difficulty: unicode/non-ASCII, hyphen/apostrophe, multi-token
-   names, short last names, colliding last names, Brazil series, reversal
-   participants, jr/sr suffixes.
+2. Score identity difficulty (unicode, hyphen/apostrophe, multi-token names, short
+   / colliding last names, Brazil series, reversals, jr/sr).
 3. Tie-break with `sha256("dwcs-003-difficult-identities-v1\|{entrant_key}")`.
 4. Take the top 50.
 
-Re-running with the same manifest and seed yields the same sample.
+The BALLDONTLIE live path probes **this 50-sample** (hit / miss / unknown), with
+bounded request budgets. It does not silently substitute a smaller generic
+entrant slice as the identity metric.
+
+## Measurement definitions (executable path)
+
+| Metric | Definition |
+|--------|------------|
+| Event coverage | Unique matched manifest events / unique frozen manifest events (denom **30** for 2023–2025). Never years/years. |
+| Bout coverage | Unique matched bouts / unique frozen bouts. |
+| Outcome agreement | Comparable mapped pairs only: provider winner/result vs manifest **event-night** result. Unmapped/ambiguous excluded (`denominator_policy=comparable_mapped_pairs_only`). |
+| Difficult identities | Partition of probed sample into hit / miss / unknown. |
+| PIT / required features / nulls / revisions / latency / request cost | Measured when evidenced; otherwise `unknown` with reason. HTTP success alone does **not** auto-fail or auto-pass. |
+| API-Sports non-overlap | Fingerprinted provider pre-DWCS history bouts not present in the DWCS universe / total fingerprintable history. |
+| Year diagnostics | Informational only (`years_with_any_provider_dwcs_named_events`); never used as event coverage. |
+
+Money amounts are quantized to integer cents with decimal-safe USD strings
+(e.g. `{"usd_cents": 6999, "usd": "69.99"}`).
 
 ## Decision tree (plan §4) — applied exactly
 
 1. Trial BALLDONTLIE GOAT against 2023–2025 DWCS entrants + difficult identities.
-2. Adopt BALLDONTLIE for UFC/DWCS core **only if all** hold:
-   - event coverage ≥ **98%**
-   - bout coverage ≥ **98%**
-   - outcome agreement ≥ **99%**
-   - required feature fields + point-in-time fitness
-   - written storage/modeling rights
-   - combined recurring spend within **~$100/month** target
-3. Otherwise obtain SportsDataIO and Combat Registry **written quotes**. Adopt the
-   first source that clears the same technical gates and budget; prefer
-   SportsDataIO for DWCS event/stats and Combat Registry for pro/amateur identity.
-4. Keep API-Sports for one paid month **only if** it adds ≥ **10%** non-overlapping
-   pre-DWCS bouts **and** passes accuracy; else cancel.
+2. Adopt BALLDONTLIE only if **all** hold: event ≥98%, bout ≥98%, outcome ≥99%,
+   required features + PIT fitness, written storage/modeling rights, budget ≤~$100.
+3. Else adopt SportsDataIO or Combat Registry only when a **complete written quote**
+   supplies rights/budget **and** the same technical thresholds are measured.
+   Missing quote/credentials ⇒ hard blocker (no silent selection).
+4. Keep API-Sports for one paid month only if non-overlap ≥10% **and** accuracy
+   pass; else cancel.
 5. Never silently fall back to prohibited scraping.
 
 ## Public evidence checked (citations)
 
-Checked at scorecard `evidence_timestamps` (committed capture uses a fixed
+Checked at scorecard `evidence_timestamps` (committed capture uses fixed
 `--capture-time`).
 
-### BALLDONTLIE MMA GOAT (provisional primary)
+### BALLDONTLIE MMA GOAT
 
 | Topic | Evidence | Citation |
 |-------|----------|----------|
-| List price / GOAT RPM | $39.99/mo, 600 req/min; 48h GOAT trial exists | [mma.balldontlie.io](https://mma.balldontlie.io/) |
-| Storage + modeling rights | Terms §6 allow store/archive/modify/analyze and AI/ML training on lawfully obtained Data | [terms](https://balldontlie.io/terms.html) |
-| Coverage caveat | Docs: UFC comprehensive; other leagues limited/incomplete (DWCS listed in leagues endpoint is **not** coverage proof) | [mma.balldontlie.io](https://mma.balldontlie.io/) |
-| Endpoints | events, fighters, fights, fight_stats, odds (tier-gated) | [mma.balldontlie.io](https://mma.balldontlie.io/) |
+| List price / GOAT RPM | $39.99/mo (3999¢), 600 req/min; 48h trial | [mma.balldontlie.io](https://mma.balldontlie.io/) |
+| Storage + modeling rights | Terms §6 allow store/archive/modify/analyze and AI/ML training | [terms](https://balldontlie.io/terms.html) |
+| Coverage caveat | UFC comprehensive; other leagues limited — league listing ≠ coverage | [mma.balldontlie.io](https://mma.balldontlie.io/) |
 
-### API-Sports MMA (one-month probe only)
-
-| Topic | Evidence | Citation |
-|-------|----------|----------|
-| Product / pricing surface | Free 100 req/day; paid PRO/ULTRA/MEGA; MMA API launched recently (2023–2024 news) | [api-sports.io/sports/mma](https://api-sports.io/sports/mma) |
-| Auth | `x-apisports-key` on `https://v1.mma.api-sports.io/` | [docs](https://api-sports.io/documentation/mma/v1) |
-| Rights | Terms push league/rights-holder authorization onto the customer for betting/commercial uses; **no** explicit storage+modeling grant comparable to BALLDONTLIE §6 → rights gate stays **unknown** until written clarification | [terms](https://api-sports.io/terms) |
-
-### SportsDataIO (preferred paid fallback / upgrade)
+### API-Sports MMA
 
 | Topic | Evidence | Citation |
 |-------|----------|----------|
-| DWCS schedules (public claim) | Workflow guide states DWCS events are confirmed/updated when announced | [workflow](https://sportsdata.io/developers/workflow-guide/mma) |
-| Fight/stat fields | Public data dictionary field list | [data dictionary](https://sportsdata.io/developers/data-dictionary/mma) |
-| SLA marketing | Product page advertises SLAs / 24/7 support (not a signed contract) | [mma-ufc-api](https://sportsdata.io/mma-ufc-api) |
-| Monthly price / retention / revision / signed rights | **Unanswered** — sales quote required (blockers in scorecard checklist) | — |
+| Product / pricing | Free 100 req/day; paid plans; recent MMA launch | [product](https://api-sports.io/sports/mma) |
+| Auth | `x-apisports-key` | [docs](https://api-sports.io/documentation/mma/v1) |
+| Rights | Customer must obtain league/rights-holder authorization; rights gate unknown until clarified | [terms](https://api-sports.io/terms) |
 
-### Combat Registry / ABC (identity record layer)
+### SportsDataIO / Combat Registry
 
-| Topic | Evidence | Citation |
-|-------|----------|----------|
-| Registry criteria | ABC MMA record-keeper criteria require official result-backed records, backups, ABC access | [ABC criteria](https://www.abcboxing.com/mma-record-keeper-criteria/) |
-| Portal | Commission/promoter portal at combatreg | [app.combatreg.com](https://app.combatreg.com/) |
-| Commercial API price + reuse rights | **Unanswered** — written quote required | — |
+Public field/workflow/criteria citations only. Monthly price, retention, revision
+semantics, SLA contract language, and commercial reuse rights remain **quote
+blockers** until answered in writing
+([workflow](https://sportsdata.io/developers/workflow-guide/mma),
+[dictionary](https://sportsdata.io/developers/data-dictionary/mma),
+[ABC criteria](https://www.abcboxing.com/mma-record-keeper-criteria/),
+[portal](https://app.combatreg.com/)).
 
 ## Live credential outcomes (this PR capture)
 
-Committed scorecard capture mode: **`fixtures`** with fixed
+Committed scorecard: **`fixtures`**,
 `captured_at=2026-08-11T21:00:00+00:00`.
 
 | Provider | Credential / access | Outcome |
 |----------|---------------------|---------|
-| BALLDONTLIE | `BALLDONTLIE_API_KEY` **absent** in environment and root `.env` | `access_status=not_configured`. Metrics remain **unknown** with non-null denominators and **null numerators**. Not classified as zero coverage. |
-| API-Sports | `API_SPORTS_KEY` / `API_SPORTS_API_KEY` **absent** | `access_status=not_configured`. Non-overlap / accuracy **unknown**. |
-| SportsDataIO | No authorized trial; no written quote on file | `quote_pending` checklist blockers |
-| Combat Registry | No authorized API; no written quote on file | `quote_pending` checklist blockers |
+| BALLDONTLIE | `BALLDONTLIE_API_KEY` absent (env + root `.env`) | `not_configured`; metrics **unknown** (null numerators, denom events=30); not zero |
+| API-Sports | `API_SPORTS_KEY` absent | `not_configured`; non-overlap/accuracy **unknown** |
+| SportsDataIO / Combat Registry | No written quote on file | `quote_pending` blockers |
 
 Operator live mode (not claimed by the committed artifact):
 
@@ -123,58 +144,41 @@ python scripts/spikes/audit_stats_sources.py \
   --redact
 ```
 
-Do **not** treat fixture regeneration as live measurement.
+Synthetic unit fixtures under
+`tests/fixtures/spikes/stats_source_synthetic_observations.json` prove metric math
+and threshold decisions only. They are **not** live provider evidence.
 
 ## Decision recorded
 
 **Hard production blocker** — `decision.path = hard_blocker`, `primary = null`.
 
-Reasons (honest, not invented):
+Reasons:
 
-1. BALLDONTLIE technical gates cannot pass without measured event/bout/outcome/PIT
-   metrics; credentials were not configured, so metrics are unknown (not zero).
-2. SportsDataIO and Combat Registry still lack written price/rights/retention/SLA
-   responses (checklist blockers).
-3. API-Sports probe cannot be kept without measured ≥10% non-overlapping pre-DWCS
-   bouts + accuracy.
-4. Prohibited scraping was **not** selected.
+1. BALLDONTLIE technical gates cannot pass without measured metrics; credentials
+   absent ⇒ unknown (not zero).
+2. SportsDataIO / Combat Registry lack complete written quotes with measured
+   thresholds.
+3. API-Sports probe cannot be kept without measured ≥10% non-overlap + accuracy.
+4. Prohibited scraping was not selected.
 
 ### Rights / budget conclusion
 
-- BALLDONTLIE **written rights**: pass (public terms §6), list price $39.99/mo.
-- Combined reference stack if BALLDONTLIE were adopted: The Odds API ~$30 + GOAT
-  ~$39.99 ≈ **$69.99/mo** ≤ $100 cap (budget gate would pass **if** technical gates
-  also passed).
-- SportsDataIO / Combat Registry commercial rights + price: **unknown / blocker**.
-- API-Sports storage/modeling rights: **unknown** under current public terms.
+- BALLDONTLIE written rights: **pass** (public terms §6); list price **3999¢**.
+- Hypothetical stack if later adopted: Odds API 3000¢ + GOAT 3999¢ = **6999¢
+  ($69.99) ≤ 10000¢ cap**.
+- API-Sports storage/modeling rights: **unknown**.
+- SportsDataIO / Combat Registry commercial rights+price: **unanswered blockers**.
 
 ### Ranked lawful fallback paths
 
-1. SportsDataIO — written quote (fields, rights, retention, revisions, SLA, price).
-2. Combat Registry — written quote (API access, rights, price) for identity/history.
-3. API-Sports — one-month probe only after credentials exist and non-overlap≥10% +
-   accuracy pass; otherwise cancel.
-
-## Classification rules
-
-| Access status | Meaning |
-|---------------|---------|
-| `not_configured` | No credential available — never treat as absence/zero coverage |
-| `auth_failed` | Key rejected |
-| `entitlement_blocked` | Key present but tier/plan blocks endpoint |
-| `ok` | Successful authenticated responses |
-| `request_failed` | Transport/HTTP failure — not absence |
-
-| Metric status | Meaning |
-|---------------|---------|
-| `measured` | Numerator/denominator from live or fixture observations |
-| `unknown` | Denominator known where applicable; numerator null |
-| `blocked` | Auth/entitlement prevented measurement |
+1. SportsDataIO — complete quote + same technical thresholds.
+2. Combat Registry — complete quote + same technical thresholds.
+3. API-Sports — one-month probe only after credentials exist and non-overlap≥10%
+   + accuracy pass; otherwise cancel.
 
 ## Commands
 
 ```bash
-# Deterministic offline regeneration (committed artifact mode)
 python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
@@ -188,16 +192,9 @@ ruff check scripts/spikes/audit_stats_sources.py tests/spikes/test_stats_source_
 
 ## Handoff contract (DWCS-102)
 
-1. Read `output/research/stats-source-scorecard.json` `decision.primary`.
-2. If `primary` is set, implement **exactly** that adapter contract.
-3. If `hard_blocker` is true (current state), keep production stats ingest blocked;
-   pursue ranked lawful fallbacks; do not enable scrapers.
-4. Preserve DWCS-002 manifests as the universe seed; never rediscover history from a
-   mutable index alone.
+1. Read `decision.primary` from the scorecard.
+2. If set, implement exactly that adapter.
+3. If `hard_blocker`, keep production stats ingest blocked; pursue ranked lawful
+   fallbacks; do not enable scrapers.
+4. Preserve DWCS-002 manifests as the universe seed.
 5. Missing bookmaker lines do not unblock or re-rank stats sources.
-
-## Artifact integrity
-
-`output/research/stats-source-scorecard.json` must remain sanitized: no API keys,
-no full licensed payloads. Regeneration with the same `--capture-time` and fixture
-mode is deterministic.

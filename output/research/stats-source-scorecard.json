@@ -1,4 +1,5 @@
 {
+  "acceptance_evidence_mode": "phase0_credential_blocker_with_executable_measurement_path",
   "audit_universes": {
     "difficult_identities": {
       "sample": [
@@ -371,12 +372,26 @@
     }
   },
   "budget_context": {
-    "cap_usd": 100.0,
-    "components": {
-      "balldontlie_goat_if_adopted": 39.99,
-      "the_odds_api_reference": 30.0
+    "cap": {
+      "usd": "100.00",
+      "usd_cents": 10000
     },
-    "recurring_monthly_usd": 69.99000000000001,
+    "cap_usd": "100.00",
+    "components": {
+      "balldontlie_goat_if_adopted": {
+        "usd": "39.99",
+        "usd_cents": 3999
+      },
+      "the_odds_api_reference": {
+        "usd": "30.00",
+        "usd_cents": 3000
+      }
+    },
+    "recurring_monthly": {
+      "usd": "69.99",
+      "usd_cents": 6999
+    },
+    "recurring_monthly_usd": "69.99",
     "status": "pass"
   },
   "capture_mode": "fixtures",
@@ -407,9 +422,25 @@
         "technical_pass": false
       },
       "budget": {
-        "cap_usd": 100.0,
-        "monthly_usd": 69.99000000000001,
+        "cap": {
+          "usd": "100.00",
+          "usd_cents": 10000
+        },
+        "monthly": {
+          "usd": "69.99",
+          "usd_cents": 6999
+        },
         "within_cap": true
+      },
+      "combat_registry": {
+        "adopt": false,
+        "gates": {},
+        "quote_status": "quote_pending"
+      },
+      "sportsdataio": {
+        "adopt": false,
+        "gates": {},
+        "quote_status": "quote_pending"
       }
     },
     "hard_blocker": true,
@@ -419,14 +450,14 @@
     "ranked_lawful_fallbacks": [
       {
         "rank": 1,
-        "requires": "written_quote_fields_rights_retention_sla_price",
+        "requires": "complete_quote+rights+budget+same_technical_thresholds",
         "role": "preferred_paid_fallback_upgrade",
         "source": "sportsdataio",
         "status": "quote_pending"
       },
       {
         "rank": 2,
-        "requires": "written_quote_api_rights_price",
+        "requires": "complete_quote+rights+budget+same_technical_thresholds",
         "role": "authoritative_identity_record_layer",
         "source": "combat_registry",
         "status": "quote_pending"
@@ -439,7 +470,7 @@
         "status": "probe_cancel_or_blocked"
       }
     ],
-    "rationale": "BALLDONTLIE did not clear all adoption gates (technical=False, rights=True, budget=True, metrics_status=unknown). Lawful fallbacks require SportsDataIO and/or Combat Registry written quotes that clear the same technical + rights + budget gates. Prohibited scraping is rejected."
+    "rationale": "No provider cleared all adoption gates. BALLDONTLIE (technical=False, rights=True, budget=True, metrics_status=unknown); SportsDataIO quote_status=quote_pending; Combat Registry quote_status=quote_pending. Missing quote/credentials remain hard blockers. Prohibited scraping is rejected."
   },
   "evidence_timestamps": {
     "api_sports_terms_checked_at": "2026-08-11T21:00:00+00:00",
@@ -451,7 +482,8 @@
   "handoff": {
     "contract": "Implement exactly one selected primary adapter only if decision.primary is set; otherwise keep production stats ingest blocked and pursue ranked lawful fallbacks. Do not enable UFCStats/Tapology/Sherdog scrapers.",
     "next_ticket": "DWCS-102",
-    "odds_note": "Missing Bet365 feed is irrelevant to stats/identity source selection; odds remain optional enrichment (DWCS-000)."
+    "odds_note": "Missing Bet365 feed is irrelevant to stats/identity source selection; odds remain optional enrichment (DWCS-000).",
+    "phase0_note": "Phase 0 permits an explicit hard blocker when credentials/quotes are absent. Acceptance evidence is the reproducible blocked/unknown state plus the executable measurement path, not invented live coverage."
   },
   "live_measurements_claimed": false,
   "manifest": {
@@ -481,7 +513,10 @@
       "access_status": "not_configured",
       "budget": {
         "citation": "https://api-sports.io/sports/mma",
-        "probe_budget_usd": 10.0
+        "probe_budget": {
+          "usd": "10.00",
+          "usd_cents": 1000
+        }
       },
       "docs_citations": [
         "https://api-sports.io/sports/mma",
@@ -517,7 +552,10 @@
       "access_status": "not_configured",
       "budget": {
         "citation": "https://mma.balldontlie.io/",
-        "listed_monthly_usd": 39.99
+        "listed_monthly": {
+          "usd": "39.99",
+          "usd_cents": 3999
+        }
       },
       "coverage_doc_caveat": "Provider docs state only UFC coverage is comprehensive; DWCS/regional must be measured, never inferred from league catalog listing.",
       "docs_citations": [
@@ -533,6 +571,17 @@
           "reason": "not_configured",
           "status": "unknown"
         },
+        "difficult_identity_coverage": {
+          "denominator_policy": "hit_miss_unknown_partition_of_probed_sample",
+          "expected_size": 50,
+          "hit": null,
+          "hit_rate": null,
+          "miss": null,
+          "probed": null,
+          "reason": "not_configured",
+          "status": "unknown",
+          "unknown": null
+        },
         "event_coverage": {
           "denominator": 30,
           "numerator": null,
@@ -546,24 +595,37 @@
           "status": "unknown"
         },
         "outcome_agreement": {
-          "denominator": 149,
+          "denominator": null,
+          "denominator_policy": "comparable_mapped_pairs_only",
+          "excluded_unknown_count": null,
           "numerator": null,
           "rate": null,
           "reason": "not_configured",
           "status": "unknown"
         },
         "pit_fitness": {
+          "field_null_rates": {
+            "fields": {},
+            "reason": "not_configured",
+            "status": "unknown"
+          },
           "latency_ms_p50": null,
-          "pre_fight_reconstruction": null,
+          "pre_fight_reconstruction": "unknown",
           "reason": "not_configured",
           "request_cost_units": null,
-          "revision_support": null,
+          "revision_support": "unknown",
           "status": "unknown"
         },
         "profile_coverage": {
-          "denominator": 279,
+          "denominator": 50,
           "numerator": null,
           "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "required_features": {
+          "missing_fight_fields": [],
+          "missing_stat_fields": [],
           "reason": "not_configured",
           "status": "unknown"
         },
@@ -573,6 +635,11 @@
           "rate": null,
           "reason": "not_configured",
           "status": "unknown"
+        },
+        "year_diagnostics": {
+          "manifest_calendar_years": null,
+          "note": "Year diagnostics are informational only and are never used as event_coverage numerator/denominator.",
+          "years_with_any_provider_dwcs_named_events": null
         }
       },
       "metrics_status": "unknown",
@@ -589,6 +656,7 @@
     },
     "combat_registry": {
       "access_status": "not_configured",
+      "adoption_gates": null,
       "docs_citations": [
         "https://www.abcboxing.com/mma-record-keeper-criteria/",
         "https://app.combatreg.com/"
@@ -670,6 +738,7 @@
     },
     "sportsdataio": {
       "access_status": "not_configured",
+      "adoption_gates": null,
       "docs_citations": [
         "https://sportsdata.io/developers/workflow-guide/mma",
         "https://sportsdata.io/developers/data-dictionary/mma",
