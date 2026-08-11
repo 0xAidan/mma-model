@@ -34,10 +34,25 @@ DecisionPath = Literal[
 ]
 
 DEFAULT_SPORT = "mma_mixed_martial_arts"
-DEFAULT_REGIONS = "us,uk,eu"
-DEFAULT_BOOKMAKERS = ("bet365", "draftkings", "fanduel", "betmgm", "williamhill_us")
+DEFAULT_REGIONS = "us,uk,eu,au"
+# The Odds API catalogs Bet365 Australia as bet365_au (region au), not bare bet365.
+DEFAULT_BET365_ALIASES = ("bet365", "bet365_au")
+DEFAULT_BOOKMAKERS = (
+    "bet365",
+    "bet365_au",
+    "draftkings",
+    "fanduel",
+    "betmgm",
+    "williamhill_us",
+)
 DEFAULT_MARKETS = ("h2h", "totals", "method", "round")
 MAX_MANUAL_BET365_SAMPLES = 5
+Bet365DwcsStatus = Literal[
+    "present",
+    "scoped_absent",
+    "request_failed",
+    "unresolved",
+]
 MATRIX_KEYS = (
     "moneyline",
     "totals",
@@ -220,6 +235,150 @@ def bookmaker_market_presence(
     return matrix
 
 
+def normalize_bookmaker_aliases(aliases: Sequence[str] | None) -> list[str]:
+    """Normalize configurable Bet365 bookmaker aliases (deduped, lowercased)."""
+    source = aliases if aliases is not None else DEFAULT_BET365_ALIASES
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for alias in source:
+        key = str(alias).strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    return normalized
+
+
+def extract_market_timestamp_evidence(
+    discovery: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Keep per-market last_update evidence; drop prices and full market payloads."""
+    rows: list[dict[str, str]] = []
+    if discovery.get("status") == "request_failed":
+        return rows
+    for bookmaker in discovery.get("bookmakers", []) or []:
+        bookmaker_key = str(bookmaker.get("key", "")).strip().lower()
+        if not bookmaker_key:
+            continue
+        for market in bookmaker.get("markets") or []:
+            market_key = str(market.get("key", "")).strip().lower()
+            last_update = market.get("last_update")
+            if not market_key or not last_update:
+                continue
+            rows.append(
+                {
+                    "bookmaker_key": bookmaker_key,
+                    "market_key": market_key,
+                    "last_update": str(last_update),
+                }
+            )
+    return rows
+
+
+def queried_bet365_keys(
+    bookmaker_keys: Sequence[str],
+    *,
+    aliases: Sequence[str],
+) -> list[str]:
+    """Intersection of requested bookmakers and configured Bet365 aliases."""
+    alias_set = {alias.lower() for alias in aliases}
+    queried: list[str] = []
+    seen: set[str] = set()
+    for key in bookmaker_keys:
+        lowered = str(key).strip().lower()
+        if lowered in alias_set and lowered not in seen:
+            seen.add(lowered)
+            queried.append(lowered)
+    return queried
+
+
+def resolve_bet365_alias_statuses(
+    presence: Mapping[str, Mapping[str, Any]],
+    *,
+    aliases: Sequence[str],
+    market_key: str = "h2h",
+) -> list[PresenceStatus | None]:
+    """Collect presence statuses for configured Bet365 aliases on one event."""
+    statuses: list[PresenceStatus | None] = []
+    market = market_key.lower()
+    for alias in aliases:
+        markets = presence.get(alias) or presence.get(alias.lower())
+        if not isinstance(markets, Mapping):
+            statuses.append(None)
+            continue
+        status = markets.get(market)
+        if status in {"present", "absent", "request_failed"}:
+            statuses.append(status)  # type: ignore[arg-type]
+        else:
+            statuses.append(None)
+    return statuses
+
+
+def summarize_scoped_bet365_observation(
+    alias_status_rows: Sequence[Sequence[PresenceStatus | None]],
+    *,
+    provider: str,
+    regions: str,
+    bookmaker_keys: Sequence[str],
+    aliases: Sequence[str],
+) -> dict[str, Any]:
+    """Summarize Bet365×DWCS evidence without claiming universal absence."""
+    queried = queried_bet365_keys(bookmaker_keys, aliases=aliases)
+    scope = {
+        "provider": provider,
+        "regions": regions,
+        "bookmaker_keys_queried": queried,
+        "aliases_configured": list(aliases),
+    }
+    flat: list[PresenceStatus] = [
+        status
+        for row in alias_status_rows
+        for status in row
+        if status is not None
+    ]
+    if not queried:
+        return {
+            "bet365_present_on_dwcs": None,
+            "bet365_query_status": None,
+            "bet365_dwcs_status": "unresolved",
+            "bet365_observation_scope": scope,
+        }
+    if not flat:
+        return {
+            "bet365_present_on_dwcs": None,
+            "bet365_query_status": None,
+            "bet365_dwcs_status": "unresolved",
+            "bet365_observation_scope": scope,
+        }
+    if any(status == "present" for status in flat):
+        return {
+            "bet365_present_on_dwcs": True,
+            "bet365_query_status": "ok",
+            "bet365_dwcs_status": "present",
+            "bet365_observation_scope": scope,
+        }
+    if any(status == "request_failed" for status in flat):
+        return {
+            "bet365_present_on_dwcs": None,
+            "bet365_query_status": "request_failed",
+            "bet365_dwcs_status": "request_failed",
+            "bet365_observation_scope": scope,
+        }
+    if all(status == "absent" for status in flat):
+        return {
+            "bet365_present_on_dwcs": False,
+            "bet365_query_status": "ok",
+            "bet365_dwcs_status": "scoped_absent",
+            "bet365_observation_scope": scope,
+        }
+    return {
+        "bet365_present_on_dwcs": None,
+        "bet365_query_status": "request_failed",
+        "bet365_dwcs_status": "request_failed",
+        "bet365_observation_scope": scope,
+    }
+
+
 def _is_secret_key(key: str) -> bool:
     lowered = key.lower().replace("-", "_")
     return any(fragment in lowered for fragment in SECRET_KEY_FRAGMENTS)
@@ -357,7 +516,8 @@ def build_not_run_artifact(*, block_reason: str) -> dict[str, Any]:
             "path": "hard_blocker",
             "rationale": (
                 "No provider decision observed; audit not run. "
-                "Missing credentials/trials are not evidence of market absence."
+                "Missing credentials/trials are not evidence of market absence. "
+                "Model-derived actionable price targets remain independent of this audit."
             ),
             "manual_sample_count": 0,
             "confirmed_manual_sample_count": 0,
@@ -398,9 +558,17 @@ def build_request_failed_artifact(
     market_keys: Sequence[str],
     events_list_meta: Mapping[str, Any] | None = None,
     redact: bool = True,
+    bet365_aliases: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Artifact for top-level /events HTTP, timeout, or payload failures."""
     safe_reason = sanitize_provider_error(failure_reason)
+    aliases = normalize_bookmaker_aliases(bet365_aliases)
+    scope = {
+        "provider": "the_odds_api",
+        "regions": regions,
+        "bookmaker_keys_queried": queried_bet365_keys(bookmaker_keys, aliases=aliases),
+        "aliases_configured": aliases,
+    }
     events_meta = dict(events_list_meta or {})
     events_list = {
         "headers": {
@@ -417,6 +585,9 @@ def build_request_failed_artifact(
             "dwcs_events_found": 0,
             "bet365_present_on_dwcs": None,
             "bet365_query_status": "request_failed",
+            "bet365_dwcs_status": "request_failed",
+            "bet365_observation_scope": scope,
+            "bet365_aliases": aliases,
             "markets_observed": [],
             "dwcs_market_discovery_status": "not_run",
             "quota": dict(events_list["headers"]),
@@ -442,6 +613,7 @@ def build_request_failed_artifact(
         "snapshot_label": snapshot_label,
         "regions": regions,
         "bookmaker_keys": list(bookmaker_keys),
+        "bet365_aliases": aliases,
         "market_keys": list(market_keys),
         "bout_classifications": [],
         "events": [],
@@ -456,12 +628,15 @@ def build_request_failed_artifact(
             "bet365_dwcs_status": "request_failed",
             "path": "hard_blocker",
             "rationale": (
-                "No licensed or reference fallback decision observed; "
-                "top-level event-list request failed and is distinct from market absence."
+                "No automatic bookmaker or reference moneyline evidence; "
+                "top-level event-list request failed and is distinct from market absence. "
+                "Line enrichment remains blocked, but model-derived actionable price "
+                "targets are independent."
             ),
             "manual_sample_count": 0,
             "confirmed_manual_sample_count": 0,
             "the_odds_api_dwcs_events_found": 0,
+            "bet365_observation_scope": scope,
         },
         "quota_fields_documented": bool(events_list["headers"]),
         "timestamp_fields_documented": False,
@@ -478,6 +653,10 @@ def build_request_failed_artifact(
             ),
             "historical_replay": (
                 "Historical replay was not evaluated from this failed capture."
+            ),
+            "bet365_scope": (
+                "Bet365 observations are scoped to provider, regions, and configured "
+                "bookmaker aliases/keys; request failure is not scoped absence."
             ),
         },
         "redacted": redact,
@@ -596,23 +775,28 @@ def decide_provider_path(
         if provider.get("status") in {"not_configured", "missing_credentials"}:
             # Missing credentials/trials are never observed absence.
             continue
+        explicit = provider.get("bet365_dwcs_status")
+        if explicit in {"present", "scoped_absent", "request_failed", "unresolved"}:
+            bet365_flags.append((name, str(explicit)))
+            continue
         flag = provider.get("bet365_present_on_dwcs")
         if flag is True:
             bet365_flags.append((name, "present"))
         elif flag is False:
-            bet365_flags.append((name, "absent"))
+            # False means scoped absence for that provider observation only.
+            bet365_flags.append((name, "scoped_absent"))
         elif provider.get("status") == "request_failed" or (
             flag is None and provider.get("bet365_query_status") == "request_failed"
         ):
             bet365_flags.append((name, "request_failed"))
 
     if any(status == "present" for _, status in bet365_flags):
-        bet365_status = "present"
+        bet365_status: Bet365DwcsStatus = "present"
     elif any(status == "request_failed" for _, status in bet365_flags):
-        # Request failure is never collapsed into explicit absence.
+        # Request failure is never collapsed into absence.
         bet365_status = "request_failed"
-    elif any(status == "absent" for _, status in bet365_flags):
-        bet365_status = "absent"
+    elif any(status == "scoped_absent" for _, status in bet365_flags):
+        bet365_status = "scoped_absent"
     else:
         bet365_status = "unresolved"
 
@@ -627,19 +811,46 @@ def decide_provider_path(
     path: DecisionPath
     rationale: str
     observed = bool(providers) or bool(manual_samples)
+    odds_scope = odds.get("bet365_observation_scope") if isinstance(odds, Mapping) else None
+    scope_note = ""
+    if isinstance(odds_scope, Mapping):
+        scope_note = (
+            f" Scoped to provider={odds_scope.get('provider')}, "
+            f"regions={odds_scope.get('regions')}, "
+            f"bookmaker_keys={odds_scope.get('bookmaker_keys_queried')}."
+        )
+
     if bet365_status == "present" and matrix.get("rights", {}).get("status") == "pass":
         path = "licensed_bet365_primary"
-        rationale = "Evidence-backed Bet365×DWCS coverage with acceptable rights notes"
+        rationale = (
+            "Evidence-backed Bet365×DWCS coverage with acceptable rights notes; "
+            "automatic line enrichment is available alongside actionable price targets."
+            + scope_note
+        )
     elif matrix.get("moneyline", {}).get("status") == "pass":
         path = "the_odds_api_reference_fallback"
-        rationale = (
-            "Bet365×DWCS not evidence-backed as present; The Odds API provided observed "
-            "DWCS h2h reference moneyline only; Bet365-complete v1 remains blocked"
-        )
+        if bet365_status == "scoped_absent":
+            rationale = (
+                "Bet365×DWCS was not observed for the queried provider/region/"
+                "bookmaker-key scope; this is scoped absence only (not universal "
+                "Bet365 absence). The Odds API provided observed DWCS h2h reference "
+                "moneyline; core v1 uses sportsbook-agnostic actionable price targets "
+                "when an automatic book line is unavailable."
+                + scope_note
+            )
+        else:
+            rationale = (
+                "Bet365×DWCS not evidence-backed as present; The Odds API provided "
+                "observed DWCS h2h reference moneyline; core v1 uses sportsbook-agnostic "
+                "actionable price targets when an automatic book line is unavailable."
+                + scope_note
+            )
     else:
         path = "hard_blocker"
         rationale = (
-            "No licensed Bet365×DWCS presence and no observed DWCS h2h reference moneyline"
+            "No automatic bookmaker or reference moneyline evidence; line enrichment "
+            "remains blocked, but model-derived actionable price targets are independent."
+            + scope_note
         )
 
     return {
@@ -650,6 +861,7 @@ def decide_provider_path(
         "manual_sample_count": len(manual_samples),
         "confirmed_manual_sample_count": len(confirmed_manual),
         "the_odds_api_dwcs_events_found": odds.get("dwcs_events_found", 0),
+        "bet365_observation_scope": odds_scope,
     }
 
 
@@ -687,8 +899,10 @@ def build_coverage_summary(
     vendor_notes: Mapping[str, Any],
     redact: bool,
     events_list_meta: Mapping[str, Any] | None = None,
+    bet365_aliases: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the DWCS-000 coverage summary object."""
+    aliases = normalize_bookmaker_aliases(bet365_aliases)
     validated_samples = validate_manual_bet365_samples(manual_bet365_samples)
     classifications = classify_official_bouts(official_bouts, provider_events)
     present_event_ids = {
@@ -717,6 +931,7 @@ def build_coverage_summary(
     quota: dict[str, str] = dict(events_list["headers"])
     market_schema_keys: list[str] = []
     dwcs_discovery_statuses: list[str] = []
+    alias_status_rows: list[list[PresenceStatus | None]] = []
 
     for event_id, discovery in markets_by_event.items():
         presence = bookmaker_market_presence(
@@ -724,16 +939,26 @@ def build_coverage_summary(
             bookmaker_keys=bookmaker_keys,
             market_keys=market_keys,
         )
+        market_timestamps = extract_market_timestamp_evidence(discovery)
         per_event_presence[event_id] = {
             "status": discovery.get("status", "ok"),
             "error": discovery.get("error"),
             "presence": presence,
+            "market_timestamps": market_timestamps,
             "schema_keys": list(discovery.get("schema_keys") or []),
             "headers": dict(discovery.get("headers") or {}),
         }
         is_dwcs = str(event_id) in {str(value) for value in present_event_ids}
         if is_dwcs:
             dwcs_discovery_statuses.append(str(discovery.get("status", "ok")))
+            queried_aliases = queried_bet365_keys(bookmaker_keys, aliases=aliases)
+            alias_status_rows.append(
+                resolve_bet365_alias_statuses(
+                    presence,
+                    aliases=queried_aliases,
+                    market_key="h2h",
+                )
+            )
             if discovery.get("status") != "request_failed":
                 for markets in presence.values():
                     for market, status in markets.items():
@@ -755,35 +980,21 @@ def build_coverage_summary(
     else:
         dwcs_market_discovery_status = "not_run"
 
-    # Bet365 on DWCS only from successful reconciled-event discovery.
-    bet365_on_dwcs: bool | None = None
-    bet365_query_status: str | None = None
-    statuses = [
-        per_event_presence[str(event_id)]["presence"].get("bet365", {}).get("h2h")
-        for event_id in present_event_ids
-        if str(event_id) in per_event_presence
-    ]
-    if statuses:
-        if any(status == "present" for status in statuses):
-            bet365_on_dwcs = True
-            bet365_query_status = "ok"
-        elif any(status == "request_failed" for status in statuses):
-            bet365_on_dwcs = None
-            bet365_query_status = "request_failed"
-        elif all(status == "absent" for status in statuses):
-            bet365_on_dwcs = False
-            bet365_query_status = "ok"
-        else:
-            bet365_on_dwcs = None
-            bet365_query_status = "request_failed"
+    # Bet365 on DWCS only from successful reconciled-event discovery, via aliases.
+    bet365_observation = summarize_scoped_bet365_observation(
+        alias_status_rows,
+        provider=provider,
+        regions=regions,
+        bookmaker_keys=bookmaker_keys,
+        aliases=aliases,
+    )
 
     timestamp_fields_documented = any(
         bool(event.get("commence_time")) for event in provider_events
     ) or any(
-        bool(market.get("last_update"))
-        for discovery in markets_by_event.values()
-        for bookmaker in discovery.get("bookmakers") or []
-        for market in bookmaker.get("markets") or []
+        bool(row.get("last_update"))
+        for discovery in per_event_presence.values()
+        for row in discovery.get("market_timestamps") or []
     )
     lock_fields_documented = any(
         isinstance(note, Mapping) and note.get("lock_events_supported") is not None
@@ -793,8 +1004,11 @@ def build_coverage_summary(
     providers: dict[str, Any] = {
         "the_odds_api": {
             "dwcs_events_found": len(present_event_ids),
-            "bet365_present_on_dwcs": bet365_on_dwcs,
-            "bet365_query_status": bet365_query_status,
+            "bet365_present_on_dwcs": bet365_observation["bet365_present_on_dwcs"],
+            "bet365_query_status": bet365_observation["bet365_query_status"],
+            "bet365_dwcs_status": bet365_observation["bet365_dwcs_status"],
+            "bet365_observation_scope": bet365_observation["bet365_observation_scope"],
+            "bet365_aliases": aliases,
             "markets_observed": sorted(observed_markets),
             "dwcs_market_discovery_status": dwcs_market_discovery_status,
             "quota": quota,
@@ -866,6 +1080,7 @@ def build_coverage_summary(
         "snapshot_label": snapshot_label,
         "regions": regions,
         "bookmaker_keys": list(bookmaker_keys),
+        "bet365_aliases": aliases,
         "market_keys": list(market_keys),
         "bout_classifications": classifications,
         "events": events_out,
@@ -879,8 +1094,9 @@ def build_coverage_summary(
         "lock_fields_documented": lock_fields_documented,
         "field_notes": {
             "timestamps": (
-                "Provider event commence_time and market last_update are recorded only when "
-                "present on captured responses."
+                "Provider event commence_time and sanitized per-market last_update are "
+                "recorded only when present on captured responses; prices/outcomes are "
+                "never retained under --redact."
             ),
             "lock_events": (
                 "Static capability note: Bet365 streaming lock events require authenticated "
@@ -893,6 +1109,11 @@ def build_coverage_summary(
             "historical_replay": (
                 "Static product note: historical snapshots may exist on paid tiers; matrix "
                 "cells stay unknown until capture/trial evidence sets the flag."
+            ),
+            "bet365_scope": (
+                "Bet365 observations are scoped to provider, regions, and configured "
+                "bookmaker aliases/keys (including bet365_au). Scoped absence is never "
+                "universal Bet365 absence."
             ),
         },
         "redacted": redact,
@@ -1029,10 +1250,12 @@ def run_audit(
     redact: bool,
     max_events_for_markets: int,
     client: httpx.Client | None = None,
+    bet365_aliases: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     captured_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     owns_client = client is None
     active_client = client if client is not None else httpx.Client(timeout=60.0)
+    aliases = normalize_bookmaker_aliases(bet365_aliases)
     try:
         events_result = fetch_provider_events(active_client, api_key=api_key, sport=sport)
         if events_result.get("status") != "ok":
@@ -1048,6 +1271,7 @@ def run_audit(
                     "schema_keys": events_result.get("schema_keys") or [],
                 },
                 redact=redact,
+                bet365_aliases=aliases,
             )
 
         events = list(events_result.get("events") or [])
@@ -1096,6 +1320,7 @@ def run_audit(
         vendor_notes=vendor_notes,
         redact=redact,
         events_list_meta={"headers": events_headers, "schema_keys": events_schema},
+        bet365_aliases=aliases,
     )
 
 
@@ -1128,6 +1353,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--bookmakers",
         default=",".join(DEFAULT_BOOKMAKERS),
         help="Comma-separated bookmaker keys to score for presence",
+    )
+    parser.add_argument(
+        "--bet365-aliases",
+        default=",".join(DEFAULT_BET365_ALIASES),
+        help=(
+            "Comma-separated The Odds API bookmaker keys treated as Bet365 "
+            "(e.g. bet365,bet365_au). Absence is scoped to these keys and --regions."
+        ),
     )
     parser.add_argument(
         "--markets",
@@ -1200,6 +1433,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     bookmaker_keys = [part.strip() for part in args.bookmakers.split(",") if part.strip()]
     market_keys = [part.strip() for part in args.markets.split(",") if part.strip()]
+    bet365_aliases = [
+        part.strip() for part in args.bet365_aliases.split(",") if part.strip()
+    ]
 
     api_key = os.environ.get(args.api_key_env, "").strip()
     if not api_key:
@@ -1230,6 +1466,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         vendor_notes=vendor_notes,
         redact=bool(args.redact),
         max_events_for_markets=args.max_events_for_markets,
+        bet365_aliases=bet365_aliases,
     )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
