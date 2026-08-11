@@ -9,8 +9,9 @@ These snippets document the intended production seam for later tickets
 
 - Reuse the **existing host Caddy** process. Do not add a competing reverse proxy.
 - Serve the dashboard as static files from `/srv/mma/public` at `mma.shermandavison.com`.
-- Worker runs via `docker compose run --rm worker ...` under `flock`. No published
-  compose ports and no public app/DB listeners.
+- Worker runs via `docker compose run --rm worker ...` under `flock`. Never publish
+  compose ports, never use Compose `expose`, never attach host networking, and
+  never open a public app/DB listener.
 - Secrets live in `/etc/mma-model/mma.env` with mode `0600` (root-owned).
 - Image references are digest-pinned (`@sha256:...`) for rollback to the prior digest.
 - Existing host Caddy continues to own public HTTP/HTTPS; this ticket does not

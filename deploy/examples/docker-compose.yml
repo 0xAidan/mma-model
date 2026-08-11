@@ -1,6 +1,6 @@
 # EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
-# Worker-only Compose topology. No published ports. No public app/DB listeners.
-# Reuse existing host Caddy for HTTPS; this file never binds web ports.
+# Worker-only Compose topology. Never publish ports, never expose, never host-net.
+# No public app/DB listeners. Reuse existing host Caddy for HTTPS.
 #
 # Rollback: retain the prior image digest and retarget `image:` to that digest.
 
@@ -17,4 +17,4 @@ services:
       - /srv/mma/data:/data
       - /srv/mma/public:/public
     working_dir: /app
-    # No `ports:` / `expose:` — intentional invariant for DWCS-004+.
+    # Intentional invariant: no published ports, expose, or host networking.

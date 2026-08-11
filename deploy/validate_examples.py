@@ -1,7 +1,8 @@
 """Static validators for DWCS-004 deploy examples (not production deploy).
 
 These checks keep example topology honest: reuse host Caddy, no public app/DB
-ports, no embedded secrets, and the documented path/permission/rollback shape.
+ports, no host networking, no embedded secrets, and the documented
+path/permission/rollback shape.
 """
 
 from __future__ import annotations
@@ -9,6 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
@@ -16,7 +20,9 @@ EXAMPLES_DIR = Path(__file__).resolve().parent / "examples"
 FORBIDDEN_PUBLIC_BIND_PATTERNS = (
     re.compile(r"\b0\.0\.0\.0\b"),
     re.compile(r"(?m)^\s*ports\s*:"),
+    re.compile(r"(?m)^\s*expose\s*:"),
     re.compile(r"(?m)^\s*publish\s*:"),
+    re.compile(r"(?i)network[_-]?mode\s*:\s*[\"']?host[\"']?\b"),
     re.compile(r"\bhost\s*=\s*0\.0\.0\.0\b", re.I),
     # Explicit app binds to privileged web ports in unit/compose command lines.
     re.compile(r"(?i)--publish\s+.*\b(80|443)\b"),
@@ -46,6 +52,12 @@ REQUIRED_PATHS = (
 )
 
 IPV4_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+COMPOSE_SUFFIXES = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,11 @@ class ValidationIssue:
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _is_compose_rel(rel: str) -> bool:
+    name = Path(rel).name.lower()
+    return name in COMPOSE_SUFFIXES or name.endswith(".compose.yml")
 
 
 def iter_example_files(examples_dir: Path = EXAMPLES_DIR) -> list[Path]:
@@ -81,16 +98,126 @@ def validate_not_installed_banner(text: str, rel: str) -> list[ValidationIssue]:
     return issues
 
 
+def _strip_hash_comments(text: str) -> str:
+    """Remove `# ...` comments so documentary mentions do not false-positive."""
+    lines: list[str] = []
+    for line in text.splitlines():
+        if "#" not in line:
+            lines.append(line)
+            continue
+        in_single = False
+        in_double = False
+        out: list[str] = []
+        for ch in line:
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == "#" and not in_single and not in_double:
+                break
+            out.append(ch)
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
 def validate_no_public_app_ports(text: str, rel: str) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
+    # Compose/unit files: ignore comments. Markdown may document forbidden keys;
+    # only enforce bind patterns there when not clearly rejecting them.
+    scan = _strip_hash_comments(text) if _is_compose_rel(rel) or rel.endswith(
+        (".service", ".timer", ".env.example", ".env")
+    ) else text
+    rel_l = rel.lower()
     for pattern in FORBIDDEN_PUBLIC_BIND_PATTERNS:
-        if pattern.search(text):
-            issues.append(
-                ValidationIssue(
-                    rel,
-                    f"forbidden public bind/publish pattern matched: {pattern.pattern}",
-                )
+        if not pattern.search(scan):
+            continue
+        if rel_l.endswith("readme.md") or rel_l.endswith(".md"):
+            # Allow docs that reject the pattern ("no ports", "never network_mode host").
+            if re.search(
+                r"(?i)\b(no|never|not|without|forbid|reject|do not|don't)\b.{0,40}"
+                + pattern.pattern,
+                text,
+            ) or re.search(
+                r"(?i)" + pattern.pattern + r".{0,40}\b(forbidden|not allowed|must not)\b",
+                text,
+            ):
+                continue
+        issues.append(
+            ValidationIssue(
+                rel,
+                f"forbidden public bind/publish pattern matched: {pattern.pattern}",
             )
+        )
+    return issues
+
+
+def _network_mode_is_host(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() == "host"
+    return False
+
+
+def _service_has_publish_surface(service: Any) -> list[str]:
+    """Return structured invariant violations for one Compose service mapping."""
+    violations: list[str] = []
+    if not isinstance(service, dict):
+        return violations
+    if "ports" in service and service.get("ports") not in (None, [], {}):
+        violations.append("compose service publishes ports")
+    if "expose" in service and service.get("expose") not in (None, [], {}):
+        violations.append("compose service uses expose")
+    if _network_mode_is_host(service.get("network_mode")):
+        violations.append("compose service uses network_mode host")
+    # Long syntax network_mode via networks + host driver is out of example scope;
+    # reject explicit host network_mode only for this ticket's seam.
+    return violations
+
+
+def validate_compose_structured(text: str, rel: str) -> list[ValidationIssue]:
+    """YAML-aware Compose checks (preferred over regex-only)."""
+    if not _is_compose_rel(rel):
+        return []
+    issues: list[ValidationIssue] = []
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return [ValidationIssue(rel, f"compose YAML parse failed: {exc}")]
+
+    if data is None:
+        return [ValidationIssue(rel, "compose YAML is empty")]
+    if not isinstance(data, dict):
+        return [ValidationIssue(rel, "compose YAML root must be a mapping")]
+
+    if _network_mode_is_host(data.get("network_mode")):
+        issues.append(ValidationIssue(rel, "compose uses top-level network_mode host"))
+
+    services = data.get("services")
+    if not isinstance(services, dict) or not services:
+        issues.append(ValidationIssue(rel, "compose must define services mapping"))
+        return issues
+
+    for name, service in services.items():
+        for message in _service_has_publish_surface(service):
+            issues.append(ValidationIssue(rel, f"service {name!r}: {message}"))
+
+    # Path / secret / digest invariants on source text remain useful with comments.
+    if "/srv/mma/data" not in text or "/srv/mma/public" not in text:
+        issues.append(
+            ValidationIssue(rel, "compose must mount /srv/mma/data and /srv/mma/public")
+        )
+    if "/etc/mma-model/mma.env" not in text:
+        issues.append(
+            ValidationIssue(rel, "compose must reference /etc/mma-model/mma.env")
+        )
+    if "sha256:" not in text and "@sha256" not in text:
+        issues.append(
+            ValidationIssue(
+                rel,
+                "compose image must be digest-pinned (sha256 placeholder allowed)",
+            )
+        )
     return issues
 
 
@@ -155,30 +282,6 @@ def validate_no_embedded_secrets(text: str, rel: str) -> list[ValidationIssue]:
     return issues
 
 
-def validate_compose_invariants(text: str, rel: str) -> list[ValidationIssue]:
-    if not rel.endswith(("docker-compose.yml", "compose.yml", "compose.yaml")):
-        return []
-    issues: list[ValidationIssue] = []
-    if re.search(r"(?m)^\s*ports\s*:", text):
-        issues.append(ValidationIssue(rel, "compose must not publish ports"))
-    if "/srv/mma/data" not in text or "/srv/mma/public" not in text:
-        issues.append(
-            ValidationIssue(rel, "compose must mount /srv/mma/data and /srv/mma/public")
-        )
-    if "/etc/mma-model/mma.env" not in text:
-        issues.append(
-            ValidationIssue(rel, "compose must reference /etc/mma-model/mma.env")
-        )
-    if "sha256:" not in text and "@sha256" not in text:
-        issues.append(
-            ValidationIssue(
-                rel,
-                "compose image must be digest-pinned (sha256 placeholder allowed)",
-            )
-        )
-    return issues
-
-
 def validate_systemd_invariants(text: str, rel: str) -> list[ValidationIssue]:
     if not (rel.endswith(".service") or rel.endswith(".timer")):
         return []
@@ -196,6 +299,10 @@ def validate_systemd_invariants(text: str, rel: str) -> list[ValidationIssue]:
             )
         if "flock" not in lower:
             issues.append(ValidationIssue(rel, "systemd service must use flock"))
+        if re.search(r"(?i)network[_-]?mode\s*=\s*host", text):
+            issues.append(ValidationIssue(rel, "systemd unit must not set network_mode=host"))
+        if re.search(r"(?i)--network[= ]+host\b", text):
+            issues.append(ValidationIssue(rel, "systemd unit must not pass --network host"))
     if rel.endswith(".timer") and "persistent=true" not in lower:
         issues.append(ValidationIssue(rel, "timer should set Persistent=true"))
     return issues
@@ -238,7 +345,10 @@ def validate_required_path_mentions(files: dict[str, str]) -> list[ValidationIss
 
 
 def validate_examples(examples_dir: Path = EXAMPLES_DIR) -> list[ValidationIssue]:
-    files = {str(p.relative_to(examples_dir.parent)): _read(p) for p in iter_example_files(examples_dir)}
+    files = {
+        str(p.relative_to(examples_dir.parent)): _read(p)
+        for p in iter_example_files(examples_dir)
+    }
     # keys like examples/foo — normalize to deploy-relative if possible
     normalized: dict[str, str] = {}
     for key, text in files.items():
@@ -256,10 +366,22 @@ def validate_examples(examples_dir: Path = EXAMPLES_DIR) -> list[ValidationIssue
         issues.extend(validate_no_public_app_ports(text, rel))
         issues.extend(validate_reuse_existing_caddy(text, rel))
         issues.extend(validate_no_embedded_secrets(text, rel))
-        issues.extend(validate_compose_invariants(text, rel))
+        issues.extend(validate_compose_structured(text, rel))
         issues.extend(validate_systemd_invariants(text, rel))
     issues.extend(validate_required_path_mentions(normalized))
     return issues
+
+
+def assert_rendered_compose_has_no_publish_surface(rendered: dict[str, Any]) -> None:
+    """Assert docker compose config output has no ports/expose/host networking."""
+    if _network_mode_is_host(rendered.get("network_mode")):
+        raise AssertionError("rendered compose uses top-level network_mode host")
+    services = rendered.get("services") or {}
+    if not isinstance(services, dict):
+        raise AssertionError("rendered compose missing services mapping")
+    for name, service in services.items():
+        for message in _service_has_publish_surface(service):
+            raise AssertionError(f"rendered service {name!r}: {message}")
 
 
 def main() -> int:

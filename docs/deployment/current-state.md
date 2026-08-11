@@ -13,8 +13,10 @@ Evidence statuses used below:
 | `unknown` | Not measured; do not invent |
 
 Redaction policy for this document: public IPv4/IPv6 addresses, usernames,
-password hashes, live secrets, unrelated site configs, and sensitive firewall/SSH
-allowlists are redacted. Topology facts needed for later implementation are kept.
+password hashes, live secrets, SSH aliases/hostnames, availability-zone labels,
+host correlators, unrelated sibling domains/routes/timers/services, full
+Caddy contents, and sensitive firewall/SSH allowlists are redacted. Topology
+facts needed for later MMA implementation are kept.
 
 **Production mutation check:** DNS, Caddy, systemd, firewall, and persistent host
 paths were **not** created or modified by this ticket. The only remote process
@@ -61,22 +63,25 @@ Observed-at: `2026-08-11T21:57:02Z`.
 
 ---
 
-## 3. Authorized SSH targets discovered locally
+## 3. Authorized SSH targets (roles only)
 
-Local SSH config was inspected for configured hosts (aliases + connectivity only).
-Private keys, usernames, and addresses are redacted.
+Local SSH configuration was inspected for configured connectivity. Private keys,
+usernames, addresses, and concrete SSH alias/hostname strings are **not**
+published here.
 
-| SSH alias | Connect (BatchMode) | Role vs root site | Status |
-|-----------|---------------------|-------------------|--------|
-| `golf-vps` | success | **Serves** `shermandavison.com` (DNS A equals this host) | `observed` |
-| `ubuntu-8gb-hel1-1` / `hetzner-bot` | success | Separate Hetzner VM; does **not** serve root site | `observed` |
+| Role label | Connect (BatchMode) | Role vs root site | Status |
+|------------|---------------------|-------------------|--------|
+| `root-site-host` | success | **Serves** `shermandavison.com` (DNS A equals this host; verified by private hash compare, not published) | `observed` |
+| `secondary-authorized-host` | success | Separate cloud VM; does **not** serve root site | `observed` |
 
-Both reachable hosts expose Hetzner `hel1-dc2` instance metadata → treated as
-Hetzner Cloud VMs. Root-site inventory below is from **`golf-vps`** only.
+Both reachable hosts report Hetzner Cloud metadata in region `eu-central`.
+Availability-zone labels and instance identifiers are omitted. Root-site inventory
+below is from **`root-site-host`** only. Operator SSH alias mapping stays in
+private runbooks outside this repository.
 
 ---
 
-## 4. Root-site host inventory (`golf-vps`)
+## 4. Root-site host inventory (`root-site-host`)
 
 Observed-at: `2026-08-11T22:00:23Z` (inventory) and `2026-08-11T22:01:14Z` (canary).
 
@@ -85,11 +90,10 @@ Observed-at: `2026-08-11T22:00:23Z` (inventory) and `2026-08-11T22:01:14Z` (cana
 | Fact | Status | Value (redacted) |
 |------|--------|------------------|
 | OS | `observed` | Ubuntu 24.04.3 LTS (noble), Linux 6.8.x, `x86_64` |
-| Machine id (prefix) | `observed` | sha256(`/etc/machine-id`) prefix `243c7c05a76c` |
 | Disk `/` | `observed` | 75G total, ~54% used (~34G avail) |
 | Memory | `observed` | ~7.6 GiB RAM; swap **0** |
 | CPUs | `observed` | 4 |
-| Provider metadata | `observed` | Hetzner region `eu-central`, AZ `hel1-dc2` |
+| Provider | `observed` | Hetzner Cloud, region `eu-central` (AZ label omitted) |
 
 ### 4.2 Docker Engine / Compose
 
@@ -105,15 +109,15 @@ Observed-at: `2026-08-11T22:00:23Z` (inventory) and `2026-08-11T22:01:14Z` (cana
 |------|--------|----------|
 | Service | `observed` | `active` + `enabled` |
 | Binary | `observed` | `/usr/bin/caddy` version **2.6.2** |
-| Unit | `observed` | `/usr/lib/systemd/system/caddy.service`; `caddy run --environ --config /etc/caddy/Caddyfile` |
-| Config path | `observed` | `/etc/caddy/Caddyfile` (plus local `.bak.*` dated 2026-08-09) |
+| Unit | `observed` | packaged unit runs `caddy run --environ --config /etc/caddy/Caddyfile` |
+| Config path | `observed` | `/etc/caddy/Caddyfile` (local backup copies dated 2026-08-09 exist; contents not stored) |
 | Validate | `observed` | `caddy validate --config /etc/caddy/Caddyfile` → **Valid configuration** |
 | Full config dumped | n/a | **Not stored** |
-| `shermandavison.com` site | `observed` | Present; static `root * /srv/shermandavison` + `file_server` + `encode`; additional `/api/golf/*` reverse_proxy handle (upstream redacted) |
+| `shermandavison.com` site | `observed` | Present; static `root * /srv/shermandavison` + `file_server` + `encode`; one additional reverse_proxy handle for an unrelated app path (path/upstream redacted) |
 | `www` | `observed` | Redirects to `https://shermandavison.com{uri}` 308 |
 | `mma.shermandavison.com` in Caddy | `observed` | **0** mentions |
 | `basic_auth` on root site | `observed` | Count **0** in current Caddyfile (dashboard auth is proposed for subdomain only) |
-| Unrelated vhosts | `observed` | Present; contents **redacted** |
+| Unrelated vhosts | `observed` | Present; names and contents **redacted** |
 
 ### 4.4 Paths (existence only — nothing created)
 
@@ -127,20 +131,32 @@ Observed-at: `2026-08-11T22:00:23Z` (inventory) and `2026-08-11T22:01:14Z` (cana
 | `/etc/mma-model` | **no** | — | `observed` |
 | `/etc/caddy` | yes | `755`, uid 0 / gid 0 | `observed` |
 | `/etc/systemd/system` | yes | `755`, uid 0 / gid 0 | `observed` |
-| `/var/lib/caddy` | yes | `750`, uid 999 / gid 988 (`caddy` account) | `observed` |
+| `/var/lib/caddy` | yes | `750`, uid 999 / gid 988 (Caddy service account) | `observed` |
 
 Writable as the inventory SSH principal (uid 0): `/srv`, `/etc`, `/etc/caddy`,
 `/etc/systemd/system`, `/tmp` → `observed` yes. **No persistent directories were
 created.**
 
-### 4.5 Firewall / listeners
+### 4.5 Firewall / listeners — **INCOMPLETE / NOT VERIFIED**
+
+This section records conflict-relevant facts only. It is **not** a hardened
+“public 80/443 only” proof.
 
 | Fact | Status | Evidence |
 |------|--------|----------|
 | UFW | `observed` | Installed; **Status: inactive** |
-| Public listeners relevant to conflicts | `observed` | `:80` and `:443` (Caddy); `:22` (sshd); Caddy admin `:2019` on localhost-ish bind; unrelated `:8000` listener present (not for MMA) |
+| Existing host Caddy | `observed` | Owns public **:80** and **:443** |
+| SSH listener | `observed` | Present on **:22** (admin surface; details omitted) |
+| Caddy admin listener | `observed` | **:2019** bound to **loopback** |
+| Unrelated non-Caddy listener | `observed` | One unrelated **all-interfaces** high-port TCP listener exists (exact port/service name omitted); not part of MMA |
 | App/DB ports for MMA | `observed` | None dedicated |
-| Detailed allowlists / raw iptables dump | `blocked` / omitted | Intentionally not published (attack-surface minimization) |
+| Cloud firewall / security-group rules | `unknown` | **NOT VERIFIED** in this ticket; allowlists intentionally not dumped |
+| Host firewall posture overall | `blocked` | Marked **INCOMPLETE / NOT VERIFIED** — UFW inactive + unknown cloud firewall means deployment-plan “public 80/443 only” is **not** proven here |
+
+**DWCS-503 hard prerequisite:** before any production MMA expose/DNS/Caddy merge,
+verify cloud-firewall posture privately (still without publishing allowlists) and
+confirm no unintended public exposure of non-Caddy listeners. Do not treat this
+DWCS-004 inventory as firewall sign-off.
 
 ### 4.6 Backups / monitoring (host today)
 
@@ -148,7 +164,7 @@ created.**
 |------|--------|----------|
 | `restic` | `observed` | Not installed |
 | `rclone` | `observed` | Not installed |
-| Existing timers | `observed` | Unrelated golf-* maintenance/backup timers present; **no** `mma-*` units |
+| Existing timers | `observed` | Unrelated sibling maintenance/backup timers present; names redacted; **no** `mma-*` units |
 | MMA backup | `proposed` | See `target-topology.md` (later tickets) |
 
 ### 4.7 Local root health via SNI
@@ -161,13 +177,13 @@ created.**
 
 ## 5. Secondary authorized host (not root site)
 
-Alias: `ubuntu-8gb-hel1-1` / `hetzner-bot`. Observed-at: `2026-08-11T21:58:28Z`.
+Role: `secondary-authorized-host`. Observed-at: `2026-08-11T21:58:28Z`.
 
 | Fact | Status | Notes |
 |------|--------|-------|
 | OS | `observed` | Ubuntu 24.04.3, x86_64, 8 CPU, ~30 GiB RAM, 75G disk ~22% used |
 | Docker | `observed` | **Not installed** |
-| Caddy | `observed` | active/enabled, version **2.11.2**, validates; site labels are **unrelated** domains (redacted); **0** `sherman` mentions |
+| Caddy | `observed` | active/enabled, version **2.11.2**, validates; site labels are **unrelated** (redacted); **0** `sherman` mentions |
 | Serves `shermandavison.com`? | `observed` | **No** (DNS A ≠ this host; Host/SNI probes do not serve the root fingerprint) |
 | Use for MMA? | `proposed` / caution | Plan assumes root-site host Caddy reuse. Do **not** deploy MMA here without an explicit topology change ticket. |
 
@@ -175,19 +191,19 @@ Alias: `ubuntu-8gb-hel1-1` / `hetzner-bot`. Observed-at: `2026-08-11T21:58:28Z`.
 
 ## 6. Temporary localhost-only static canary
 
-Observed-at: `2026-08-11T22:01:14Z` on `golf-vps`.
+Observed-at: `2026-08-11T22:01:14Z` on `root-site-host`.
 
 | Step | Status | Evidence |
 |------|--------|----------|
 | Pre-check unused high port `18765` | `observed` | free |
 | Bind | `observed` | `127.0.0.1:18765` only (Python `http.server`) |
-| Public / non-loopback reachability | `observed` | connect to primary NIC:`18765` **failed** (curl exit 7) |
+| Non-loopback reachability | `observed` | connect to non-loopback host address:`18765` **failed (connection refused)**; curl exit 7 |
 | HTTP body | `observed` | 200; sha256 `8480e6235e5e07c79eec56b7c173bf68bfc2f18b222e8093e61b1ca69cdc6240` |
 | Cleanup | `observed` | process gone; port free; temp dir removed |
 | Root site unchanged | `observed` | before/after sha256 identical (section 1) |
 | Bound 80/443 or changed Caddy? | `observed` | **No** |
 
-Command shape (illustrative; already cleaned up):
+Command shape (illustrative; already cleaned up; **not re-run** for review fixes):
 
 ```bash
 # localhost-only; never all-interfaces binds / :80 / :443
@@ -215,9 +231,9 @@ PY
 
 ## 8. Blockers / unknowns for later tickets
 
-1. **Docker absent** on the root-site host → worker/systemd examples cannot run until Engine+Compose are installed (`blocked` for runtime; docs/examples still valid).
+1. **Docker absent** on `root-site-host` → worker/systemd examples cannot run until Engine+Compose are installed (`blocked` for runtime; docs/examples still valid).
 2. **`mma.shermandavison.com` NXDOMAIN** → DNS A record not created (intentional for this ticket).
-3. **UFW inactive** → host firewall hardening is a later ops concern; do not assume cloud firewall rules without verifying in the deploy ticket (`unknown` for cloud firewall details; intentionally not dumped).
+3. **Firewall / exposure inventory INCOMPLETE / NOT VERIFIED** → UFW inactive; cloud firewall unknown; unrelated all-interfaces high-port listener observed. **Hard prerequisite for DWCS-503** (private cloud-firewall verification; no allowlist publication).
 4. **Swap is zero** on root-site host → monitor memory under Docker workloads later (`observed` risk note).
 5. Unrelated services already share this Caddy and `/srv` tree — MMA must use **isolated** `/srv/mma` paths and a **separate site block** only.
 
@@ -227,8 +243,16 @@ PY
 
 DWCS-503+ should use:
 
-- Host: SSH alias `golf-vps` (root-site Hetzner VM).
+- Host role: `root-site-host` (operator SSH mapping is private, outside this repo).
 - Existing Caddy at `/etc/caddy/Caddyfile` (validate before reload).
 - Static root `/srv/mma/public`; secrets `/etc/mma-model/mma.env` mode `0600`.
 - Examples under `deploy/examples/` (**not installed**).
+- Ownership/rollback: see section 7 and `target-topology.md` (digest pin + last-known-good `/srv/mma/public`).
 - Root-site invariant: public fingerprint of `https://shermandavison.com/` must remain stable across MMA changes.
+- **Hard prerequisite:** complete private cloud-firewall verification (section 4.5) before DNS/Caddy merge.
+
+### CI note (DWCS-001 already enforces Ruff)
+
+`.github/workflows/ci.yml` already runs global `ruff check .` plus the focused
+evaluation Ruff step on every pull request (present since DWCS-001). No additional
+Ruff CI step is required for DWCS-004.

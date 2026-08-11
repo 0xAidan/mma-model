@@ -13,14 +13,17 @@ NOT INSTALLED**).
 
 1. `https://shermandavison.com/` keeps serving the existing static tree from
    `/srv/shermandavison` via the **existing host Caddy** process.
-2. No second reverse proxy (no nginx/Traefik/HAProxy/Envoy alongside Caddy).
-3. No MMA container publishes ports; no public SQLite/DB port.
+2. No second reverse proxy (do not introduce a competing reverse-proxy process
+   alongside the existing host Caddy).
+3. No MMA container publishes ports, uses Compose `expose`, or attaches host
+   networking; no public SQLite/DB port.
 4. MMA uses subdomain `mma.shermandavison.com` only (path-prefix on the root site
    is rejected by architecture decision §12).
 5. Before/after any MMA change, capture a fingerprint-safe root check:
    HTTP status + body sha256 + etag/server headers (not full HTML archives).
 6. Target topology docs and examples must not embed live public addresses,
-   usernames, or credential hashes.
+   SSH aliases/hostnames, unrelated sibling domains/routes, usernames, or
+   credential hashes.
 
 ---
 
@@ -32,10 +35,10 @@ Internet
    v
 [ existing host Caddy ]
    |-- shermandavison.com      -> file_server /srv/shermandavison
-   |-- golf.shermandavison.com -> (existing unrelated app; do not disturb)
+   |-- <unrelated-vhosts>      -> existing sibling apps (do not disturb; names redacted)
    |-- mma.shermandavison.com  -> file_server /srv/mma/public + basic_auth
    |
-[ docker compose run --rm worker ]  (no published ports)
+[ docker compose run --rm worker ]  (no ports / expose / host networking)
    |-- mounts /srv/mma/data (SQLite WAL, one writer)
    |-- mounts /srv/mma/public (versioned dashboard JSON + static assets)
    |-- reads /etc/mma-model/mma.env (0600)
@@ -100,10 +103,10 @@ DWCS-004 did **not** create these directories.
 
 | Surface | Policy |
 |---------|--------|
-| Public | Existing Caddy HTTP/HTTPS only |
-| SSH | Keep current admin access model; do not widen in MMA tickets |
-| Worker / SQLite | Local mounts only; **no** `ports:` in compose |
-| Canaries | Localhost high ports only (127.0.0.1); never all-interfaces binds |
+| Public | Existing Caddy HTTP/HTTPS only (intended); **cloud-firewall verification is a hard DWCS-503 prerequisite** because DWCS-004 marked host exposure **INCOMPLETE / NOT VERIFIED** |
+| SSH | Keep current admin access model; do not widen in MMA tickets; do not publish aliases |
+| Worker / SQLite | Local mounts only; **no** `ports:`, **no** `expose:`, **no** `network_mode: host` |
+| Canaries | Localhost high ports only (`127.0.0.1`); never all-interfaces binds |
 
 ---
 
@@ -117,8 +120,8 @@ DWCS-004 did **not** create these directories.
 | Heartbeats | Job start/success/failure pings (e.g. Healthchecks.io) |
 | Alerts | Missed jobs, stale dashboard, disk >80%, backup age >26h |
 
-Host today: no `restic`; unrelated golf backup timers exist — MMA should add
-**separate** `mma-*` units later, not overload unrelated timers.
+Host today: no `restic`; unrelated sibling backup timers exist (names redacted) —
+MMA should add **separate** `mma-*` units later, not overload unrelated timers.
 
 ---
 
@@ -131,4 +134,5 @@ Host today: no `restic`; unrelated golf backup timers exist — MMA should add
 - No persistent `/srv/mma` creation
 - No firewall/UFW activation changes
 
-Those belong to later Phase 5 deploy tickets using this inventory.
+Those belong to later Phase 5 deploy tickets using this inventory. DWCS-503 must
+not proceed to public exposure without private cloud-firewall verification.
