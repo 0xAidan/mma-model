@@ -1,0 +1,1008 @@
+{
+  "bookmaker_keys": [
+    "bet365",
+    "draftkings",
+    "fanduel",
+    "betmgm",
+    "williamhill_us"
+  ],
+  "bout_classifications": [
+    {
+      "bout_id": "dwcs-s10e1-kunneman-kropschot",
+      "fighter_a": "Jon Kunneman",
+      "fighter_b": "Joseph Kropschot",
+      "matched_event_id": "799c085920f1dbb9e0edf5bd66bfe150",
+      "reason": "unique participant+time match",
+      "scheduled_start": "2026-08-12T00:15:00Z",
+      "status": "present"
+    },
+    {
+      "bout_id": "dwcs-s10e1-hasan-saikia",
+      "fighter_a": "Bilal Hasan",
+      "fighter_b": "Mridul Saikia",
+      "matched_event_id": "5e6cc41645f488e3dcf82d35ddba7898",
+      "reason": "unique participant+time match",
+      "scheduled_start": "2026-08-12T01:15:00Z",
+      "status": "present"
+    },
+    {
+      "bout_id": "dwcs-s10e1-wint-adams",
+      "fighter_a": "Anthony Wint",
+      "fighter_b": "Matt Adams",
+      "matched_event_id": "b23487230c72d1a9c46a58cf02db58cc",
+      "reason": "unique participant+time match",
+      "scheduled_start": "2026-08-12T02:15:00Z",
+      "status": "present"
+    },
+    {
+      "bout_id": "dwcs-s10e1-alsaghir-escarrega",
+      "fighter_a": "Abe Alsaghir",
+      "fighter_b": "Fabrizio Escarrega",
+      "matched_event_id": "98296a41ea64e7cc66d77d6b80932d58",
+      "reason": "unique participant+time match",
+      "scheduled_start": "2026-08-12T01:45:00Z",
+      "status": "present"
+    },
+    {
+      "bout_id": "dwcs-s10e1-mulumba-pagliarulo",
+      "fighter_a": "Ananias Mulumba",
+      "fighter_b": "Tom Pagliarulo",
+      "matched_event_id": "7a0bfe2800058181eb72c651edffceb7",
+      "reason": "unique participant+time match",
+      "scheduled_start": "2026-08-11T23:40:00Z",
+      "status": "present"
+    }
+  ],
+  "captured_at": "2026-08-11T19:55:24Z",
+  "decision": {
+    "bet365_dwcs_status": "absent",
+    "confirmed_manual_sample_count": 0,
+    "manual_sample_count": 0,
+    "observed": true,
+    "path": "the_odds_api_reference_fallback",
+    "rationale": "Bet365\u00d7DWCS not evidence-backed as present; The Odds API provided observed DWCS h2h reference moneyline only; Bet365-complete v1 remains blocked",
+    "the_odds_api_dwcs_events_found": 5
+  },
+  "events": [
+    {
+      "away_team": "Ananias Mulumba",
+      "commence_time": "2026-08-11T23:40:00Z",
+      "home_team": "Tom Pagliarulo",
+      "id": "7a0bfe2800058181eb72c651edffceb7",
+      "is_reconciled_dwcs": true,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "487",
+          "x-requests-used": "13"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Joseph Kropschot",
+      "commence_time": "2026-08-12T00:15:00Z",
+      "home_team": "Jon Kunneman",
+      "id": "799c085920f1dbb9e0edf5bd66bfe150",
+      "is_reconciled_dwcs": true,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "491",
+          "x-requests-used": "9"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Mridul Saikia",
+      "commence_time": "2026-08-12T01:15:00Z",
+      "home_team": "Bilal Hasan",
+      "id": "5e6cc41645f488e3dcf82d35ddba7898",
+      "is_reconciled_dwcs": true,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "490",
+          "x-requests-used": "10"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Fabrizio Escarrega",
+      "commence_time": "2026-08-12T01:45:00Z",
+      "home_team": "Abe Alsaghir",
+      "id": "98296a41ea64e7cc66d77d6b80932d58",
+      "is_reconciled_dwcs": true,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "488",
+          "x-requests-used": "12"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Anthony Wint",
+      "commence_time": "2026-08-12T02:15:00Z",
+      "home_team": "Matt Adams",
+      "id": "b23487230c72d1a9c46a58cf02db58cc",
+      "is_reconciled_dwcs": true,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "489",
+          "x-requests-used": "11"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Jose Ochoa",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Charles Johnson",
+      "id": "164b52c9f1467ba5e4ae0e3057fea9bc",
+      "is_reconciled_dwcs": false,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "486",
+          "x-requests-used": "14"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "present"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "present"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Joel Alvarez",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Chidi Njokuani",
+      "id": "40af566aa397915b97bb548306e7705f",
+      "is_reconciled_dwcs": false,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "485",
+          "x-requests-used": "15"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "present"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "present"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Eric McConico",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Donte Johnson",
+      "id": "805976a72d1093dd27badd8e8a3253b6",
+      "is_reconciled_dwcs": false,
+      "market_discovery": {
+        "error": null,
+        "headers": {
+          "x-requests-last": "1",
+          "x-requests-remaining": "484",
+          "x-requests-used": "16"
+        },
+        "presence": {
+          "bet365": {
+            "h2h": "absent",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "betmgm": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "draftkings": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "present"
+          },
+          "fanduel": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "absent"
+          },
+          "williamhill_us": {
+            "h2h": "present",
+            "method": "absent",
+            "round": "absent",
+            "totals": "present"
+          }
+        },
+        "schema_keys": [
+          "away_team",
+          "bookmakers",
+          "commence_time",
+          "home_team",
+          "id",
+          "sport_key",
+          "sport_title"
+        ],
+        "status": "ok"
+      }
+    },
+    {
+      "away_team": "Dustin Stoltzfus",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Mansur Abdul-Malik",
+      "id": "d89d78ff55589a34462231b601272171",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Esteban Ribovics",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Edson Barboza",
+      "id": "e0b0c90b1be12f3b4eed7fc6d03378b2",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Kau\u00ea Fernandes",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Jalin Turner",
+      "id": "8cde6c248e3ef2cf491263061d0eab51",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Myktybek Orolbai",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Jeremiah Wells",
+      "id": "254a3851cc1b6715f5139de1d38c744a",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Lucas Fernando",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Rafael Tobias",
+      "id": "139d4c369a7daf9ab5253a4b37336d84",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Ramiz Brahimaj",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Neil Magny",
+      "id": "fe1b44a73c88b5e32f186f3225ebb173",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Tresean Gore",
+      "commence_time": "2026-08-16T02:00:00Z",
+      "home_team": "Vicente Luque",
+      "id": "0d0fc8fe27c5269b38ff657f8a5daff9",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Gillian Robertson",
+      "commence_time": "2026-08-16T02:45:00Z",
+      "home_team": "Mackenzie Dern",
+      "id": "c402e0bce0b73aabf9601b453bfd0725",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Ian Garry",
+      "commence_time": "2026-08-16T03:30:00Z",
+      "home_team": "Islam Makhachev",
+      "id": "e1ae0688f10d4fcdab848fbb0aa4db28",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Gregory Rodrigues",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Anthony Hernandez",
+      "id": "c6715c3c940e05a817b305e6bde81e0f",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Jeisla Chaves",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Carli Judice",
+      "id": "0e0e14fd9105a24d4a6e8d2d68b00d39",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Chris Padilla",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Nasrat Haqparast",
+      "id": "48a306bf72bb5aa469f973e8b0a0ab01",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Jackson McVey",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Wes Schultz",
+      "id": "038228122fc63c55832841739444063f",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Lerryan Douglas",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Jamall Emmers",
+      "id": "7152a2ed6c39377b4d29dce4fc635ab2",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Shamil Gaziev",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Kennedy Nzechukwu",
+      "id": "c35fe773a6172aac0a95c4358fb1b7f3",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Mason Jones",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Marquel Mederos",
+      "id": "1aca646f685633d13a655dc956cf0dbd",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Reinier de Ridder",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Roman Dolidze",
+      "id": "81180cf766db17019c8063ec7afb6d0c",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Vitor Petrino",
+      "commence_time": "2026-08-23T00:00:00Z",
+      "home_team": "Sergey Spivak",
+      "id": "97b2100edfd0274e695646adcdbaeb21",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Song Yadong",
+      "commence_time": "2026-08-29T20:00:00Z",
+      "home_team": "Umar Nurmagomedov",
+      "id": "8ab8d406b097e3650cac5c1e838b262b",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Joshua Van",
+      "commence_time": "2026-09-10T00:00:00Z",
+      "home_team": "Alexandre Pantoja",
+      "id": "6d831c90374b178bc31b49ba194c14f3",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Arman Tsarukyan",
+      "commence_time": "2026-09-10T00:00:00Z",
+      "home_team": "Mauricio Ruffy",
+      "id": "498c96d1ea91a8a145437157bb94d8ba",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Tai Tuivasa",
+      "commence_time": "2026-09-10T00:00:00Z",
+      "home_team": "Robelis Despaigne",
+      "id": "abbbe87fdceccc64521b351a8922087d",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Jean Silva",
+      "commence_time": "2026-09-13T00:00:00Z",
+      "home_team": "Yair Rodriguez",
+      "id": "1a1e0823b41690515039d7b2a6f082fa",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Sean Sharaf",
+      "commence_time": "2026-09-20T00:00:00Z",
+      "home_team": "Gable Steveson",
+      "id": "430372943e1a714088d294f9501e2c06",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Robelis Despaigne",
+      "commence_time": "2026-09-20T00:00:00Z",
+      "home_team": "Tai Tuivasa",
+      "id": "35495c892bf6e3997d2725df4ca003df",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Mauricio Ruffy",
+      "commence_time": "2026-09-20T03:30:00Z",
+      "home_team": "Arman Tsarukyan",
+      "id": "9c81899bd5c97424298cb75824aa9b39",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Alexandre Pantoja",
+      "commence_time": "2026-09-20T04:00:00Z",
+      "home_team": "Joshua Van",
+      "id": "097259d4c82c4ae646995fc8d665c410",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Yoel Romero",
+      "commence_time": "2026-09-26T18:00:00Z",
+      "home_team": "Darren Till",
+      "id": "6f0a7aa6f088decf678edccd5db84fc5",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Joshua Van",
+      "commence_time": "2026-12-27T03:00:00Z",
+      "home_team": "Manel Kape",
+      "id": "be9636f30a46a5e2c5f9c869b685b788",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Alex Pereira",
+      "commence_time": "2026-12-31T05:00:00Z",
+      "home_team": "Josh Hokit",
+      "id": "1e19939d57d05943b27a369682cc1c2d",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Arman Tsarukyan",
+      "commence_time": "2026-12-31T05:00:00Z",
+      "home_team": "Justin Gaethje",
+      "id": "1a92f8c10f11dd40d8ad174b894d33a3",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Josh Hokit",
+      "commence_time": "2026-12-31T05:00:00Z",
+      "home_team": "Ciryl Gane",
+      "id": "fd4ac76a3a3201af9c0c1426898605ff",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Ilia Topuria",
+      "commence_time": "2026-12-31T05:00:00Z",
+      "home_team": "Justin Gaethje",
+      "id": "c0d24eeb24d69c7f938f38f857924c72",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Natalia Silva",
+      "commence_time": "2026-12-31T15:00:00Z",
+      "home_team": "Valentina Shevchenko",
+      "id": "8ecba67676067ae49594bb3f9bc86673",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Jorge Masvidal",
+      "commence_time": "2026-12-31T17:00:00Z",
+      "home_team": "Conor McGregor",
+      "id": "944dd8a4945ba0df2c4370de73387c5d",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Ciryl Gane",
+      "commence_time": "2027-01-01T03:00:00Z",
+      "home_team": "Tom Aspinall",
+      "id": "fa2d7e022c2c47e0855f04084d08f163",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Paulo Henrique Costa",
+      "commence_time": "2027-01-01T03:00:00Z",
+      "home_team": "Khamzat Chimaev",
+      "id": "8488c2a34f7093513d463d4b2730572e",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Khamzat Chimaev",
+      "commence_time": "2027-01-01T03:00:00Z",
+      "home_team": "Sean Strickland",
+      "id": "e697d4df59aa825d85fa764db999757f",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Paddy Pimblett",
+      "commence_time": "2027-01-01T03:00:00Z",
+      "home_team": "Max Holloway",
+      "id": "408347757571816aeae5ff71d1fd3849",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Petr Yan",
+      "commence_time": "2027-01-01T03:00:00Z",
+      "home_team": "Merab Dvalishvili",
+      "id": "1ea714e4819dc8a7185f0870bc490c14",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Nassourdine Imavov",
+      "commence_time": "2027-01-01T03:00:00Z",
+      "home_team": "Sean Strickland",
+      "id": "ead94688d843f96aba0f1486ce663b61",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Kamaru Usman",
+      "commence_time": "2027-07-02T02:00:00Z",
+      "home_team": "Islam Makhachev",
+      "id": "fcee675894f8285afc8daf0808198b74",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Conor McGregor",
+      "commence_time": "2027-07-11T00:00:00Z",
+      "home_team": "Paddy Pimblett",
+      "id": "9f2a5922ae9758c3b18ad1a31ea88959",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Carlos Ulberg",
+      "commence_time": "2027-08-01T02:00:00Z",
+      "home_team": "Magomed Ankalaev",
+      "id": "51c1b5be2ac155f167f99a26ed20bf4d",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    },
+    {
+      "away_team": "Jiri Prochazka",
+      "commence_time": "2027-08-01T02:00:00Z",
+      "home_team": "Magomed Ankalaev",
+      "id": "0d48546636ab555d10e35fa641b41eb1",
+      "is_reconciled_dwcs": false,
+      "market_discovery": null
+    }
+  ],
+  "events_list": {
+    "headers": {
+      "x-requests-last": "0",
+      "x-requests-remaining": "492",
+      "x-requests-used": "8"
+    },
+    "schema_keys": [
+      "away_team",
+      "commence_time",
+      "home_team",
+      "id",
+      "sport_key",
+      "sport_title"
+    ]
+  },
+  "field_notes": {
+    "historical_replay": "Static product note: historical snapshots may exist on paid tiers; matrix cells stay unknown until capture/trial evidence sets the flag.",
+    "lock_events": "Static capability note: Bet365 streaming lock events require authenticated trial evidence; never inferred from missing credentials.",
+    "quota": "Quota captured from /events and/or event-market response headers x-requests-remaining / x-requests-used / x-requests-last when present.",
+    "timestamps": "Provider event commence_time and market last_update are recorded only when present on captured responses."
+  },
+  "lock_fields_documented": false,
+  "manual_bet365_samples": [],
+  "market_keys": [
+    "h2h",
+    "totals",
+    "method",
+    "round"
+  ],
+  "pass_fail_matrix": {
+    "historical_replay": {
+      "evidence": "Historical replay not evaluated from capture/trial evidence",
+      "status": "unknown"
+    },
+    "lock_events": {
+      "evidence": "Lock-event support not evaluated from capture/trial evidence",
+      "status": "unknown"
+    },
+    "method": {
+      "evidence": "method not observed on reconciled DWCS market discovery",
+      "status": "fail"
+    },
+    "moneyline": {
+      "evidence": "h2h observed on a reconciled DWCS event",
+      "status": "pass"
+    },
+    "monthly_quote": {
+      "evidence": "Monthly quote not recorded from capture/trial evidence",
+      "status": "unknown"
+    },
+    "rights": {
+      "evidence": "No capture/trial rights notes recorded",
+      "status": "unknown"
+    },
+    "round": {
+      "evidence": "round not observed on reconciled DWCS market discovery",
+      "status": "fail"
+    },
+    "totals": {
+      "evidence": "totals not observed on reconciled DWCS market discovery",
+      "status": "fail"
+    }
+  },
+  "provider": "the_odds_api",
+  "providers": {
+    "opticodds": {
+      "bet365_present_on_dwcs": null,
+      "status": "not_configured"
+    },
+    "sportsdataio": {
+      "bet365_present_on_dwcs": null,
+      "status": "not_configured"
+    },
+    "sportsgameodds": {
+      "bet365_present_on_dwcs": null,
+      "status": "not_configured"
+    },
+    "the_odds_api": {
+      "bet365_present_on_dwcs": false,
+      "bet365_query_status": "ok",
+      "dwcs_events_found": 5,
+      "dwcs_market_discovery_status": "ok",
+      "events_list_schema_keys": [
+        "away_team",
+        "commence_time",
+        "home_team",
+        "id",
+        "sport_key",
+        "sport_title"
+      ],
+      "historical_replay_supported": null,
+      "lock_events_supported": null,
+      "markets_observed": [
+        "h2h"
+      ],
+      "monthly_quote_usd": null,
+      "quota": {
+        "x-requests-last": "0",
+        "x-requests-remaining": "492",
+        "x-requests-used": "8"
+      },
+      "regions": "us,uk,eu",
+      "rights_notes": null,
+      "schema_keys": [
+        "away_team",
+        "bookmakers",
+        "commence_time",
+        "home_team",
+        "id",
+        "sport_key",
+        "sport_title"
+      ],
+      "timestamps_documented": true
+    }
+  },
+  "quota_fields_documented": true,
+  "redacted": true,
+  "regions": "us,uk,eu",
+  "run_status": "captured",
+  "snapshot_label": "T-3h",
+  "sport": "mma_mixed_martial_arts",
+  "status": "ok",
+  "ticket": "DWCS-000",
+  "timestamp_fields_documented": true
+}

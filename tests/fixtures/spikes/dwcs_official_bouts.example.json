@@ -1,0 +1,32 @@
+[
+  {
+    "bout_id": "dwcs-s10e1-kunneman-kropschot",
+    "fighter_a": "Jon Kunneman",
+    "fighter_b": "Joseph Kropschot",
+    "scheduled_start": "2026-08-12T00:15:00Z"
+  },
+  {
+    "bout_id": "dwcs-s10e1-hasan-saikia",
+    "fighter_a": "Bilal Hasan",
+    "fighter_b": "Mridul Saikia",
+    "scheduled_start": "2026-08-12T01:15:00Z"
+  },
+  {
+    "bout_id": "dwcs-s10e1-wint-adams",
+    "fighter_a": "Anthony Wint",
+    "fighter_b": "Matt Adams",
+    "scheduled_start": "2026-08-12T02:15:00Z"
+  },
+  {
+    "bout_id": "dwcs-s10e1-alsaghir-escarrega",
+    "fighter_a": "Abe Alsaghir",
+    "fighter_b": "Fabrizio Escarrega",
+    "scheduled_start": "2026-08-12T01:45:00Z"
+  },
+  {
+    "bout_id": "dwcs-s10e1-mulumba-pagliarulo",
+    "fighter_a": "Ananias Mulumba",
+    "fighter_b": "Tom Pagliarulo",
+    "scheduled_start": "2026-08-11T23:40:00Z"
+  }
+]
