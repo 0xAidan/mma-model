@@ -1,0 +1,832 @@
+{
+  "acceptance_evidence_mode": "phase0_credential_blocker_with_executable_measurement_path",
+  "audit_universes": {
+    "difficult_identities": {
+      "sample": [
+        {
+          "difficulty_score": 155,
+          "display_name": "Levi Rodrigues Jr.",
+          "entrant_key": "5312089",
+          "espn_athlete_id": "5312089",
+          "normalized_name": "levi rodrigues jr"
+        },
+        {
+          "difficulty_score": 135,
+          "display_name": "Rose Conceic\u0327a\u0303o",
+          "entrant_key": "5142277",
+          "espn_athlete_id": "5142277",
+          "normalized_name": "rose conceicao"
+        },
+        {
+          "difficulty_score": 135,
+          "display_name": "Roque Concei\u00e7\u00e3o",
+          "entrant_key": "5310567",
+          "espn_athlete_id": "5310567",
+          "normalized_name": "roque conceicao"
+        },
+        {
+          "difficulty_score": 110,
+          "display_name": "Reyes Cortez Jr.",
+          "entrant_key": "4892422",
+          "espn_athlete_id": "4892422",
+          "normalized_name": "reyes cortez jr"
+        },
+        {
+          "difficulty_score": 110,
+          "display_name": "Paulo Renato Jr.",
+          "entrant_key": "5007669",
+          "espn_athlete_id": "5007669",
+          "normalized_name": "paulo renato jr"
+        },
+        {
+          "difficulty_score": 100,
+          "display_name": "Mantas Kondratavi\u010dius",
+          "entrant_key": "5264925",
+          "espn_athlete_id": "5264925",
+          "normalized_name": "mantas kondratavicius"
+        },
+        {
+          "difficulty_score": 85,
+          "display_name": "Abdul-Kareem Al-Selwady",
+          "entrant_key": "4695485",
+          "espn_athlete_id": "4695485",
+          "normalized_name": "abdul kareem al selwady"
+        },
+        {
+          "difficulty_score": 70,
+          "display_name": "Lone'er Kavanagh",
+          "entrant_key": "5147737",
+          "espn_athlete_id": "5147737",
+          "normalized_name": "lone er kavanagh"
+        },
+        {
+          "difficulty_score": 70,
+          "display_name": "Mansur Abdul-Malik",
+          "entrant_key": "5211221",
+          "espn_athlete_id": "5211221",
+          "normalized_name": "mansur abdul malik"
+        },
+        {
+          "difficulty_score": 70,
+          "display_name": "Abdellah Er-Ramy",
+          "entrant_key": "5130607",
+          "espn_athlete_id": "5130607",
+          "normalized_name": "abdellah er ramy"
+        },
+        {
+          "difficulty_score": 70,
+          "display_name": "Jean-Paul Lebosnoyani",
+          "entrant_key": "4629138",
+          "espn_athlete_id": "4629138",
+          "normalized_name": "jean paul lebosnoyani"
+        },
+        {
+          "difficulty_score": 70,
+          "display_name": "Abdul-Rakhman Yakhyaev",
+          "entrant_key": "5291025",
+          "espn_athlete_id": "5291025",
+          "normalized_name": "abdul rakhman yakhyaev"
+        },
+        {
+          "difficulty_score": 65,
+          "display_name": "Radley da Silva",
+          "entrant_key": "5265556",
+          "espn_athlete_id": "5265556",
+          "normalized_name": "radley da silva"
+        },
+        {
+          "difficulty_score": 65,
+          "display_name": "Jair de Oliveira",
+          "entrant_key": "5308872",
+          "espn_athlete_id": "5308872",
+          "normalized_name": "jair de oliveira"
+        },
+        {
+          "difficulty_score": 65,
+          "display_name": "Luis Felipe Dias",
+          "entrant_key": "4693161",
+          "espn_athlete_id": "4693161",
+          "normalized_name": "luis felipe dias"
+        },
+        {
+          "difficulty_score": 55,
+          "display_name": "An Tuan Ho",
+          "entrant_key": "5200305",
+          "espn_athlete_id": "5200305",
+          "normalized_name": "an tuan ho"
+        },
+        {
+          "difficulty_score": 55,
+          "display_name": "Kwon Won Il",
+          "entrant_key": "4907790",
+          "espn_athlete_id": "4907790",
+          "normalized_name": "kwon won il"
+        },
+        {
+          "difficulty_score": 45,
+          "display_name": "Freddy Vidal",
+          "entrant_key": "5307524",
+          "espn_athlete_id": "5307524",
+          "normalized_name": "freddy vidal"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Arthur Lopes",
+          "entrant_key": "5212857",
+          "espn_athlete_id": "5212857",
+          "normalized_name": "arthur lopes"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Julieta Martinez",
+          "entrant_key": "5223854",
+          "espn_athlete_id": "5223854",
+          "normalized_name": "julieta martinez"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Janaina Silva",
+          "entrant_key": "5143887",
+          "espn_athlete_id": "5143887",
+          "normalized_name": "janaina silva"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Michael Oliveira",
+          "entrant_key": "5282411",
+          "espn_athlete_id": "5282411",
+          "normalized_name": "michael oliveira"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Victor Dias",
+          "entrant_key": "4788298",
+          "espn_athlete_id": "4788298",
+          "normalized_name": "victor dias"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "David Martinez",
+          "entrant_key": "4503229",
+          "espn_athlete_id": "4503229",
+          "normalized_name": "david martinez"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Elijah Smith",
+          "entrant_key": "5144797",
+          "espn_athlete_id": "5144797",
+          "normalized_name": "elijah smith"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Jean Silva",
+          "entrant_key": "5145766",
+          "espn_athlete_id": "5145766",
+          "normalized_name": "jean silva"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Magno Dias",
+          "entrant_key": "5278268",
+          "espn_athlete_id": "5278268",
+          "normalized_name": "magno dias"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Dione Barbosa",
+          "entrant_key": "4801725",
+          "espn_athlete_id": "4801725",
+          "normalized_name": "dione barbosa"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Trent Miller",
+          "entrant_key": "5216997",
+          "espn_athlete_id": "5216997",
+          "normalized_name": "trent miller"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Jhonata Silva",
+          "entrant_key": "5126213",
+          "espn_athlete_id": "5126213",
+          "normalized_name": "jhonata silva"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Marcio Barbosa",
+          "entrant_key": "5099679",
+          "espn_athlete_id": "5099679",
+          "normalized_name": "marcio barbosa"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Ty Miller",
+          "entrant_key": "5290957",
+          "espn_athlete_id": "5290957",
+          "normalized_name": "ty miller"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Bruno Lopes",
+          "entrant_key": "4691323",
+          "espn_athlete_id": "4691323",
+          "normalized_name": "bruno lopes"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Danny Silva",
+          "entrant_key": "4702589",
+          "espn_athlete_id": "4702589",
+          "normalized_name": "danny silva"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Vinicius Oliveira",
+          "entrant_key": "4884877",
+          "espn_athlete_id": "4884877",
+          "normalized_name": "vinicius oliveira"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Samuel Silva",
+          "entrant_key": "5124146",
+          "espn_athlete_id": "5124146",
+          "normalized_name": "samuel silva"
+        },
+        {
+          "difficulty_score": 35,
+          "display_name": "Jacobe Smith",
+          "entrant_key": "5149961",
+          "espn_athlete_id": "5149961",
+          "normalized_name": "jacobe smith"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Matthieu Letho Duclos",
+          "entrant_key": "5013686",
+          "espn_athlete_id": "5013686",
+          "normalized_name": "matthieu letho duclos"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "In Soo Hwang",
+          "entrant_key": "5293566",
+          "espn_athlete_id": "5293566",
+          "normalized_name": "in soo hwang"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Jose Miguel Delgado",
+          "entrant_key": "5223435",
+          "espn_athlete_id": "5223435",
+          "normalized_name": "jose miguel delgado"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Louis Lee Scott",
+          "entrant_key": "5212852",
+          "espn_athlete_id": "5212852",
+          "normalized_name": "louis lee scott"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Jose Daniel Medina",
+          "entrant_key": "5157817",
+          "espn_athlete_id": "5157817",
+          "normalized_name": "jose daniel medina"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Adrian Luna Martinetti",
+          "entrant_key": "5310570",
+          "espn_athlete_id": "5310570",
+          "normalized_name": "adrian luna martinetti"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Eduardo Torres Caut",
+          "entrant_key": "5119536",
+          "espn_athlete_id": "5119536",
+          "normalized_name": "eduardo torres caut"
+        },
+        {
+          "difficulty_score": 30,
+          "display_name": "Yadier del Valle",
+          "entrant_key": "5213179",
+          "espn_athlete_id": "5213179",
+          "normalized_name": "yadier del valle"
+        },
+        {
+          "difficulty_score": 25,
+          "display_name": "Mackson Lee",
+          "entrant_key": "5307813",
+          "espn_athlete_id": "5307813",
+          "normalized_name": "mackson lee"
+        },
+        {
+          "difficulty_score": 25,
+          "display_name": "Bolaji Oki",
+          "entrant_key": "5145682",
+          "espn_athlete_id": "5145682",
+          "normalized_name": "bolaji oki"
+        },
+        {
+          "difficulty_score": 25,
+          "display_name": "Aaron Tau",
+          "entrant_key": "5215272",
+          "espn_athlete_id": "5215272",
+          "normalized_name": "aaron tau"
+        },
+        {
+          "difficulty_score": 25,
+          "display_name": "Mohamed Ado",
+          "entrant_key": "5218668",
+          "espn_athlete_id": "5218668",
+          "normalized_name": "mohamed ado"
+        },
+        {
+          "difficulty_score": 25,
+          "display_name": "Mahamed Aly",
+          "entrant_key": "5307811",
+          "espn_athlete_id": "5307811",
+          "normalized_name": "mahamed aly"
+        }
+      ],
+      "seed": "dwcs-003-difficult-identities-v1",
+      "selection_method": "Deterministic ranking of 2023\u20132025 DWCS entrants by identity-difficulty score (unicode/non-ASCII +100, hyphen/apostrophe +40, >=3 name tokens +30, short last name +25, colliding last name +35, Brazil series +50, reversal participant +45, jr/sr +20), tie-broken by sha256(dwcs-003-difficult-identities-v1|entrant_key). Take the top 50.",
+      "size": 50
+    },
+    "dwcs_2023_2025": {
+      "bout_count": 149,
+      "bout_ids_sample": [
+        "dwcs:bout:espn:401567318",
+        "dwcs:bout:espn:401567319",
+        "dwcs:bout:espn:401567320",
+        "dwcs:bout:espn:401567321",
+        "dwcs:bout:espn:401571749"
+      ],
+      "entrant_count": 279,
+      "event_count": 30
+    }
+  },
+  "budget_context": {
+    "cap": {
+      "usd": "100.00",
+      "usd_cents": 10000
+    },
+    "cap_usd": "100.00",
+    "components": {
+      "balldontlie_goat_if_adopted": {
+        "usd": "39.99",
+        "usd_cents": 3999
+      },
+      "the_odds_api_reference": {
+        "usd": "30.00",
+        "usd_cents": 3000
+      }
+    },
+    "recurring_monthly": {
+      "usd": "69.99",
+      "usd_cents": 6999
+    },
+    "recurring_monthly_usd": "69.99",
+    "status": "pass"
+  },
+  "capture_mode": "fixtures",
+  "captured_at": "2026-08-11T21:00:00+00:00",
+  "decision": {
+    "api_sports_probe_keep": false,
+    "gates": {
+      "api_sports": {
+        "access_status": "not_configured",
+        "accuracy_status": "unknown",
+        "non_overlap_min": 0.1,
+        "non_overlap_rate": null,
+        "probe_keep": false
+      },
+      "balldontlie": {
+        "adopt": false,
+        "bout_coverage_min": 0.98,
+        "bout_coverage_rate": null,
+        "budget_status": "pass",
+        "event_coverage_min": 0.98,
+        "event_coverage_rate": null,
+        "metrics_status": "unknown",
+        "outcome_agreement_min": 0.99,
+        "outcome_agreement_rate": null,
+        "pit_fitness_status": "unknown",
+        "required_features_status": "unknown",
+        "rights_status": "pass",
+        "technical_pass": false
+      },
+      "budget": {
+        "cap": {
+          "usd": "100.00",
+          "usd_cents": 10000
+        },
+        "monthly": {
+          "usd": "69.99",
+          "usd_cents": 6999
+        },
+        "within_cap": true
+      },
+      "combat_registry": {
+        "adopt": false,
+        "gates": {},
+        "quote_status": "quote_pending"
+      },
+      "sportsdataio": {
+        "adopt": false,
+        "gates": {},
+        "quote_status": "quote_pending"
+      }
+    },
+    "hard_blocker": true,
+    "path": "hard_blocker",
+    "primary": null,
+    "prohibited_scraping_selected": false,
+    "ranked_lawful_fallbacks": [
+      {
+        "rank": 1,
+        "requires": "complete_quote+rights+budget+same_technical_thresholds",
+        "role": "preferred_paid_fallback_upgrade",
+        "source": "sportsdataio",
+        "status": "quote_pending"
+      },
+      {
+        "rank": 2,
+        "requires": "complete_quote+rights+budget+same_technical_thresholds",
+        "role": "authoritative_identity_record_layer",
+        "source": "combat_registry",
+        "status": "quote_pending"
+      },
+      {
+        "rank": 3,
+        "requires": ">=10% non-overlapping pre-DWCS bouts plus accuracy; else cancel",
+        "role": "one_month_non_overlap_probe",
+        "source": "api_sports",
+        "status": "probe_cancel_or_blocked"
+      }
+    ],
+    "rationale": "No provider cleared all adoption gates. BALLDONTLIE (technical=False, rights=True, budget=True, metrics_status=unknown); SportsDataIO quote_status=quote_pending; Combat Registry quote_status=quote_pending. Missing quote/credentials remain hard blockers. Prohibited scraping is rejected."
+  },
+  "evidence_timestamps": {
+    "api_sports_terms_checked_at": "2026-08-11T21:00:00+00:00",
+    "balldontlie_terms_checked_at": "2026-08-11T21:00:00+00:00",
+    "combat_registry_docs_checked_at": "2026-08-11T21:00:00+00:00",
+    "scorecard_captured_at": "2026-08-11T21:00:00+00:00",
+    "sportsdataio_docs_checked_at": "2026-08-11T21:00:00+00:00"
+  },
+  "handoff": {
+    "contract": "Implement exactly one selected primary adapter only if decision.primary is set; otherwise keep production stats ingest blocked and pursue ranked lawful fallbacks. Do not enable UFCStats/Tapology/Sherdog scrapers.",
+    "next_ticket": "DWCS-102",
+    "odds_note": "Missing Bet365 feed is irrelevant to stats/identity source selection; odds remain optional enrichment (DWCS-000).",
+    "phase0_note": "Phase 0 permits an explicit hard blocker when credentials/quotes are absent. Acceptance evidence is the reproducible blocked/unknown state plus the executable measurement path, not invented live coverage."
+  },
+  "live_measurements_claimed": false,
+  "manifest": {
+    "bout_count": 149,
+    "entrant_count": 279,
+    "event_count": 30,
+    "filtered_years": [
+      2023,
+      2024,
+      2025
+    ],
+    "path": "data/manifests/dwcs_bouts_v1.jsonl"
+  },
+  "prohibited_sources": {
+    "rejected": [
+      "tapology_scrape",
+      "sherdog_scrape",
+      "fightmatrix_scrape",
+      "ufcstats_html_scrape",
+      "ufc_html_scrape",
+      "bet365_scrape"
+    ],
+    "rule": "Never silently fall back to prohibited scraping"
+  },
+  "providers": {
+    "api_sports": {
+      "access_status": "not_configured",
+      "budget": {
+        "citation": "https://api-sports.io/sports/mma",
+        "probe_budget": {
+          "usd": "10.00",
+          "usd_cents": 1000
+        }
+      },
+      "docs_citations": [
+        "https://api-sports.io/sports/mma",
+        "https://api-sports.io/documentation/mma/v1",
+        "https://api-sports.io/terms"
+      ],
+      "error": "API_SPORTS_KEY not set",
+      "metrics": {
+        "accuracy": {
+          "status": "unknown"
+        },
+        "non_overlapping_pre_dwcs_bouts": {
+          "denominator": null,
+          "numerator": null,
+          "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        }
+      },
+      "metrics_status": "unknown",
+      "rights": {
+        "checked_at": "2026-08-11T21:00:00+00:00",
+        "citation": "https://api-sports.io/terms",
+        "modeling_allowed": null,
+        "notes": "Terms place responsibility on the user to obtain league/rights-holder authorization for commercial/betting uses; no explicit grant equivalent to BALLDONTLIE \u00a76 storage+modeling permission. Treat rights as unknown until clarified in writing.",
+        "source": "written_terms_ambiguous",
+        "status": "unknown",
+        "storage_allowed": null
+      },
+      "role": "one_month_coverage_probe"
+    },
+    "balldontlie": {
+      "access_status": "not_configured",
+      "budget": {
+        "citation": "https://mma.balldontlie.io/",
+        "listed_monthly": {
+          "usd": "39.99",
+          "usd_cents": 3999
+        }
+      },
+      "coverage_doc_caveat": "Provider docs state only UFC coverage is comprehensive; DWCS/regional must be measured, never inferred from league catalog listing.",
+      "docs_citations": [
+        "https://mma.balldontlie.io/",
+        "https://balldontlie.io/terms.html"
+      ],
+      "error": "BALLDONTLIE_API_KEY not set",
+      "metrics": {
+        "bout_coverage": {
+          "denominator": 149,
+          "numerator": null,
+          "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "difficult_identity_coverage": {
+          "denominator_policy": "hit_miss_unknown_partition_of_probed_sample",
+          "expected_size": 50,
+          "hit": null,
+          "hit_rate": null,
+          "miss": null,
+          "probed": null,
+          "reason": "not_configured",
+          "status": "unknown",
+          "unknown": null
+        },
+        "event_coverage": {
+          "denominator": 30,
+          "numerator": null,
+          "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "field_null_rates": {
+          "fields": {},
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "outcome_agreement": {
+          "denominator": null,
+          "denominator_policy": "comparable_mapped_pairs_only",
+          "excluded_unknown_count": null,
+          "numerator": null,
+          "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "pit_fitness": {
+          "field_null_rates": {
+            "fields": {},
+            "reason": "not_configured",
+            "status": "unknown"
+          },
+          "latency_ms_p50": null,
+          "pre_fight_reconstruction": "unknown",
+          "reason": "not_configured",
+          "request_cost_units": null,
+          "revision_support": "unknown",
+          "status": "unknown"
+        },
+        "profile_coverage": {
+          "denominator": 50,
+          "numerator": null,
+          "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "required_features": {
+          "missing_fight_fields": [],
+          "missing_stat_fields": [],
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "stat_coverage": {
+          "denominator": 149,
+          "numerator": null,
+          "rate": null,
+          "reason": "not_configured",
+          "status": "unknown"
+        },
+        "year_diagnostics": {
+          "manifest_calendar_years": null,
+          "note": "Year diagnostics are informational only and are never used as event_coverage numerator/denominator.",
+          "years_with_any_provider_dwcs_named_events": null
+        }
+      },
+      "metrics_status": "unknown",
+      "rights": {
+        "checked_at": "2026-08-11T21:00:00+00:00",
+        "citation": "https://balldontlie.io/terms.html",
+        "modeling_allowed": true,
+        "notes": "Terms \u00a76 expressly permit store/archive/modify/analyze and AI/ML training from lawfully obtained Data. Coverage remains best-effort; docs state only UFC is comprehensive.",
+        "source": "written_terms",
+        "status": "pass",
+        "storage_allowed": true
+      },
+      "role": "provisional_primary"
+    },
+    "combat_registry": {
+      "access_status": "not_configured",
+      "adoption_gates": null,
+      "docs_citations": [
+        "https://www.abcboxing.com/mma-record-keeper-criteria/",
+        "https://app.combatreg.com/"
+      ],
+      "documented_public": {
+        "items": [
+          {
+            "blocker": false,
+            "citation": "https://www.abcboxing.com/mma-record-keeper-criteria/",
+            "id": "abc_registry_criteria",
+            "question": "ABC MMA record-keeper criteria require official result-backed identities/records",
+            "status": "documented_public"
+          },
+          {
+            "blocker": false,
+            "citation": "https://app.combatreg.com/",
+            "id": "portal_exists",
+            "question": "Combat Registry portal exists for commissions/promoters",
+            "status": "documented_public"
+          },
+          {
+            "blocker": true,
+            "id": "public_api_price_rights",
+            "notes": "No public developer pricing/rights page located; written quote required",
+            "question": "Public API pricing and commercial reuse rights",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "fields_event_bout_result_profile_stat",
+            "question": "Confirm event/bout/result/profile/stat fields for DWCS + regional history",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "storage_modeling_rights",
+            "question": "Written rights to store, remodel, and retain observations for betting models",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "retention_revision_history",
+            "question": "Retention window and revision/history semantics for mutable results",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "sla_uptime_support",
+            "question": "SLA / uptime / support response commitments",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "monthly_price",
+            "question": "Monthly price for required feeds within or above $100 combined budget",
+            "status": "unanswered"
+          }
+        ],
+        "request_response_checklist": [
+          "Send written request covering fields, rights, retention, revisions, SLA, monthly price",
+          "Record vendor contact, request timestamp, and response timestamp",
+          "Attach redacted written response summary (no credentials)",
+          "Mark each checklist item answered/unanswered; unanswered remains a blocker"
+        ],
+        "status": "quote_pending",
+        "unanswered_blocker_count": 6,
+        "vendor": "combat_registry"
+      },
+      "rights": {
+        "checked_at": "2026-08-11T21:00:00+00:00",
+        "citation": "https://www.abcboxing.com/mma-record-keeper-criteria/",
+        "modeling_allowed": null,
+        "notes": "ABC criteria describe registry obligations; commercial API rights/price unanswered",
+        "source": "no_written_response",
+        "status": "unknown",
+        "storage_allowed": null
+      },
+      "role": "authoritative_identity_record_layer"
+    },
+    "sportsdataio": {
+      "access_status": "not_configured",
+      "adoption_gates": null,
+      "docs_citations": [
+        "https://sportsdata.io/developers/workflow-guide/mma",
+        "https://sportsdata.io/developers/data-dictionary/mma",
+        "https://sportsdata.io/mma-ufc-api"
+      ],
+      "documented_public": {
+        "items": [
+          {
+            "blocker": false,
+            "citation": "https://sportsdata.io/developers/workflow-guide/mma",
+            "id": "public_dwcs_schedule_claim",
+            "question": "Public workflow guide states DWCS events are confirmed/updated when announced",
+            "status": "documented_public"
+          },
+          {
+            "blocker": false,
+            "citation": "https://sportsdata.io/developers/data-dictionary/mma",
+            "id": "public_fight_stat_fields",
+            "question": "Public data dictionary documents fight/fighter stat field names",
+            "status": "documented_public"
+          },
+          {
+            "blocker": false,
+            "citation": "https://sportsdata.io/mma-ufc-api",
+            "id": "public_sla_marketing",
+            "question": "Marketing pages advertise SLAs with 24/7 support (not a signed contract)",
+            "status": "documented_public"
+          },
+          {
+            "blocker": true,
+            "id": "public_price",
+            "notes": "Pricing is sales-quoted; no redistributable public MMA SKU price found",
+            "question": "Public MMA monthly price",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "fields_event_bout_result_profile_stat",
+            "question": "Confirm event/bout/result/profile/stat fields for DWCS + regional history",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "storage_modeling_rights",
+            "question": "Written rights to store, remodel, and retain observations for betting models",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "retention_revision_history",
+            "question": "Retention window and revision/history semantics for mutable results",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "sla_uptime_support",
+            "question": "SLA / uptime / support response commitments",
+            "status": "unanswered"
+          },
+          {
+            "blocker": true,
+            "id": "monthly_price",
+            "question": "Monthly price for required feeds within or above $100 combined budget",
+            "status": "unanswered"
+          }
+        ],
+        "request_response_checklist": [
+          "Send written request covering fields, rights, retention, revisions, SLA, monthly price",
+          "Record vendor contact, request timestamp, and response timestamp",
+          "Attach redacted written response summary (no credentials)",
+          "Mark each checklist item answered/unanswered; unanswered remains a blocker"
+        ],
+        "status": "quote_pending",
+        "unanswered_blocker_count": 6,
+        "vendor": "sportsdataio"
+      },
+      "rights": {
+        "checked_at": "2026-08-11T21:00:00+00:00",
+        "citation": null,
+        "modeling_allowed": null,
+        "notes": "Requires written quote; public marketing SLA is not a contract",
+        "source": "no_written_response",
+        "status": "unknown",
+        "storage_allowed": null
+      },
+      "role": "preferred_paid_fallback_upgrade"
+    }
+  },
+  "schema_version": 1,
+  "ticket": "DWCS-003"
+}

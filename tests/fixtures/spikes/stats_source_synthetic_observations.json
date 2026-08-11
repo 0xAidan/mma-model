@@ -1,0 +1,210 @@
+{
+  "description": "Synthetic measured-path fixtures for DWCS-003 unit tests. Not live provider evidence.",
+  "manifest_bouts": [
+    {
+      "bout_id": "dwcs:bout:espn:s1",
+      "event_id": "dwcs:event:espn:e1",
+      "calendar_year": 2024,
+      "occurrence_timestamp": "2024-08-13T00:00:00+00:00",
+      "event_night_result": {
+        "class": "decisive",
+        "winner_display_name": "Alice Alpha"
+      },
+      "participants": [
+        {
+          "display_name": "Alice Alpha",
+          "normalized_name": "alice alpha",
+          "espn_athlete_id": "1"
+        },
+        {
+          "display_name": "Bob Beta",
+          "normalized_name": "bob beta",
+          "espn_athlete_id": "2"
+        }
+      ]
+    },
+    {
+      "bout_id": "dwcs:bout:espn:s2",
+      "event_id": "dwcs:event:espn:e1",
+      "calendar_year": 2024,
+      "occurrence_timestamp": "2024-08-13T00:00:00+00:00",
+      "event_night_result": {
+        "class": "draw",
+        "winner_display_name": null
+      },
+      "participants": [
+        {
+          "display_name": "Cara Lee",
+          "normalized_name": "cara lee",
+          "espn_athlete_id": "3"
+        },
+        {
+          "display_name": "Dan Delta",
+          "normalized_name": "dan delta",
+          "espn_athlete_id": "4"
+        }
+      ]
+    },
+    {
+      "bout_id": "dwcs:bout:espn:s3",
+      "event_id": "dwcs:event:espn:e2",
+      "calendar_year": 2025,
+      "occurrence_timestamp": "2025-09-09T00:00:00+00:00",
+      "event_night_result": {
+        "class": "no_contest",
+        "winner_display_name": null
+      },
+      "participants": [
+        {
+          "display_name": "Eve Epsilon",
+          "normalized_name": "eve epsilon",
+          "espn_athlete_id": "5"
+        },
+        {
+          "display_name": "Frank Zeta",
+          "normalized_name": "frank zeta",
+          "espn_athlete_id": "6"
+        }
+      ]
+    }
+  ],
+  "provider_fights": [
+    {
+      "id": 101,
+      "date": "2024-08-13",
+      "status": "completed",
+      "result_method": "KO/TKO",
+      "fighter1": {"id": 1, "name": "Alice Alpha"},
+      "fighter2": {"id": 2, "name": "Bob Beta"},
+      "winner": {"id": 1, "name": "Alice Alpha"}
+    },
+    {
+      "id": 102,
+      "date": "2024-08-13",
+      "status": "completed",
+      "result_method": "Draw",
+      "fighter1": {"id": 3, "name": "Cara Lee"},
+      "fighter2": {"id": 4, "name": "Dan Delta"}
+    },
+    {
+      "id": 103,
+      "date": "2025-09-09",
+      "status": "completed",
+      "result_method": "No Contest",
+      "fighter1": {"id": 5, "name": "Eve Epsilon"},
+      "fighter2": {"id": 6, "name": "Frank Zeta"}
+    }
+  ],
+  "difficult_identity_results": [
+    {"entrant_key": "1", "status": "hit"},
+    {"entrant_key": "2", "status": "miss"},
+    {"entrant_key": "3", "status": "unknown", "reason": "request_budget_exhausted_or_access_lost"}
+  ],
+  "api_sports_history_bouts": [
+    {
+      "date": "2022-01-01",
+      "fighter1": {"name": "Alice Alpha"},
+      "fighter2": {"name": "Regional Rival"}
+    },
+    {
+      "date": "2022-06-01",
+      "fighter1": {"name": "Bob Beta"},
+      "fighter2": {"name": "Other Rival"}
+    },
+    {
+      "date": "2024-08-13",
+      "fighter1": {"name": "Alice Alpha"},
+      "fighter2": {"name": "Bob Beta"}
+    },
+    {
+      "date": "2021-03-03",
+      "fighter1": {"name": "Cara Lee"},
+      "fighter2": {"name": "Local Opponent"}
+    },
+    {
+      "date": "2020-04-04",
+      "fighter1": {"name": "Dan Delta"},
+      "fighter2": {"name": "Gym Mate"}
+    },
+    {
+      "date": "2019-05-05",
+      "fighter1": {"name": "Eve Epsilon"},
+      "fighter2": {"name": "Prospect One"}
+    },
+    {
+      "date": "2018-06-06",
+      "fighter1": {"name": "Frank Zeta"},
+      "fighter2": {"name": "Prospect Two"}
+    },
+    {
+      "date": "2017-07-07",
+      "fighter1": {"name": "Alice Alpha"},
+      "fighter2": {"name": "Prospect Three"}
+    },
+    {
+      "date": "2016-08-08",
+      "fighter1": {"name": "Bob Beta"},
+      "fighter2": {"name": "Prospect Four"}
+    },
+    {
+      "date": "2015-09-09",
+      "fighter1": {"name": "Cara Lee"},
+      "fighter2": {"name": "Prospect Five"}
+    }
+  ],
+  "api_sports_overlap_cases": {
+    "agree": {
+      "provider_history_bouts": [
+        {
+          "date": "2024-08-13",
+          "status": "completed",
+          "result_method": "KO/TKO",
+          "fighter1": {"id": 1, "name": "Alice Alpha"},
+          "fighter2": {"id": 2, "name": "Bob Beta"},
+          "winner": {"id": 1, "name": "Alice Alpha"}
+        },
+        {
+          "date": "2022-01-01",
+          "fighter1": {"name": "Alice Alpha"},
+          "fighter2": {"name": "Regional Rival"}
+        }
+      ]
+    },
+    "disagree": {
+      "provider_history_bouts": [
+        {
+          "date": "2024-08-13",
+          "status": "completed",
+          "result_method": "Decision",
+          "fighter1": {"id": 1, "name": "Alice Alpha"},
+          "fighter2": {"id": 2, "name": "Bob Beta"},
+          "winner": {"id": 2, "name": "Bob Beta"}
+        }
+      ]
+    },
+    "unmapped": {
+      "provider_history_bouts": [
+        {
+          "date": "2024-08-13",
+          "status": "completed",
+          "fighter1": {"name": "Alice Alpha"},
+          "fighter2": {"name": "Bob Beta"}
+        }
+      ]
+    },
+    "no_overlap": {
+      "provider_history_bouts": [
+        {
+          "date": "2022-01-01",
+          "fighter1": {"name": "Alice Alpha"},
+          "fighter2": {"name": "Regional Rival"}
+        },
+        {
+          "date": "2021-03-03",
+          "fighter1": {"name": "Cara Lee"},
+          "fighter2": {"name": "Local Opponent"}
+        }
+      ]
+    }
+  }
+}
