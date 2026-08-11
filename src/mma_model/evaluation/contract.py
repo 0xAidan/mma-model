@@ -36,8 +36,10 @@ CONTRACT_FILENAME: Final = "dwcs_v1.json"
 CONTRACT_ID: Final = "dwcs_evaluation"
 EXPECTED_SCHEMA_VERSION: Final = 1
 EXPECTED_CONTRACT_VERSION: Final = "1.0.1"
-# Canonical SHA-256 of config/evaluation/dwcs_v1.json (== package data bytes).
-# Update only together with an intentional contract_version bump.
+# Canonical JSON digest: SHA-256 of json.dumps(..., sort_keys=True,
+# separators=(",", ":"), ensure_ascii=True) over the authoritative contract
+# object (packaged mma_model/evaluation/dwcs_v1.json bytes). Update only
+# together with an intentional contract_version bump.
 PINNED_CONTRACT_HASH: Final = (
     "af0ad518a6417ac7d67e5f56fe836ab58afe55d8ac70813bf6045307ea6fb2cf"
 )
@@ -442,11 +444,12 @@ class EvaluationContract(_FrozenModel):
         }:
             raise ValueError("sensitivity.report_universes must be all_dwcs and standard_only")
 
-        if OutcomeMetric.ECE not in self.metrics.outcome:
-            raise ValueError("metrics.outcome must include ece")
-        required_betting = set(BettingMetric)
-        if set(self.metrics.betting_priced_only) != required_betting:
+        if set(self.metrics.outcome) != set(OutcomeMetric):
+            raise ValueError("metrics.outcome must match the frozen outcome metric set")
+        if set(self.metrics.betting_priced_only) != set(BettingMetric):
             raise ValueError("metrics.betting_priced_only must match the frozen betting metric set")
+        if set(self.metrics.selection) != set(SelectionMetric):
+            raise ValueError("metrics.selection must match the frozen selection metric set")
         if (
             self.metrics.priced_rows_require
             is not PricedRowsRequire.TIMESTAMPED_OBSERVED_OR_USER_RECORDED
@@ -503,15 +506,59 @@ def visible_contract_path(*, root: Path | None = None) -> Path:
     return base / "config" / "evaluation" / CONTRACT_FILENAME
 
 
+def _is_valid_contract_json_file(path: Path) -> bool:
+    """True when path contains a JSON object with contract identity keys."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and "schema_version" in payload
+        and "contract_id" in payload
+        and "contract_version" in payload
+    )
+
+
+def _resolve_symlink_pointer_text(visible: Path) -> Path | None:
+    """Resolve a Git ``core.symlinks=false`` plain-text symlink pointer.
+
+    When Git cannot create real symlinks, the plan-visible path may be a text
+    file whose contents are the relative link target rather than JSON.
+    """
+    try:
+        text = visible.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    stripped = text.strip()
+    if not stripped or "\n" in stripped or "\r" in stripped:
+        return None
+    # Reject obvious JSON so we do not treat objects/arrays as path text.
+    if stripped[0] in "{[":
+        return None
+    candidate = (visible.parent / stripped).resolve()
+    if candidate.is_file() and _is_valid_contract_json_file(candidate):
+        return candidate
+    return None
+
+
 def contract_path(*, root: Path | None = None) -> Path:
     """Resolve the contract path for tooling.
 
-    Prefer the plan-visible checkout path when present (symlink to package data);
-    otherwise use the packaged resource (non-editable / wheel installs).
+    Prefer the plan-visible checkout path when it is valid contract JSON (real
+    file or working symlink). If that path exists but is only a plain-text
+    symlink pointer (common on Windows / ``core.symlinks=false``), resolve the
+    pointer when possible; otherwise use the packaged authoritative resource.
+    Never trust ``exists()`` alone.
     """
     visible = visible_contract_path(root=root)
-    if visible.exists():
+    if visible.is_file() and _is_valid_contract_json_file(visible):
         return visible
+    if visible.is_file():
+        pointed = _resolve_symlink_pointer_text(visible)
+        if pointed is not None:
+            return pointed
     return package_contract_resource_path()
 
 

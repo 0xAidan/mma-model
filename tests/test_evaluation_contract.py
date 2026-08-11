@@ -22,6 +22,7 @@ from mma_model.evaluation.contract import (
     ContractVersionMismatch,
     OutcomeMetric,
     RecommendationClass,
+    SelectionMetric,
     actionable_decimal_price,
     compute_contract_hash,
     contract_path,
@@ -56,6 +57,40 @@ def test_visible_config_path_matches_package_bytes():
     assert packaged.exists()
     assert visible.resolve() == packaged.resolve()
     assert visible.read_bytes() == packaged.read_bytes()
+    # Unix symlink / real JSON path is accepted by contract_path().
+    assert contract_path().resolve() == packaged.resolve()
+
+
+def test_contract_path_falls_back_when_visible_is_plain_text_symlink_pointer(tmp_path: Path):
+    """Windows/no-symlink Git may materialize the config path as link-target text."""
+    root = tmp_path / "checkout"
+    visible_dir = root / "config" / "evaluation"
+    visible_dir.mkdir(parents=True)
+    pointer = visible_dir / "dwcs_v1.json"
+    pointer.write_text("../../src/mma_model/evaluation/dwcs_v1.json\n", encoding="utf-8")
+
+    resolved = contract_path(root=root)
+    assert resolved.resolve() == package_contract_resource_path().resolve()
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    assert payload["contract_id"] == CONTRACT_ID
+    assert payload["schema_version"] == EXPECTED_SCHEMA_VERSION
+    # Pointer text itself must not be treated as the contract.
+    assert not pointer.read_text(encoding="utf-8").lstrip().startswith("{")
+
+
+def test_contract_path_resolves_pointer_text_to_local_json_when_valid(tmp_path: Path):
+    root = tmp_path / "checkout"
+    packaged_copy = root / "src" / "mma_model" / "evaluation" / "dwcs_v1.json"
+    packaged_copy.parent.mkdir(parents=True)
+    packaged_copy.write_bytes(package_contract_resource_path().read_bytes())
+    visible_dir = root / "config" / "evaluation"
+    visible_dir.mkdir(parents=True)
+    pointer = visible_dir / "dwcs_v1.json"
+    pointer.write_text("../../src/mma_model/evaluation/dwcs_v1.json\n", encoding="utf-8")
+
+    resolved = contract_path(root=root)
+    assert resolved.resolve() == packaged_copy.resolve()
+    assert json.loads(resolved.read_text(encoding="utf-8"))["contract_id"] == CONTRACT_ID
 
 
 def test_valid_default_load_verifies_pinned_digest(contract):
@@ -149,6 +184,8 @@ def test_price_policy_and_priced_only_betting_metrics(contract):
         == "timestamped_observed_or_user_recorded_price"
     )
     assert set(contract.metrics.betting_priced_only) == set(BettingMetric)
+    assert set(contract.metrics.outcome) == set(OutcomeMetric)
+    assert set(contract.metrics.selection) == set(SelectionMetric)
     assert BettingMetric.FLAT_1_UNIT_ROI in contract.metrics.betting_priced_only
     assert BettingMetric.CLV in contract.metrics.betting_priced_only
     assert OutcomeMetric.JOINT_LOG_LOSS in contract.metrics.outcome
@@ -262,10 +299,11 @@ def test_path_load_with_same_version_but_altered_content_fails_pinned_digest(tmp
         load_evaluation_contract(path=path)
 
 
-def test_invalid_payload_hard_fails(tmp_path: Path):
+def test_invalid_payload_hard_fails_on_version_mismatch(tmp_path: Path):
+    """Missing contract_version is a version mismatch before schema body validation."""
     path = tmp_path / "invalid.json"
     path.write_text(json.dumps({"schema_version": 1, "contract_id": CONTRACT_ID}), encoding="utf-8")
-    with pytest.raises((ContractVersionMismatch, ContractValidationError)):
+    with pytest.raises(ContractVersionMismatch):
         load_evaluation_contract(path=path, enforce_pinned_digest=False)
 
 
@@ -276,6 +314,24 @@ def test_protocol_reject_unlocked_holdout(tmp_path: Path):
     path = tmp_path / "unlocked_holdout.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ContractValidationError):
+        load_evaluation_contract(path=path, enforce_pinned_digest=False)
+
+
+def test_protocol_reject_incomplete_outcome_metrics_without_pinned_digest(tmp_path: Path):
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
+    payload["metrics"]["outcome"] = ["joint_log_loss", "brier"]
+    path = tmp_path / "incomplete_outcome.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ContractValidationError, match="outcome"):
+        load_evaluation_contract(path=path, enforce_pinned_digest=False)
+
+
+def test_protocol_reject_incomplete_selection_metrics_without_pinned_digest(tmp_path: Path):
+    payload = json.loads(visible_contract_path().read_text(encoding="utf-8"))
+    payload["metrics"]["selection"] = ["availability"]
+    path = tmp_path / "incomplete_selection.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ContractValidationError, match="selection"):
         load_evaluation_contract(path=path, enforce_pinned_digest=False)
 
 
