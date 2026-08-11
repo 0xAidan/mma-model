@@ -9,6 +9,22 @@ applied. It does **not** invent Bet365 coverage from generic catalogs.
 Prove actual provider, bookmaker, market, timestamp, suspension/lock, and quota
 behavior on the current or next DWCS card.
 
+## Live capture: Season 10 Episode 1
+
+The `T-3h` capture on 2026-08-11 reconciled all five matchups from the
+[official UFC card](https://www.ufc.com/news/dana-white-contender-series-season-10-episode-1-preview-athletes-bouts-start-times-streaming)
+to The Odds API events.
+
+- FanDuel `h2h` was present for all five DWCS bouts.
+- Bet365 was absent for all requested markets on all five reconciled bouts.
+- `totals`, `method`, and `round` were absent for the tracked bookmakers.
+- Event timestamps and quota headers were captured successfully.
+- Lock/suspension behavior, historical replay, provider rights, monthly vendor
+  quotes, and manual Bet365 comparisons remain unevaluated.
+
+The evidence gate therefore selects `the_odds_api_reference_fallback`; it does
+not authorize a licensed Bet365-primary path.
+
 ## Committed artifact integrity
 
 `output/research/odds-coverage-summary.json` must never invent live coverage.
