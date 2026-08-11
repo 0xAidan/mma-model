@@ -1,0 +1,74 @@
+{
+  "block_reason": "ODDS_API_KEY unavailable; live odds audit not executed",
+  "bookmaker_keys": [],
+  "bout_classifications": [],
+  "captured_at": null,
+  "decision": {
+    "bet365_dwcs_status": "unresolved",
+    "confirmed_manual_sample_count": 0,
+    "manual_sample_count": 0,
+    "observed": false,
+    "path": "hard_blocker",
+    "rationale": "No provider decision observed; audit not run. Missing credentials/trials are not evidence of market absence.",
+    "the_odds_api_dwcs_events_found": 0
+  },
+  "events": [],
+  "events_list": {
+    "headers": {},
+    "schema_keys": []
+  },
+  "field_notes": {
+    "historical_replay": "Static product note: The Odds API documents historical snapshots on paid tiers; this artifact does not treat that documentation as capture evidence.",
+    "lock_events": "Static capability note: lock/suspension support requires authenticated trial evidence; not inferred when the audit is not run.",
+    "quota": "Static capability note: quota headers are recorded only from live provider responses when the audit runs.",
+    "timestamps": "Static capability note: provider commence_time / market last_update are recorded only from live responses when the audit runs."
+  },
+  "lock_fields_documented": false,
+  "manual_bet365_samples": [],
+  "market_keys": [],
+  "pass_fail_matrix": {
+    "historical_replay": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    },
+    "lock_events": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    },
+    "method": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    },
+    "moneyline": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    },
+    "monthly_quote": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    },
+    "rights": {
+      "evidence": "Rights/trial evidence unavailable; no licensed coverage decision observed",
+      "status": "blocked"
+    },
+    "round": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    },
+    "totals": {
+      "evidence": "No live capture; evidence not observed",
+      "status": "unknown"
+    }
+  },
+  "provider": null,
+  "providers": {},
+  "quota_fields_documented": false,
+  "redacted": true,
+  "regions": null,
+  "run_status": "not_run",
+  "snapshot_label": null,
+  "sport": "mma_mixed_martial_arts",
+  "status": "blocked",
+  "ticket": "DWCS-000",
+  "timestamp_fields_documented": false
+}

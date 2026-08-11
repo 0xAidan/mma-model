@@ -1,0 +1,20 @@
+[
+  {
+    "bout_id": "dwcs-s10w1-bout-1",
+    "fighter_a": "Example Alpha",
+    "fighter_b": "Example Bravo",
+    "scheduled_start": "2026-08-12T00:00:00Z"
+  },
+  {
+    "bout_id": "dwcs-s10w1-bout-2",
+    "fighter_a": "Example Charlie",
+    "fighter_b": "Example Delta",
+    "scheduled_start": "2026-08-12T00:15:00Z"
+  },
+  {
+    "bout_id": "dwcs-s10w1-bout-3",
+    "fighter_a": "Example Echo",
+    "fighter_b": "Example Foxtrot",
+    "scheduled_start": "2026-08-12T00:30:00Z"
+  }
+]
