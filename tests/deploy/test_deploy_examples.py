@@ -155,6 +155,74 @@ def test_compose_rejects_network_mode_host_variants(
 
 
 @pytest.mark.parametrize(
+    "networks_block",
+    [
+        # Mapping form
+        "networks:\n  mma_net:\n    driver: host",
+        'networks:\n  mma_net:\n    driver: "host"',
+        "networks:\n  mma_net:\n    driver: 'host'",
+        "networks:\n  mma_net:\n    driver:host",
+        # Inline mapping
+        "networks:\n  mma_net: {driver: host}",
+        'networks:\n  mma_net: {driver: "host"}',
+        # List / sequence-style definitions
+        "networks:\n  - name: mma_net\n    driver: host",
+        'networks:\n  - {name: mma_net, driver: "host"}',
+        # default network override
+        "networks:\n  default:\n    driver: host",
+    ],
+)
+def test_compose_rejects_top_level_host_network_driver_variants(
+    validate, tmp_path: Path, networks_block: str
+):
+    examples = _minimal_examples(
+        tmp_path,
+        "\n".join(
+            [
+                "# EXAMPLE ONLY — NOT INSTALLED",
+                "services:",
+                "  worker:",
+                "    image: ghcr.io/example/mma-model@sha256:deadbeef",
+                "    env_file: [/etc/mma-model/mma.env]",
+                "    volumes:",
+                "      - /srv/mma/data:/data",
+                "      - /srv/mma/public:/public",
+                networks_block,
+            ]
+        ),
+    )
+    issues = validate.validate_examples(examples)
+    blob = " | ".join(i.message for i in issues).lower()
+    assert issues, "expected host-network driver rejection"
+    assert (
+        "driver host" in blob
+        or "driver: host" in blob
+        or "driver" in blob
+        and "host" in blob
+    )
+
+
+def test_compose_rejects_top_level_host_network_via_structured_helper(validate):
+    text = """
+# EXAMPLE ONLY — NOT INSTALLED
+services:
+  worker:
+    image: ghcr.io/example/mma-model@sha256:deadbeef
+    env_file: [/etc/mma-model/mma.env]
+    volumes:
+      - /srv/mma/data:/data
+      - /srv/mma/public:/public
+networks:
+  edge:
+    driver: host
+"""
+    issues = validate.validate_compose_structured(text, "deploy/examples/docker-compose.yml")
+    messages = " | ".join(i.message for i in issues)
+    assert "driver host" in messages.lower()
+    assert "edge" in messages
+
+
+@pytest.mark.parametrize(
     "expose_block",
     [
         "expose:\n      - '8000'",

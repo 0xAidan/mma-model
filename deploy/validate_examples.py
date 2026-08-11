@@ -23,6 +23,8 @@ FORBIDDEN_PUBLIC_BIND_PATTERNS = (
     re.compile(r"(?m)^\s*expose\s*:"),
     re.compile(r"(?m)^\s*publish\s*:"),
     re.compile(r"(?i)network[_-]?mode\s*:\s*[\"']?host[\"']?\b"),
+    # Top-level Compose network driver host (mapping/list/inline forms).
+    re.compile(r"(?i)\bdriver\s*:\s*[\"']?host[\"']?\b"),
     re.compile(r"\bhost\s*=\s*0\.0\.0\.0\b", re.I),
     # Explicit app binds to privileged web ports in unit/compose command lines.
     re.compile(r"(?i)--publish\s+.*\b(80|443)\b"),
@@ -159,6 +161,67 @@ def _network_mode_is_host(value: Any) -> bool:
     return False
 
 
+def _driver_is_host(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() == "host"
+    return False
+
+
+def _iter_network_defs(networks: Any) -> list[tuple[str, Any]]:
+    """Yield (name, definition) pairs from Compose top-level networks mapping/list."""
+    items: list[tuple[str, Any]] = []
+    if networks is None:
+        return items
+    if isinstance(networks, dict):
+        for name, definition in networks.items():
+            items.append((str(name), definition))
+        return items
+    if isinstance(networks, list):
+        for idx, definition in enumerate(networks):
+            if isinstance(definition, dict):
+                name = str(definition.get("name") or definition.get("key") or idx)
+            else:
+                name = str(idx)
+            items.append((name, definition))
+    return items
+
+
+def _network_def_uses_host_driver(definition: Any) -> bool:
+    """True when a Compose network definition selects the host driver."""
+    if definition is None:
+        return False
+    if isinstance(definition, str):
+        lowered = definition.strip().lower()
+        # Literal host, or YAML-collapsed "driver:host" / "driver: host" forms.
+        if lowered == "host":
+            return True
+        if re.search(r"(?i)\bdriver\s*:\s*host\b", lowered):
+            return True
+        return False
+    if not isinstance(definition, dict):
+        return False
+    if _driver_is_host(definition.get("driver")):
+        return True
+    # Rare alternate key spellings observed in hand-edited YAML.
+    if _driver_is_host(definition.get("Driver")):
+        return True
+    return False
+
+
+def _top_level_host_network_violations(data: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    if _network_mode_is_host(data.get("network_mode")):
+        violations.append("compose uses top-level network_mode host")
+    for name, definition in _iter_network_defs(data.get("networks")):
+        if _network_def_uses_host_driver(definition):
+            violations.append(
+                f"compose top-level network {name!r} uses driver host"
+            )
+    return violations
+
+
 def _service_has_publish_surface(service: Any) -> list[str]:
     """Return structured invariant violations for one Compose service mapping."""
     violations: list[str] = []
@@ -170,8 +233,6 @@ def _service_has_publish_surface(service: Any) -> list[str]:
         violations.append("compose service uses expose")
     if _network_mode_is_host(service.get("network_mode")):
         violations.append("compose service uses network_mode host")
-    # Long syntax network_mode via networks + host driver is out of example scope;
-    # reject explicit host network_mode only for this ticket's seam.
     return violations
 
 
@@ -190,8 +251,8 @@ def validate_compose_structured(text: str, rel: str) -> list[ValidationIssue]:
     if not isinstance(data, dict):
         return [ValidationIssue(rel, "compose YAML root must be a mapping")]
 
-    if _network_mode_is_host(data.get("network_mode")):
-        issues.append(ValidationIssue(rel, "compose uses top-level network_mode host"))
+    for message in _top_level_host_network_violations(data):
+        issues.append(ValidationIssue(rel, message))
 
     services = data.get("services")
     if not isinstance(services, dict) or not services:
@@ -374,8 +435,8 @@ def validate_examples(examples_dir: Path = EXAMPLES_DIR) -> list[ValidationIssue
 
 def assert_rendered_compose_has_no_publish_surface(rendered: dict[str, Any]) -> None:
     """Assert docker compose config output has no ports/expose/host networking."""
-    if _network_mode_is_host(rendered.get("network_mode")):
-        raise AssertionError("rendered compose uses top-level network_mode host")
+    for message in _top_level_host_network_violations(rendered):
+        raise AssertionError(f"rendered compose: {message}")
     services = rendered.get("services") or {}
     if not isinstance(services, dict):
         raise AssertionError("rendered compose missing services mapping")
