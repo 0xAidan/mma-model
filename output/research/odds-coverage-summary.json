@@ -60,7 +60,7 @@
     "manual_sample_count": 0,
     "observed": true,
     "path": "the_odds_api_reference_fallback",
-    "rationale": "Bet365\u00d7DWCS not evidence-backed as present; The Odds API provided observed DWCS h2h reference moneyline only; Bet365-complete v1 remains blocked",
+    "rationale": "Bet365\u00d7DWCS not evidence-backed as present; The Odds API provided observed DWCS h2h reference moneyline; core v1 uses sportsbook-agnostic actionable price targets when an automatic book line is unavailable",
     "the_odds_api_dwcs_events_found": 5
   },
   "events": [

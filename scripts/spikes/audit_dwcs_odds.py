@@ -634,12 +634,14 @@ def decide_provider_path(
         path = "the_odds_api_reference_fallback"
         rationale = (
             "Bet365×DWCS not evidence-backed as present; The Odds API provided observed "
-            "DWCS h2h reference moneyline only; Bet365-complete v1 remains blocked"
+            "DWCS h2h reference moneyline; core v1 uses sportsbook-agnostic actionable "
+            "price targets when an automatic book line is unavailable"
         )
     else:
         path = "hard_blocker"
         rationale = (
-            "No licensed Bet365×DWCS presence and no observed DWCS h2h reference moneyline"
+            "No automatic bookmaker or reference moneyline evidence; line enrichment "
+            "remains blocked, but model-derived actionable price targets are independent"
         )
 
     return {
