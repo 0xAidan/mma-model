@@ -908,6 +908,68 @@ def compute_api_sports_non_overlap(
     )
 
 
+def normalize_api_sports_fight(bout_like: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize API-Sports history rows into the shared fight outcome shape."""
+    fight = dict(bout_like)
+    if "fighter1" not in fight and fight.get("fighters"):
+        fighters = fight.get("fighters")
+        if isinstance(fighters, Sequence) and len(fighters) >= 2:
+            left = fighters[0] if isinstance(fighters[0], Mapping) else {"name": fighters[0]}
+            right = fighters[1] if isinstance(fighters[1], Mapping) else {"name": fighters[1]}
+            fight["fighter1"] = dict(left)
+            fight["fighter2"] = dict(right)
+    # Common alternate keys seen in record payloads.
+    if "result_method" not in fight and fight.get("method"):
+        fight["result_method"] = fight.get("method")
+    if "winner" not in fight and isinstance(fight.get("winner_name"), str):
+        fight["winner"] = {"name": fight["winner_name"]}
+    return fight
+
+
+def build_api_sports_overlapping_outcome_pairs(
+    provider_history_bouts: Sequence[Mapping[str, Any]],
+    dwcs_bouts: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Map fingerprint-overlapping provider bouts to manifest event-night outcomes.
+
+    Ambiguous or unmapped provider/manifest rows become ``unknown`` and are
+    excluded from the agreement denominator — never treated as disagreement.
+    """
+    by_fingerprint: dict[str, list[dict[str, Any]]] = {}
+    for bout in dwcs_bouts:
+        fingerprint = bout_fingerprint(bout)
+        if fingerprint is None:
+            continue
+        by_fingerprint.setdefault(fingerprint, []).append(dict(bout))
+
+    pairs: list[dict[str, Any]] = []
+    for provider_bout in provider_history_bouts:
+        fingerprint = bout_fingerprint(provider_bout)
+        if fingerprint is None:
+            continue
+        matches = by_fingerprint.get(fingerprint) or []
+        if not matches:
+            # Non-overlapping history bout — not part of accuracy sample.
+            continue
+        if len(matches) != 1:
+            pairs.append(
+                {
+                    "status": "unknown",
+                    "reason": "ambiguous_manifest_fingerprint_match",
+                    "manifest_class": None,
+                    "provider_class": None,
+                    "winner_agree": None,
+                    "fingerprint": fingerprint,
+                }
+            )
+            continue
+        provider_fight = normalize_api_sports_fight(provider_bout)
+        pair = classify_outcome_pair(matches[0], provider_fight)
+        pair["fingerprint"] = fingerprint
+        pairs.append(pair)
+    return pairs
+
+
 def compute_api_sports_accuracy(
     overlapping_pairs: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -923,6 +985,7 @@ def compute_api_sports_accuracy(
         "status": status,
         "outcome_agreement": agreement,
         "threshold": OUTCOME_AGREEMENT_MIN,
+        "overlapping_pair_count": len(overlapping_pairs),
     }
 
 
@@ -1676,11 +1739,17 @@ def measure_api_sports_from_observations(
         if (fingerprint := bout_fingerprint(bout)) is not None
     }
     non_overlap = compute_api_sports_non_overlap(provider_history_bouts, fingerprints)
-    accuracy = compute_api_sports_accuracy(overlapping_outcome_pairs or [])
+    if overlapping_outcome_pairs is None:
+        overlapping_outcome_pairs = build_api_sports_overlapping_outcome_pairs(
+            provider_history_bouts,
+            dwcs_bouts,
+        )
+    accuracy = compute_api_sports_accuracy(overlapping_outcome_pairs)
     return {
         "access_status": "ok",
         "non_overlapping_pre_dwcs_bouts": non_overlap,
         "non_overlap_rate": non_overlap.get("rate"),
+        "overlapping_outcome_pairs": list(overlapping_outcome_pairs),
         "accuracy": accuracy,
         "accuracy_status": accuracy["status"],
     }
@@ -1801,12 +1870,14 @@ def probe_api_sports_live(
     measured = measure_api_sports_from_observations(
         provider_history_bouts=history_bouts,
         dwcs_bouts=dwcs_bouts,
-        overlapping_outcome_pairs=[],
+        overlapping_outcome_pairs=None,
     )
     measured["access_status"] = access
     measured["error"] = error
     measured["request_count"] = request_count
     measured["latencies_ms"] = latencies
+    # Do not persist full pair payloads in live returns used by scorecards.
+    measured.pop("overlapping_outcome_pairs", None)
     return measured
 
 

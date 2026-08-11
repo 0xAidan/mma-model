@@ -151,5 +151,60 @@
       "fighter1": {"name": "Cara Lee"},
       "fighter2": {"name": "Prospect Five"}
     }
-  ]
+  ],
+  "api_sports_overlap_cases": {
+    "agree": {
+      "provider_history_bouts": [
+        {
+          "date": "2024-08-13",
+          "status": "completed",
+          "result_method": "KO/TKO",
+          "fighter1": {"id": 1, "name": "Alice Alpha"},
+          "fighter2": {"id": 2, "name": "Bob Beta"},
+          "winner": {"id": 1, "name": "Alice Alpha"}
+        },
+        {
+          "date": "2022-01-01",
+          "fighter1": {"name": "Alice Alpha"},
+          "fighter2": {"name": "Regional Rival"}
+        }
+      ]
+    },
+    "disagree": {
+      "provider_history_bouts": [
+        {
+          "date": "2024-08-13",
+          "status": "completed",
+          "result_method": "Decision",
+          "fighter1": {"id": 1, "name": "Alice Alpha"},
+          "fighter2": {"id": 2, "name": "Bob Beta"},
+          "winner": {"id": 2, "name": "Bob Beta"}
+        }
+      ]
+    },
+    "unmapped": {
+      "provider_history_bouts": [
+        {
+          "date": "2024-08-13",
+          "status": "completed",
+          "fighter1": {"name": "Alice Alpha"},
+          "fighter2": {"name": "Bob Beta"}
+        }
+      ]
+    },
+    "no_overlap": {
+      "provider_history_bouts": [
+        {
+          "date": "2022-01-01",
+          "fighter1": {"name": "Alice Alpha"},
+          "fighter2": {"name": "Regional Rival"}
+        },
+        {
+          "date": "2021-03-03",
+          "fighter1": {"name": "Cara Lee"},
+          "fighter2": {"name": "Local Opponent"}
+        }
+      ]
+    }
+  }
 }

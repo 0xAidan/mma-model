@@ -527,12 +527,15 @@ def test_api_sports_non_overlap_synthetic_boundaries(
     measured = audit.measure_api_sports_from_observations(
         provider_history_bouts=synthetic["api_sports_history_bouts"],
         dwcs_bouts=synthetic["manifest_bouts"],
-        overlapping_outcome_pairs=[],
     )
     # 10 history bouts, 1 overlaps DWCS fingerprint => 9/10 = 0.9
     assert measured["non_overlapping_pre_dwcs_bouts"]["numerator"] == 9
     assert measured["non_overlapping_pre_dwcs_bouts"]["denominator"] == 10
     assert measured["non_overlap_rate"] == pytest.approx(0.9)
+    # Overlapping row lacks winner mapping => unknown accuracy, not disagreement.
+    assert len(measured["overlapping_outcome_pairs"]) == 1
+    assert measured["overlapping_outcome_pairs"][0]["status"] == "unknown"
+    assert measured["accuracy_status"] == "unknown"
 
     low = audit.compute_api_sports_non_overlap(
         synthetic["api_sports_history_bouts"][:10],
@@ -562,6 +565,78 @@ def test_api_sports_non_overlap_synthetic_boundaries(
         },
     )
     assert boundary_keep["api_sports_probe_keep"] is True
+
+
+def test_api_sports_overlapping_outcome_pairs_agree_disagree_unmapped_no_overlap(
+    audit: Any, synthetic: dict[str, Any]
+) -> None:
+    cases = synthetic["api_sports_overlap_cases"]
+    manifest = synthetic["manifest_bouts"]
+
+    agree = audit.measure_api_sports_from_observations(
+        provider_history_bouts=cases["agree"]["provider_history_bouts"],
+        dwcs_bouts=manifest,
+    )
+    assert agree["non_overlap_rate"] == pytest.approx(0.5)
+    assert len(agree["overlapping_outcome_pairs"]) == 1
+    assert agree["overlapping_outcome_pairs"][0]["status"] == "agree"
+    assert agree["accuracy_status"] == "pass"
+    assert agree["accuracy"]["outcome_agreement"]["numerator"] == 1
+    assert agree["accuracy"]["outcome_agreement"]["denominator"] == 1
+    assert agree["accuracy"]["outcome_agreement"]["excluded_unknown_count"] == 0
+
+    disagree = audit.measure_api_sports_from_observations(
+        provider_history_bouts=cases["disagree"]["provider_history_bouts"],
+        dwcs_bouts=manifest,
+    )
+    assert disagree["overlapping_outcome_pairs"][0]["status"] == "disagree"
+    assert disagree["accuracy_status"] == "fail"
+    assert disagree["accuracy"]["outcome_agreement"]["numerator"] == 0
+    assert disagree["accuracy"]["outcome_agreement"]["denominator"] == 1
+
+    unmapped = audit.measure_api_sports_from_observations(
+        provider_history_bouts=cases["unmapped"]["provider_history_bouts"],
+        dwcs_bouts=manifest,
+    )
+    assert unmapped["overlapping_outcome_pairs"][0]["status"] == "unknown"
+    assert unmapped["accuracy"]["outcome_agreement"]["excluded_unknown_count"] == 1
+    assert unmapped["accuracy"]["outcome_agreement"]["denominator"] == 0
+    assert unmapped["accuracy_status"] == "unknown"
+
+    no_overlap = audit.measure_api_sports_from_observations(
+        provider_history_bouts=cases["no_overlap"]["provider_history_bouts"],
+        dwcs_bouts=manifest,
+    )
+    assert no_overlap["overlapping_outcome_pairs"] == []
+    assert no_overlap["non_overlap_rate"] == pytest.approx(1.0)
+    assert no_overlap["accuracy_status"] == "unknown"
+    assert no_overlap["accuracy"]["outcome_agreement"]["denominator"] == 0
+
+    # Direct builder: ambiguous fingerprint match stays unknown, not disagree.
+    ambiguous = audit.build_api_sports_overlapping_outcome_pairs(
+        [
+            {
+                "date": "2024-08-13",
+                "fighter1": {"name": "Alice Alpha"},
+                "fighter2": {"name": "Bob Beta"},
+                "winner": {"name": "Alice Alpha"},
+            }
+        ],
+        [
+            manifest[0],
+            {
+                **manifest[0],
+                "bout_id": "dwcs:bout:espn:dup",
+                "event_night_result": {
+                    "class": "decisive",
+                    "winner_display_name": "Bob Beta",
+                },
+            },
+        ],
+    )
+    assert len(ambiguous) == 1
+    assert ambiguous[0]["status"] == "unknown"
+    assert ambiguous[0]["reason"] == "ambiguous_manifest_fingerprint_match"
 
 
 def test_rights_and_budget_gates_decimal_safe(audit: Any) -> None:
