@@ -7,6 +7,7 @@ __pycache__/
 .ruff_cache/
 *.db
 data/
+build/
 dist/
 *.egg-info/
 .DS_Store
