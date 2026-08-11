@@ -314,7 +314,7 @@ def test_deterministic_rerun_is_byte_stable(build: Any, tmp_path: Path) -> None:
         assert (out_a / name).read_bytes() == (out_b / name).read_bytes()
 
 
-def test_cli_verify_offline(tmp_path: Path) -> None:
+def test_cli_verify_offline(build: Any, expected: dict[str, Any], tmp_path: Path) -> None:
     out = tmp_path / "out"
     completed = subprocess.run(
         [
@@ -338,15 +338,23 @@ def test_cli_verify_offline(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr + completed.stdout
     payload = json.loads(completed.stdout.strip())
     assert payload["ok"] is True
-    assert payload["cards"]["all"] == 89
-    assert payload["bouts"]["all"] == 440
+    # Smoke-check CLI JSON against the pinned contract (not duplicated literals).
+    assert payload["cards"]["all"] == expected["cards"]["all"]
+    assert payload["bouts"]["all"] == expected["bouts"]["all"]
+    assert build.compute_expected_universe_hash(expected) == build.PINNED_EXPECTED_UNIVERSE_HASH
 
 
-def test_source_fixtures_are_minimal_and_secret_free(build: Any) -> None:
+def test_source_fixtures_are_minimal_and_secret_free(
+    build: Any, expected: dict[str, Any]
+) -> None:
     events, bouts, recon, _cancels = build.load_source_bundle(SOURCE_DIR)
-    assert len(events) == 89
-    assert len(bouts) == 440
-    assert len(recon) == 9
+    assert len(events) == expected["cards"]["all"]
+    assert len(bouts) == expected["bouts"]["all"]
+    # Recon overlays cover every non-assumed version state (reversals + unchanged).
+    assert len(recon) == (
+        expected["version_states"]["reversed_to_no_contest"]
+        + expected["version_states"]["unchanged"]
+    )
     blob = json.dumps([events, bouts, recon])
     for fragment in ("api_key", "authorization", "password", "secret"):
         assert fragment not in blob.lower()
