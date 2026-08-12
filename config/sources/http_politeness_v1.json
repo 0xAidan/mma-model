@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "contract_id": "http_politeness",
+  "contract_version": "1",
+  "user_agent": "mma-model-research/0.1 (+https://github.com/0xAidan/mma; personal-project; contact=research@localhost)",
+  "contact": "research@localhost",
+  "hosts": {
+    "ufcstats.com": {
+      "min_delay_sec": 0.75,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/statistics/", "/fighter-details/", "/event-details/", "/fight-details/"]
+    },
+    "tapology.com": {
+      "min_delay_sec": 1.0,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/fightcenter/", "/rankings/", "/search/"]
+    },
+    "sherdog.com": {
+      "min_delay_sec": 1.0,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/news/rankings/", "/fighter/", "/events/"]
+    },
+    "combatreg.com": {
+      "min_delay_sec": 1.0,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/"]
+    },
+    "bestfightodds.com": {
+      "min_delay_sec": 1.0,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/"]
+    }
+  }
+}

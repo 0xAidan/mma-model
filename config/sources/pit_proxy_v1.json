@@ -1,0 +1,8 @@
+{
+  "rule_id": "event_completion_plus_delay",
+  "rule_version": "1",
+  "delay_iso8601": "P1D",
+  "applies_to": ["immutable_bout_result", "immutable_bout_stat"],
+  "forbidden_for": ["mutable_profile_aggregate"],
+  "max_quality_tier_when_proxy": "silver"
+}

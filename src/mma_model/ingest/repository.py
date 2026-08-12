@@ -1,7 +1,8 @@
-"""Idempotent ingest repository with bounded-batch checkpoints (DWCS-101)."""
+"""Idempotent ingest repository with bounded-batch checkpoints (DWCS-101/102)."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Sequence
@@ -17,12 +18,21 @@ from mma_model.sources.contracts import (
     DetailLevel,
     SourceObservationRecord,
 )
+from mma_model.sources.policy import load_source_policy
 
 SessionFactory = Callable[[], Session]
 
 
+class ReservedAttributeKeyError(ValueError):
+    """Raised when attributes contain reserved contract keys."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _canonical_attributes_json(attributes: object) -> str:
+    return json.dumps(attributes, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -48,6 +58,9 @@ class IngestRepository:
     ) -> None:
         self._session_factory = session_factory
         self._raw_store = raw_store
+        self._reserved_attribute_keys = frozenset(
+            load_source_policy().observation_metadata.reserved_attribute_keys
+        )
 
     def start_run(self, *, source: str, stream: str, scope: str) -> IngestRun:
         with self._session_factory() as session:
@@ -115,6 +128,7 @@ class IngestRepository:
                 raise KeyError(f"unknown ingest run {run_id}")
 
             for obs in observations:
+                self._validate_observation(obs)
                 raw_ref = self._resolve_raw_ref(obs)
 
                 existing = session.scalars(
@@ -142,7 +156,13 @@ class IngestRepository:
                         entity_kind=obs.entity_kind,
                         observed_at=obs.observed_at,
                         effective_at=obs.effective_at,
+                        source_published_at=obs.source_published_at,
                         source_updated_at=obs.source_updated_at,
+                        proxy_published_at=obs.proxy_published_at,
+                        timestamp_quality=obs.timestamp_quality,
+                        timestamp_quality_source=obs.timestamp_quality_source,
+                        quality_tier=obs.quality_tier,
+                        attributes_json=_canonical_attributes_json(dict(obs.attributes)),
                         payload_hash=obs.payload_hash,
                         raw_ref=raw_ref,
                         detail_level=str(obs.detail_level),
@@ -177,6 +197,26 @@ class IngestRepository:
             skipped_downgrade=skipped_downgrade,
             skipped_preserve_version=skipped_preserve_version,
         )
+
+    def _validate_observation(self, obs: SourceObservationRecord) -> None:
+        collisions = sorted(
+            key for key in obs.attributes if key in self._reserved_attribute_keys
+        )
+        if collisions:
+            raise ReservedAttributeKeyError(
+                f"attributes contain reserved contract key(s): {collisions}"
+            )
+        if obs.detail_level != DetailLevel.VERIFIED:
+            return
+        missing: list[str] = []
+        if not obs.timestamp_quality_source:
+            missing.append("timestamp_quality_source")
+        if obs.timestamp_quality == "unknown":
+            missing.append("timestamp_quality")
+        if missing:
+            raise ValueError(
+                "verified detail requires metadata fields: " + ", ".join(missing)
+            )
 
     def _resolve_raw_ref(self, obs: SourceObservationRecord) -> str | None:
         """Enforce verified-blob invariant or explicit absence (no dangling raw_ref)."""
