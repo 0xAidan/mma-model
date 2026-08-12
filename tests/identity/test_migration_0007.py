@@ -142,5 +142,61 @@ def test_identity_unique_constraints_enforced(tmp_path: Path) -> None:
             raised = True
             conn.rollback()
         assert raised
+
+        conn.execute(
+            "UPDATE identity_review_queue SET status='reversed' WHERE id='r1'"
+        )
+        conn.commit()
+        conn.execute(
+            "INSERT INTO identity_review_queue("
+            "id, status, version, source, external_id, display_name, normalized_name, "
+            "candidate_canonical_ids_json, evidence_json, rule_id, resolver_version, "
+            "created_at, updated_at, reversible) "
+            "VALUES ('r-rev-2','reversed',1,'tapology_public','x','A','a','[]','{}',"
+            "'manual_enqueue','1',?,?,1)",
+            (now, now),
+        )
+        conn.commit()
+        reversed_count = conn.execute(
+            "SELECT COUNT(*) FROM identity_review_queue "
+            "WHERE source='tapology_public' AND external_id='x' AND status='reversed'"
+        ).fetchone()[0]
+        assert reversed_count == 2
+
+        conn.execute(
+            "INSERT INTO identity_review_queue("
+            "id, status, version, source, external_id, display_name, normalized_name, "
+            "candidate_canonical_ids_json, evidence_json, rule_id, resolver_version, "
+            "created_at, updated_at, reversible) "
+            "VALUES ('r-open','pending',1,'tapology_public','x','A','a','[]','{}',"
+            "'manual_enqueue','1',?,?,1)",
+            (now, now),
+        )
+        conn.commit()
+        try:
+            conn.execute(
+                "INSERT INTO identity_review_queue("
+                "id, status, version, source, external_id, display_name, normalized_name, "
+                "candidate_canonical_ids_json, evidence_json, rule_id, resolver_version, "
+                "created_at, updated_at, reversible) "
+                "VALUES ('r-open-2','approved',1,'tapology_public','x','A','a','[]','{}',"
+                "'manual_enqueue','1',?,?,1)",
+                (now, now),
+            )
+            conn.commit()
+            open_raised = False
+        except sqlite3.IntegrityError:
+            open_raised = True
+            conn.rollback()
+        assert open_raised
+
+        indexes = {
+            r[1]
+            for r in conn.execute(
+                "SELECT type, name FROM sqlite_master WHERE name LIKE 'uq_identity_review%'"
+            ).fetchall()
+        }
+        assert "uq_identity_review_open_source_external" in indexes
+        assert "uq_identity_review_source_external_status" not in indexes
     finally:
         conn.close()

@@ -34,6 +34,8 @@ from mma_model.identity.constants import (
 )
 from mma_model.identity.models import ResolveResult, ReviewCandidate, dump_evidence_json
 from mma_model.identity.normalize import normalize_person_name
+from mma_model.identity.review import enqueue_review
+from mma_model.sources.policy import SourcePolicy, load_source_policy
 
 # Re-export rule constants for tests.
 __all__ = [
@@ -113,10 +115,12 @@ class IdentityResolver:
         *,
         actor: str = "system",
         now: datetime | None = None,
+        policy: SourcePolicy | None = None,
     ) -> None:
         self.session = session
         self.actor = (actor or "").strip() or "system"
         self.now = now or _utc_now()
+        self.policy = policy if policy is not None else load_source_policy()
 
     def is_bout_scoring_blocked(self, bout_id: str) -> bool:
         row = self.session.scalar(
@@ -153,6 +157,15 @@ class IdentityResolver:
         if not self.actor:
             raise ValueError("actor is required")
 
+        rules = self.policy.identity_rules
+        if rules.same_name_auto_merge:
+            raise ValueError("same_name_auto_merge is forbidden; fail closed")
+        if rules.fuzzy_or_transliteration != "candidates_only_in_reversible_review_queue":
+            raise ValueError(
+                "fuzzy_or_transliteration must be "
+                "candidates_only_in_reversible_review_queue; fail closed"
+            )
+
         normalized = normalize_person_name(display_name)
         hints = tuple(sorted({h.strip() for h in candidate_hints if h and h.strip()}))
 
@@ -164,6 +177,53 @@ class IdentityResolver:
             )
         )
         if exact is not None:
+            if not rules.exact_source_ids_first:
+                return self._queue(
+                    rule_id=RULE_QUEUE_CONFLICT,
+                    source=source,
+                    external_id=external_id,
+                    display_name=display_name,
+                    normalized_name=normalized,
+                    wikidata_id=wikidata_id,
+                    dob=dob,
+                    bout_id=bout_id,
+                    bout_status=bout_status,
+                    candidates=(exact.fighter_id,),
+                    evidence={
+                        "reason": "exact_source_ids_first_disabled",
+                        "source": source,
+                        "external_id": external_id,
+                    },
+                )
+            fighter = self.session.get(CanonicalFighter, exact.fighter_id)
+            stored_norm = (
+                normalize_person_name(fighter.display_name) if fighter is not None else ""
+            )
+            if stored_norm != normalized:
+                return self._queue(
+                    rule_id=RULE_QUEUE_CONFLICT,
+                    source=source,
+                    external_id=external_id,
+                    display_name=display_name,
+                    normalized_name=normalized,
+                    wikidata_id=wikidata_id,
+                    dob=dob,
+                    bout_id=bout_id,
+                    bout_status=bout_status,
+                    candidates=(exact.fighter_id,),
+                    evidence={
+                        "reason": "duplicate_external_id",
+                        "duplicate_external_id": True,
+                        "source": source,
+                        "external_id": external_id,
+                        "stored_display_name": (
+                            fighter.display_name if fighter is not None else None
+                        ),
+                        "stored_normalized_name": stored_norm,
+                        "incoming_display_name": display_name,
+                        "incoming_normalized_name": normalized,
+                    },
+                )
             return self._linked(
                 rule_id=RULE_EXACT_SOURCE_EXTERNAL_ID,
                 source=source,
@@ -184,7 +244,7 @@ class IdentityResolver:
             )
 
         # 2) Exact Wikidata crosswalk.
-        if wikidata_id:
+        if wikidata_id and rules.wikidata_crosswalk_first:
             wiki_rows = list(
                 self.session.scalars(
                     select(FighterSourceId).where(
@@ -281,7 +341,6 @@ class IdentityResolver:
                     "display_name_original": display_name,
                     "normalized_name": normalized,
                 },
-                create_if_absent=create_if_absent and "nickname" in hints,
             )
 
         # 3) Exact normalized name + exact DOB when unique/nonconflicting.
@@ -636,56 +695,7 @@ class IdentityResolver:
         bout_status: str | None,
         candidates: Sequence[str],
         evidence: dict[str, Any],
-        create_if_absent: bool = False,
     ) -> ResolveResult:
-        # Optional create path used only for nickname-as-new-person fixture cases.
-        if create_if_absent and not candidates:
-            fighter_id = str(uuid.uuid4())
-            self.session.add(
-                CanonicalFighter(
-                    id=fighter_id,
-                    display_name=display_name,
-                    created_at=self.now,
-                    updated_at=self.now,
-                )
-            )
-            self.session.flush()
-            self._link_source(
-                fighter_id=fighter_id, source=source, external_id=external_id
-            )
-            row = _write_evidence(
-                self.session,
-                action="created",
-                rule_id=RULE_CREATE_NEW,
-                source=source,
-                external_id=external_id,
-                display_name=display_name,
-                normalized_name=normalized_name,
-                actor=self.actor,
-                evidence={
-                    **evidence,
-                    "created_via": "nickname_without_existing_match",
-                    "created_canonical_id": fighter_id,
-                },
-                wikidata_id=wikidata_id,
-                dob=dob,
-                after_canonical_id=fighter_id,
-                bout_id=bout_id,
-                now=self.now,
-            )
-            return ResolveResult(
-                kind="created",
-                canonical_id=fighter_id,
-                review_id=None,
-                evidence_id=row.id,
-                rule_id=RULE_CREATE_NEW,
-                resolver_version=RESOLVER_VERSION,
-                reversible=True,
-            )
-
-        # Local import avoids circular import at module load.
-        from mma_model.identity.review import enqueue_review
-
         ordered = tuple(sorted({c for c in candidates if c}))
         review_id = enqueue_review(
             self.session,
@@ -759,8 +769,9 @@ def resolve_fighter(
     actor: str = "system",
     now: datetime | None = None,
     create_if_absent: bool = True,
+    policy: SourcePolicy | None = None,
 ) -> ResolveResult:
-    return IdentityResolver(session, actor=actor, now=now).resolve_fighter(
+    return IdentityResolver(session, actor=actor, now=now, policy=policy).resolve_fighter(
         source=source,
         external_id=external_id,
         display_name=display_name,

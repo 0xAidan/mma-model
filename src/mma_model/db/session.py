@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from mma_model.config import get_settings
+from mma_model.db.identity_guards import install_identity_sqlite_guards
 from mma_model.db.models import Base
 
 
@@ -92,6 +93,7 @@ def create_all_for_tests(bind: Engine | None = None) -> None:
     target = bind or engine
     _attach_sqlite_listeners(target)
     Base.metadata.create_all(bind=target)
+    install_identity_sqlite_guards(target)
 
 
 @contextmanager

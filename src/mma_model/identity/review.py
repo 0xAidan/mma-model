@@ -122,6 +122,88 @@ def _write_evidence(
     return row
 
 
+def _review_ids_for_identity(
+    session: Session, *, source: str, external_id: str
+) -> list[str]:
+    return list(
+        session.scalars(
+            select(IdentityReviewQueue.id).where(
+                IdentityReviewQueue.source == source,
+                IdentityReviewQueue.external_id == external_id,
+            )
+        ).all()
+    )
+
+
+def _deactivate_blocks_for_identity(
+    session: Session,
+    *,
+    source: str,
+    external_id: str,
+    now: datetime,
+    keep_review_id: str | None = None,
+) -> None:
+    review_ids = _review_ids_for_identity(
+        session, source=source, external_id=external_id
+    )
+    if not review_ids:
+        return
+    blocks = session.scalars(
+        select(IdentityScoringBlock).where(
+            IdentityScoringBlock.review_id.in_(review_ids),
+            IdentityScoringBlock.active.is_(True),
+        )
+    ).all()
+    for block in blocks:
+        if keep_review_id is not None and block.review_id == keep_review_id:
+            continue
+        block.active = False
+        block.cleared_at = now
+
+
+def _ensure_scoring_block(
+    session: Session,
+    *,
+    bout_id: str,
+    review_id: str,
+    reason: str,
+    evidence_id: str | None,
+    now: datetime,
+) -> None:
+    existing = session.scalar(
+        select(IdentityScoringBlock).where(
+            IdentityScoringBlock.bout_id == bout_id,
+            IdentityScoringBlock.review_id == review_id,
+        )
+    )
+    if existing is not None:
+        existing.active = True
+        existing.cleared_at = None
+        existing.reason = reason
+        if evidence_id is not None:
+            existing.evidence_id = evidence_id
+        return
+    session.add(
+        IdentityScoringBlock(
+            id=str(uuid.uuid4()),
+            bout_id=bout_id,
+            review_id=review_id,
+            reason=reason,
+            active=True,
+            evidence_id=evidence_id,
+            created_at=now,
+        )
+    )
+
+
+def _should_block_bout(bout_id: str | None, bout_status: str | None) -> bool:
+    return bool(bout_id) and (bout_status or "") in {
+        "upcoming",
+        "evaluated",
+        "scheduled",
+    }
+
+
 def enqueue_review(
     session: Session,
     candidate: ReviewCandidate,
@@ -140,7 +222,7 @@ def enqueue_review(
         )
     )
     if existing is not None:
-        _write_evidence(
+        evidence = _write_evidence(
             session,
             action="queued",
             rule_id=candidate.rule_id,
@@ -160,6 +242,23 @@ def enqueue_review(
             bout_id=candidate.bout_id,
             now=stamp,
         )
+        _deactivate_blocks_for_identity(
+            session,
+            source=candidate.source,
+            external_id=candidate.external_id,
+            now=stamp,
+            keep_review_id=existing.id,
+        )
+        if _should_block_bout(candidate.bout_id, candidate.bout_status):
+            _ensure_scoring_block(
+                session,
+                bout_id=str(candidate.bout_id),
+                review_id=existing.id,
+                reason="unresolved_identity",
+                evidence_id=evidence.id,
+                now=stamp,
+            )
+        session.flush()
         return existing.id
 
     review_id = str(uuid.uuid4())
@@ -205,21 +304,21 @@ def enqueue_review(
         bout_id=candidate.bout_id,
         now=stamp,
     )
-    if candidate.bout_id and (candidate.bout_status or "") in {
-        "upcoming",
-        "evaluated",
-        "scheduled",
-    }:
-        session.add(
-            IdentityScoringBlock(
-                id=str(uuid.uuid4()),
-                bout_id=candidate.bout_id,
-                review_id=review_id,
-                reason="unresolved_identity",
-                active=True,
-                evidence_id=evidence.id,
-                created_at=stamp,
-            )
+    _deactivate_blocks_for_identity(
+        session,
+        source=candidate.source,
+        external_id=candidate.external_id,
+        now=stamp,
+        keep_review_id=review_id,
+    )
+    if _should_block_bout(candidate.bout_id, candidate.bout_status):
+        _ensure_scoring_block(
+            session,
+            bout_id=str(candidate.bout_id),
+            review_id=review_id,
+            reason="unresolved_identity",
+            evidence_id=evidence.id,
+            now=stamp,
         )
         session.flush()
     return review_id
@@ -234,20 +333,6 @@ def list_reviews(
     if status is not None:
         stmt = stmt.where(IdentityReviewQueue.status == status)
     return list(session.scalars(stmt).all())
-
-
-def _clear_blocks_for_review(
-    session: Session, review_id: str, *, now: datetime
-) -> None:
-    blocks = session.scalars(
-        select(IdentityScoringBlock).where(
-            IdentityScoringBlock.review_id == review_id,
-            IdentityScoringBlock.active.is_(True),
-        )
-    ).all()
-    for block in blocks:
-        block.active = False
-        block.cleared_at = now
 
 
 def _upsert_source_mapping(
@@ -310,7 +395,7 @@ def apply_review_decision(
         raise ReviewDecisionError("review already approved with different canonical_id")
     if decision == "reject" and review.status == "rejected":
         return review
-    if review.status not in {"pending", "reversed"}:
+    if review.status != "pending":
         raise ReviewDecisionError(
             f"review status {review.status!r} cannot accept decision {decision!r}"
         )
@@ -384,7 +469,12 @@ def apply_review_decision(
         bout_id=review.bout_id,
         now=stamp,
     )
-    _clear_blocks_for_review(session, review.id, now=stamp)
+    _deactivate_blocks_for_identity(
+        session,
+        source=review.source,
+        external_id=review.external_id,
+        now=stamp,
+    )
     session.flush()
     _ = evidence
     return review
@@ -395,6 +485,7 @@ def reverse_review_decision(
     *,
     review_id: str,
     actor: str,
+    expected_version: int | None = None,
     now: datetime | None = None,
 ) -> IdentityReviewQueue:
     """Create a new audited reversal transition; never delete history."""
@@ -412,14 +503,21 @@ def reverse_review_decision(
             version=committed[1],
             decision_canonical_id=committed[2],
         )
+    if expected_version is not None and int(review.version) != int(expected_version):
+        raise ReviewDecisionError(
+            f"stale review version: expected {expected_version}, got {review.version}"
+        )
     if not review.reversible:
         raise ReviewDecisionError("review is not reversible")
+    if review.status == "reversed":
+        return review
     if review.status not in {"approved", "rejected"}:
         raise ReviewDecisionError(
             f"review status {review.status!r} cannot be reversed"
         )
 
     before = review.decision_canonical_id
+    reversed_from = review.status
     if review.status == "approved":
         mapping = session.scalar(
             select(FighterSourceId).where(
@@ -456,7 +554,7 @@ def reverse_review_decision(
         normalized_name=review.normalized_name,
         actor=actor,
         evidence={
-            "reversed_from": "approved" if before else "rejected",
+            "reversed_from": reversed_from,
             "review_version": review.version,
         },
         wikidata_id=review.wikidata_id,
@@ -467,32 +565,14 @@ def reverse_review_decision(
         bout_id=review.bout_id,
         now=stamp,
     )
-    # Re-activate or create scoring block if bout still unresolved after reverse.
-    if review.bout_id and (review.bout_status or "") in {
-        "upcoming",
-        "evaluated",
-        "scheduled",
-    }:
-        existing_block = session.scalar(
-            select(IdentityScoringBlock).where(
-                IdentityScoringBlock.bout_id == review.bout_id,
-                IdentityScoringBlock.review_id == review.id,
-            )
+    if _should_block_bout(review.bout_id, review.bout_status):
+        _ensure_scoring_block(
+            session,
+            bout_id=str(review.bout_id),
+            review_id=review.id,
+            reason="identity_reversed_unresolved",
+            evidence_id=None,
+            now=stamp,
         )
-        if existing_block is not None:
-            existing_block.active = True
-            existing_block.cleared_at = None
-            existing_block.reason = "identity_reversed_unresolved"
-        else:
-            session.add(
-                IdentityScoringBlock(
-                    id=str(uuid.uuid4()),
-                    bout_id=review.bout_id,
-                    review_id=review.id,
-                    reason="identity_reversed_unresolved",
-                    active=True,
-                    created_at=stamp,
-                )
-            )
     session.flush()
     return review

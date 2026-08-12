@@ -116,6 +116,7 @@
       "display_name": "John Smith",
       "dob": "1990-01-01",
       "same_name_group": "john_smith",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10001"}
     },
     {
@@ -125,6 +126,7 @@
       "display_name": "John Smith",
       "dob": "1992-06-15",
       "same_name_group": "john_smith",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10002"}
     },
     {
@@ -141,6 +143,7 @@
       "external_id": "tp-jose",
       "display_name": "José Silva",
       "dob": "1988-03-03",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10003"}
     },
     {
@@ -157,7 +160,8 @@
       "external_id": "tp-bones",
       "display_name": "Bones",
       "candidate_hints": ["nickname"],
-      "expected": {"kind": "created"}
+      "auto_eligible": false,
+      "expected": {"kind": "queued"}
     },
     {
       "id": "reordered_name_candidate_only",
@@ -190,6 +194,7 @@
       "opponent_normalized_name": "shared opp",
       "event_id": "evt-a",
       "event_date": "2019-01-10",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10011"}
     },
     {
@@ -198,6 +203,7 @@
       "external_id": "sd-ctx-amb",
       "display_name": "Ambiguous Fighter",
       "opponent_normalized_name": "shared opp",
+      "auto_eligible": false,
       "expected": {"kind": "created"}
     },
     {
@@ -206,6 +212,7 @@
       "external_id": "tp-wiki",
       "display_name": "Wiki Exact",
       "wikidata_id": "Q70001",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10007"}
     },
     {
@@ -222,7 +229,16 @@
       "source": "tapology_public",
       "external_id": "dup-ext-1",
       "display_name": "Dup External",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10010"}
+    },
+    {
+      "id": "duplicate_external_id_name_conflict",
+      "source": "tapology_public",
+      "external_id": "dup-ext-1",
+      "display_name": "Totally Different Person",
+      "auto_eligible": false,
+      "expected": {"kind": "queued"}
     },
     {
       "id": "upcoming_ambiguous_blocks",
@@ -238,10 +254,16 @@
       "id": "exact_espn_no_rename",
       "source": "espn",
       "external_id": "10004",
-      "display_name": "Should Not Rename Bones",
+      "display_name": "ALEX BONES CARTER",
+      "auto_eligible": true,
       "expected": {"kind": "linked", "canonical_espn_id": "10004"}
     }
   ],
+  "exact_id_expansion": {
+    "espn_id_start": 10100,
+    "count": 40,
+    "name_prefix": "Exact Link"
+  },
   "review_cases": [
     {
       "source": "sherdog_public",

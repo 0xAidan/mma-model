@@ -16,6 +16,11 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy import inspect
 
+from mma_model.db.identity_guards import (
+    drop_identity_sqlite_guards,
+    install_identity_sqlite_guards,
+)
+
 revision: str = "0007_identity_review_queue"
 down_revision: Union[str, Sequence[str], None] = "0006_observation_pit_metadata"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -61,12 +66,13 @@ def upgrade() -> None:
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
             sa.PrimaryKeyConstraint("id"),
-            sa.UniqueConstraint(
-                "source",
-                "external_id",
-                "status",
-                name="uq_identity_review_source_external_status",
-            ),
+        )
+        op.execute(
+            sa.text(
+                "CREATE UNIQUE INDEX uq_identity_review_open_source_external "
+                "ON identity_review_queue(source, external_id) "
+                "WHERE status IN ('pending', 'approved', 'rejected')"
+            )
         )
         op.create_index(
             "ix_identity_review_queue_status", "identity_review_queue", ["status"]
@@ -175,9 +181,12 @@ def upgrade() -> None:
             ["active"],
         )
 
+    install_identity_sqlite_guards(op.get_bind())
+
 
 def downgrade() -> None:
-    """Drop only DWCS-104 identity tables; preserve canonical fighters/source IDs."""
+    """Drop only DWCS-104 identity tables/triggers; preserve canonical fighters/source IDs."""
+    drop_identity_sqlite_guards(op.get_bind())
     existing = _existing_tables()
     # Drop dependents first.
     for table in IDENTITY_TABLES:

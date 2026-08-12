@@ -83,6 +83,22 @@ def test_identity_audit_list_json_readonly(db_env, capsys) -> None:
     assert "report_hash" in payload
     assert "pending_reviews" in payload
     assert "canonical_fighter_count" in payload
+    for key in (
+        "denominator_all",
+        "denominator_auto_eligible",
+        "auto_true_pos",
+        "auto_false_pos",
+        "auto_false_neg",
+        "precision",
+        "recall",
+        "queued",
+        "queue_rate",
+        "blocked",
+        "blocked_rate",
+        "coverage",
+        "same_name_conflations",
+    ):
+        assert key in payload
 
     code = main(
         [
@@ -193,3 +209,164 @@ def test_cli_identity_subprocess_no_network(db_env) -> None:
     )
     assert proc.returncode == 0
     assert "report_hash" in proc.stdout
+
+
+def test_identity_reverse_cli_idempotent_stale_and_errors(db_env, capsys) -> None:
+    code = main(
+        [
+            "identity",
+            "approve",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            db_env["review_id"],
+            "--canonical-id",
+            db_env["canonical_id"],
+            "--actor",
+            "cli-tester",
+            "--json",
+        ]
+    )
+    assert code == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert approved["status"] == "approved"
+    version = int(approved["version"])
+
+    code = main(
+        [
+            "identity",
+            "reverse",
+            "--database-url",
+            "sqlite:///data/mma.db",
+            "--review-id",
+            db_env["review_id"],
+            "--actor",
+            "cli-tester",
+        ]
+    )
+    err = capsys.readouterr().out + capsys.readouterr().err
+    assert code == 2
+    assert "refusing" in err.lower() or "allow-user-db" in err.lower()
+
+    code = main(
+        [
+            "identity",
+            "reverse",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            db_env["review_id"],
+            "--actor",
+            "cli-tester",
+            "--expected-version",
+            "0",
+            "--json",
+        ]
+    )
+    stale = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert "stale" in json.dumps(stale).lower() or "version" in json.dumps(stale).lower()
+
+    code = main(
+        [
+            "identity",
+            "reverse",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            db_env["review_id"],
+            "--actor",
+            "cli-tester",
+            "--expected-version",
+            str(version),
+            "--json",
+        ]
+    )
+    assert code == 0
+    reversed_payload = json.loads(capsys.readouterr().out)
+    assert reversed_payload["status"] == "reversed"
+    reversed_version = int(reversed_payload["version"])
+
+    code = main(
+        [
+            "identity",
+            "reverse",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            db_env["review_id"],
+            "--actor",
+            "cli-tester",
+            "--json",
+        ]
+    )
+    assert code == 0
+    again = json.loads(capsys.readouterr().out)
+    assert again["status"] == "reversed"
+    assert int(again["version"]) == reversed_version
+
+    code = main(
+        [
+            "identity",
+            "reverse",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            "missing-review",
+            "--actor",
+            "cli-tester",
+            "--json",
+        ]
+    )
+    missing = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert "error" in missing
+
+    code = main(
+        [
+            "identity",
+            "audit",
+            "--database-url",
+            db_env["db_url"],
+            "--series",
+            "not_a_series",
+            "--json",
+        ]
+    )
+    assert code == 2
+
+
+def test_identity_reverse_human_output(db_env, capsys) -> None:
+    main(
+        [
+            "identity",
+            "approve",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            db_env["review_id"],
+            "--canonical-id",
+            db_env["canonical_id"],
+            "--actor",
+            "cli-tester",
+            "--json",
+        ]
+    )
+    capsys.readouterr()
+    code = main(
+        [
+            "identity",
+            "reverse",
+            "--database-url",
+            db_env["db_url"],
+            "--review-id",
+            db_env["review_id"],
+            "--actor",
+            "cli-tester",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "reverse" in out.lower()
+    assert db_env["review_id"] in out
+    assert "reversed" in out.lower()

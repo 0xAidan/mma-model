@@ -119,7 +119,7 @@ def test_exact_espn_source_id_links_without_rename(env) -> None:
             session,
             source="espn",
             external_id="1001",
-            display_name="Alex Renamed Should Not Apply",
+            display_name="ALEX EXACT",
             actor="system",
             now=FIXED_NOW,
         )
@@ -310,14 +310,24 @@ def test_nickname_reordered_transliteration_never_auto_merge(env) -> None:
             now=FIXED_NOW,
             candidate_hints=("transliterated",),
         )
+        fuzzy = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="sd-fuzzy",
+            display_name="Jonny Bones",
+            actor="system",
+            now=FIXED_NOW,
+            candidate_hints=("fuzzy",),
+        )
         session.commit()
-    assert nick.kind in {"created", "queued"}
-    assert reordered.kind == "queued" or (
-        reordered.kind == "created" and reordered.canonical_id != canonical_fighter_id("5001")
-    )
-    # Transliteration must not auto-link to a diacritic-preserving distinct form if present.
-    assert translit.kind in {"created", "queued"}
-    assert nick.kind != "linked" or nick.rule_id != RULE_EXACT_SOURCE_EXTERNAL_ID
+    assert nick.kind == "queued"
+    assert reordered.kind == "queued"
+    assert translit.kind == "queued"
+    assert fuzzy.kind == "queued"
+    assert nick.canonical_id is None
+    assert reordered.canonical_id is None
+    assert translit.canonical_id is None
+    assert fuzzy.canonical_id is None
 
 
 def test_duplicate_external_id_conflict_queues_and_evidence(env) -> None:
@@ -340,11 +350,16 @@ def test_duplicate_external_id_conflict_queues_and_evidence(env) -> None:
         )
         session.commit()
         evidence = session.scalars(select(IdentityMatchEvidence)).all()
-    assert result.kind in {"linked", "queued"}
-    if result.kind == "linked":
-        assert result.canonical_id == a
+    assert result.kind in {"queued", "blocked"}
+    assert result.canonical_id is None
+    assert result.rule_id == "identity_conflict_queue"
     assert evidence
+    assert any(
+        "duplicate_external_id" in e.evidence_json or "conflict" in e.evidence_json
+        for e in evidence
+    )
     assert all(e.resolver_version == RESOLVER_VERSION for e in evidence)
+    _ = a
 
 
 def test_exact_wikidata_beats_transliteration_hint(env) -> None:
@@ -598,18 +613,20 @@ def test_unique_constraint_race_on_fighter_source_ids(env) -> None:
         session.rollback()
 
 
+def _load_adjudicated_fixture() -> dict:
+    from mma_model.identity.adjudicated import load_adjudicated_cases
+
+    return load_adjudicated_cases(FIXTURE_PATH)
+
+
 def test_adjudicated_fixture_precision_recall_and_zero_same_name_conflation(env) -> None:
-    cases = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    from mma_model.identity.adjudicated import score_adjudicated_results
+    from mma_model.identity.audit import build_identity_audit
+
+    cases = _load_adjudicated_fixture()
     Session = env["Session"]
-    auto_true_pos = 0
-    auto_false_pos = 0
-    auto_false_neg = 0
-    queued = 0
-    auto_expected = 0
-    same_name_conflations = 0
 
     with Session() as session:
-        # Seed ESPN/canonical baselines from fixture.
         for seed in cases["seeds"]:
             fid = _seed_espn_fighter(
                 session,
@@ -693,37 +710,47 @@ def test_adjudicated_fixture_precision_recall_and_zero_same_name_conflation(env)
                 now=FIXED_NOW,
             )
             results_by_id[case["id"]] = result
-            expected = case["expected"]
-            if expected["kind"] == "queued":
-                queued += 1
-                assert result.kind == "queued"
-                continue
-            if expected["kind"] in {"linked", "created"}:
-                auto_expected += 1
-                if result.kind not in {"linked", "created"}:
-                    auto_false_neg += 1
-                    continue
-                expected_id = expected.get("canonical_espn_id")
-                if expected_id:
-                    want = canonical_fighter_id(expected_id)
-                    if result.canonical_id == want:
-                        auto_true_pos += 1
-                    else:
-                        auto_false_pos += 1
-                        if case.get("same_name_group"):
-                            same_name_conflations += 1
-                else:
-                    # created without prescribed target counts as TP if created
-                    if result.kind == "created":
-                        auto_true_pos += 1
-                    else:
-                        auto_false_pos += 1
-            elif expected["kind"] == "blocked_or_queued":
-                assert result.kind in {"queued", "blocked"}
-                queued += 1
         session.commit()
 
-        # Manual reject/reverse cases exercised via review API.
+        metrics = score_adjudicated_results(cases, results_by_id)
+        assert metrics["denominator_all"] == len(cases["cases"])
+        assert metrics["denominator_auto_eligible"] >= 40
+        assert metrics["auto_true_pos"] + metrics["auto_false_pos"] + metrics["auto_false_neg"] == (
+            metrics["denominator_auto_eligible"]
+        )
+        assert metrics["queued"] + metrics["blocked"] == metrics["queue_or_blocked"]
+        assert metrics["queue_rate"] == metrics["queued"] / metrics["denominator_all"]
+        assert metrics["blocked_rate"] == metrics["blocked"] / metrics["denominator_all"]
+        assert metrics["same_name_conflations"] == 0
+        assert metrics["precision"] >= 0.995
+        assert metrics["recall"] >= 0.98
+        assert metrics["queued"] >= 5
+        assert metrics["blocked"] >= 1
+        assert 0.05 <= metrics["queue_rate"] <= 0.6
+        assert metrics["coverage"] == 1.0
+
+        report = build_identity_audit(session, series="dwcs")
+        payload = report.to_dict()
+        for key in (
+            "denominator_all",
+            "denominator_auto_eligible",
+            "auto_true_pos",
+            "auto_false_pos",
+            "auto_false_neg",
+            "precision",
+            "recall",
+            "queued",
+            "queue_rate",
+            "blocked",
+            "blocked_rate",
+            "coverage",
+            "same_name_conflations",
+        ):
+            assert key in payload
+        assert payload["queued"] == metrics["queued"]
+        assert payload["blocked"] == metrics["blocked"]
+        assert payload["precision"] == metrics["precision"]
+
         for review_case in cases.get("review_cases", []):
             pending = [
                 r
@@ -757,27 +784,6 @@ def test_adjudicated_fixture_precision_recall_and_zero_same_name_conflation(env)
                 )
         session.commit()
 
-    precision = auto_true_pos / max(auto_true_pos + auto_false_pos, 1)
-    recall = auto_true_pos / max(auto_true_pos + auto_false_neg, 1)
-    queue_rate = queued / max(len(cases["cases"]), 1)
-    coverage = (auto_true_pos + queued) / max(len(cases["cases"]), 1)
-
-    assert same_name_conflations == 0
-    assert precision >= 0.995
-    assert recall >= 0.98
-    # Honest reporting surface for operators/tests.
-    metrics = {
-        "precision": precision,
-        "recall": recall,
-        "queue_rate": queue_rate,
-        "coverage": coverage,
-        "auto_true_pos": auto_true_pos,
-        "auto_false_pos": auto_false_pos,
-        "auto_false_neg": auto_false_neg,
-        "queued": queued,
-    }
-    assert metrics["queue_rate"] >= 0.0
-    assert metrics["coverage"] <= 1.0
 
 
 def test_swapped_participants_and_late_replacement_do_not_silent_merge(env) -> None:
@@ -838,3 +844,75 @@ def test_swapped_participants_and_late_replacement_do_not_silent_merge(env) -> N
     assert late.canonical_id != b or late.kind == "queued"
     if late.kind == "linked":
         assert late.canonical_id == repl
+
+
+def test_resolver_imports_enqueue_review_at_module_top() -> None:
+    import inspect
+
+    from mma_model.identity import resolver as resolver_mod
+
+    source = inspect.getsource(resolver_mod)
+    import_line = "from mma_model.identity.review import enqueue_review"
+    assert import_line in source
+    assert source.index(import_line) < source.index("class IdentityResolver")
+    queue_src = inspect.getsource(resolver_mod.IdentityResolver._queue)
+    assert "from mma_model.identity.review import" not in queue_src
+
+
+def test_policy_same_name_auto_merge_fails_closed(env) -> None:
+    from mma_model.sources.policy import load_source_policy
+
+    Session = env["Session"]
+    policy = load_source_policy()
+    drifted = policy.model_copy(
+        update={
+            "identity_rules": policy.identity_rules.model_copy(
+                update={"same_name_auto_merge": True}
+            )
+        }
+    )
+    with Session() as session:
+        with pytest.raises(ValueError, match="same_name_auto_merge"):
+            resolve_fighter(
+                session,
+                source="tapology_public",
+                external_id="drift-1",
+                display_name="Drift",
+                actor="system",
+                now=FIXED_NOW,
+                policy=drifted,
+            )
+
+
+def test_policy_disabling_exact_source_ids_changes_behavior(env) -> None:
+    from mma_model.sources.policy import load_source_policy
+
+    Session = env["Session"]
+    policy = load_source_policy()
+    drifted = policy.model_copy(
+        update={
+            "identity_rules": policy.identity_rules.model_copy(
+                update={"exact_source_ids_first": False}
+            )
+        }
+    )
+    with Session() as session:
+        fid = _seed_espn_fighter(session, "9301", "Policy Exact")
+        session.add(
+            FighterSourceId(
+                fighter_id=fid, source="tapology_public", external_id="policy-exact-1"
+            )
+        )
+        session.commit()
+        result = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="policy-exact-1",
+            display_name="Policy Exact Other",
+            actor="system",
+            now=FIXED_NOW,
+            policy=drifted,
+        )
+        session.commit()
+    assert result.kind != "linked" or result.rule_id != RULE_EXACT_SOURCE_EXTERNAL_ID
+

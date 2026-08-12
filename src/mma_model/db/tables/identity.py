@@ -11,10 +11,12 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,11 +36,12 @@ class IdentityReviewQueue(Base):
 
     __tablename__ = "identity_review_queue"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_identity_review_open_source_external",
             "source",
             "external_id",
-            "status",
-            name="uq_identity_review_source_external_status",
+            unique=True,
+            sqlite_where=text("status IN ('pending', 'approved', 'rejected')"),
         ),
     )
 

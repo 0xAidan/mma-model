@@ -13,6 +13,13 @@ from sqlalchemy.orm import sessionmaker
 from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
 from mma_model.dwcs.ingest import sync_dwcs_history
+from mma_model.identity.audit import build_identity_audit
+from mma_model.identity.review import (
+    ReviewDecisionError,
+    apply_review_decision,
+    list_reviews,
+    reverse_review_decision,
+)
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.the_odds_api import fetch_mma_odds
@@ -251,6 +258,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional optimistic lock version",
     )
 
+    p_id_reverse = identity_sub.add_parser("reverse", help="Reverse an approved or rejected review")
+    _add_identity_db_args(p_id_reverse, mutating=True)
+    p_id_reverse.add_argument("--review-id", required=True, help="Explicit review id")
+    p_id_reverse.add_argument(
+        "--expected-version",
+        type=int,
+        default=None,
+        help="Optional optimistic lock version",
+    )
+
     args = p.parse_args(argv)
 
     if args.cmd == "init-db":
@@ -444,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
             print("refusing empty --database-url")
             return 2
 
-        mutating = args.identity_cmd in {"approve", "reject"}
+        mutating = args.identity_cmd in {"approve", "reject", "reverse"}
         if mutating:
             default_url = get_settings().mma_database_url
             is_live = db_url in LIVE_DB_URLS or db_url == default_url
@@ -461,10 +478,12 @@ def main(argv: list[str] | None = None) -> int:
         Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
         try:
             if args.identity_cmd == "audit":
-                from mma_model.identity.audit import build_identity_audit
-
-                with Session() as session:
-                    report = build_identity_audit(session, series=args.series)
+                try:
+                    with Session() as session:
+                        report = build_identity_audit(session, series=args.series)
+                except ValueError as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+                    return 2
                 if args.json:
                     print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
                 else:
@@ -472,8 +491,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
             if args.identity_cmd == "list":
-                from mma_model.identity.review import list_reviews
-
                 status = None if args.status == "all" else args.status
                 with Session() as session:
                     rows = list_reviews(session, status=status)
@@ -506,11 +523,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
             if args.identity_cmd in {"approve", "reject"}:
-                from mma_model.identity.review import (
-                    ReviewDecisionError,
-                    apply_review_decision,
-                )
-
                 decision = "approve" if args.identity_cmd == "approve" else "reject"
                 canonical_id = getattr(args, "canonical_id", None)
                 try:
@@ -539,6 +551,35 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(
                         f"{decision} review={payload['review_id']} "
+                        f"status={payload['status']} version={payload['version']}"
+                    )
+                return 0
+
+            if args.identity_cmd == "reverse":
+                try:
+                    with Session() as session:
+                        review = reverse_review_decision(
+                            session,
+                            review_id=args.review_id,
+                            actor=args.actor,
+                            expected_version=args.expected_version,
+                        )
+                        session.commit()
+                        payload = {
+                            "review_id": review.id,
+                            "status": review.status,
+                            "decision_canonical_id": review.decision_canonical_id,
+                            "version": review.version,
+                            "actor": review.decided_by,
+                        }
+                except ReviewDecisionError as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+                    return 2
+                if args.json:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    print(
+                        f"reverse review={payload['review_id']} "
                         f"status={payload['status']} version={payload['version']}"
                     )
                 return 0
