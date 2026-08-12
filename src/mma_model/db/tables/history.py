@@ -65,6 +65,28 @@ class HistorySourceBout(Base):
             name="ck_history_bout_result",
         ),
         CheckConstraint("revision >= 1", name="ck_history_bout_revision_positive"),
+        CheckConstraint(
+            "identity_status IN ('linked', 'queued', 'blocked', 'unresolved')",
+            name="ck_history_bout_identity_status",
+        ),
+        CheckConstraint(
+            "bout_status IN ('completed', 'cancelled', 'replacement', 'scheduled', 'unknown')",
+            name="ck_history_bout_status",
+        ),
+        CheckConstraint(
+            "version_kind IN ('event_night', 'current', 'correction')",
+            name="ck_history_bout_version_kind",
+        ),
+        CheckConstraint("is_current_record IN (0, 1)", name="ck_history_bout_is_current"),
+        CheckConstraint("left_truncated IN (0, 1)", name="ck_history_bout_left_truncated"),
+        CheckConstraint(
+            "event_time_precision IN ('date_only', 'exact', 'unknown')",
+            name="ck_history_bout_time_precision",
+        ),
+        CheckConstraint(
+            "observation_origin IN ('synthetic_fixture', 'live_public', 'unknown')",
+            name="ck_history_bout_origin",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
@@ -125,6 +147,8 @@ class HistorySourceBout(Base):
     raw_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     identity_status: Mapped[str] = mapped_column(String(32), default="unresolved")
     is_current_record: Mapped[int] = mapped_column(Integer, default=0)
+    event_time_precision: Mapped[str] = mapped_column(String(32), default="date_only")
+    observation_origin: Mapped[str] = mapped_column(String(32), default="unknown")
     wikidata_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
@@ -141,7 +165,7 @@ class HistoryConflict(Base):
     conflict_key: Mapped[str] = mapped_column(String(256), index=True)
     conflict_type: Mapped[str] = mapped_column(String(64), index=True)
     fighter_canonical_id: Mapped[Optional[str]] = mapped_column(
-        String(36), nullable=True, index=True
+        String(36), ForeignKey("canonical_fighters.id"), nullable=True, index=True
     )
     left_source: Mapped[str] = mapped_column(String(64))
     left_external_id: Mapped[str] = mapped_column(String(128))
@@ -162,7 +186,8 @@ class HistorySourceFailure(Base):
             "source",
             "reason",
             "scope",
-            name="uq_history_source_failure_scope",
+            "subject",
+            name="uq_history_source_failure_subject",
         ),
     )
 
@@ -170,10 +195,13 @@ class HistorySourceFailure(Base):
     source: Mapped[str] = mapped_column(String(64), index=True)
     reason: Mapped[str] = mapped_column(String(128), index=True)
     scope: Mapped[str] = mapped_column(String(128), default="default")
+    subject: Mapped[str] = mapped_column(String(128), default="")
     host: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     path_category: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     http_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     evidence_json: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    checkpoint_token: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
@@ -218,7 +246,9 @@ class HistoryReconstruction(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
-    fighter_canonical_id: Mapped[str] = mapped_column(String(36), index=True)
+    fighter_canonical_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("canonical_fighters.id"), index=True
+    )
     cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     reconstruction_version: Mapped[str] = mapped_column(String(32), default="1")
     payload_json: Mapped[str] = mapped_column(Text)
@@ -237,13 +267,15 @@ class HistoryExplicitRecord(Base):
             "as_of",
             name="uq_history_explicit_record",
         ),
+        CheckConstraint("feature_eligible IN (0, 1)", name="ck_history_explicit_feature"),
+        CheckConstraint("is_current_mutable IN (0, 1)", name="ck_history_explicit_current"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
     source: Mapped[str] = mapped_column(String(64), index=True)
     fighter_external_id: Mapped[str] = mapped_column(String(128), index=True)
     fighter_canonical_id: Mapped[Optional[str]] = mapped_column(
-        String(36), nullable=True, index=True
+        String(36), ForeignKey("canonical_fighters.id"), nullable=True, index=True
     )
     as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     wins: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -252,6 +284,7 @@ class HistoryExplicitRecord(Base):
     no_contests: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     classification: Mapped[str] = mapped_column(String(32), default="unknown")
     is_current_mutable: Mapped[int] = mapped_column(Integer, default=0)
+    feature_eligible: Mapped[int] = mapped_column(Integer, default=0)
     payload_hash: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

@@ -174,6 +174,8 @@ def parse_fighter_page(html: str) -> dict[str, Any]:
 
     return {
         "source": SOURCE_TAPOLOGY_PUBLIC,
+        "parser_mode": "synthetic_contract",
+        "observation_origin": "synthetic_fixture",
         "fighter_external_id": fighter_id,
         "fighter_name": fighter_name,
         "wikidata_id": profile.get("data-wikidata-id") or None,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mma_model.db.tables.core import CanonicalFighter
 from mma_model.db.tables.history import HistorySourceBout
@@ -49,12 +49,22 @@ def _bout(session, **overrides) -> HistorySourceBout:
         observed_at=overrides.get("observed_at", datetime(2023, 12, 1, tzinfo=UTC)),
         effective_at=overrides.get("effective_at"),
         source_published_at=overrides.get("source_published_at"),
-        proxy_published_at=overrides.get("proxy_published_at"),
+        proxy_published_at=(
+            overrides["proxy_published_at"]
+            if "proxy_published_at" in overrides
+            else (
+                (overrides["effective_at"] + timedelta(days=1))
+                if overrides.get("effective_at") is not None
+                else None
+            )
+        ),
         payload_hash=overrides.get("payload_hash", "a" * 64),
         identity_status=overrides.get("identity_status", "linked"),
         is_current_record=overrides.get("is_current_record", 0),
         left_truncated=overrides.get("left_truncated", 0),
         missing_reason=overrides.get("missing_reason"),
+        event_time_precision=overrides.get("event_time_precision", "date_only"),
+        observation_origin=overrides.get("observation_origin", "unknown"),
     )
     session.add(row)
     return row

@@ -12,7 +12,7 @@ from mma_model.sources.http.polite_client import PoliteHttpClient
 from mma_model.sources.http_politeness import HttpPolitenessConfig, load_http_politeness
 
 BASE_HOST = "combatreg.com"
-BASE_URL = "http://www.combatreg.com"
+BASE_URL = "https://www.combatreg.com"
 
 
 class CombatRegistryPublicClient:
@@ -42,8 +42,16 @@ class CombatRegistryPublicClient:
     def close(self) -> None:
         self._http.close()
 
+    @classmethod
+    def live_base_url(cls) -> str:
+        return BASE_URL
+
+    @classmethod
+    def results_url(cls, results_external_id: str) -> str:
+        return f"{BASE_URL}/results/{results_external_id}"
+
     def fetch_results(self, results_external_id: str) -> tuple[str, str]:
-        url = f"{BASE_URL}/results/{results_external_id}"
+        url = self.results_url(results_external_id)
         return public_get_text(self._http, url, host=BASE_HOST)
 
     def fetch_url(self, url: str) -> tuple[str, str]:

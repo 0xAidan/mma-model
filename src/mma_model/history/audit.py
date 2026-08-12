@@ -23,6 +23,14 @@ from mma_model.history.constants import (
     SOURCE_TAPOLOGY,
     UNRESOLVED_IDENTITY_STATUSES,
 )
+from mma_model.history.coverage import (
+    db_bout_dates,
+    evidence_class_for,
+    filter_sample_rows,
+    left_truncated_history_count,
+    live_source_coverage_map,
+    measured_identity_conflations,
+)
 from mma_model.history.models import RegionalCoverageReport
 from mma_model.history.reconstruct import persist_reconstruction, reconstruct_pre_fight_record
 
@@ -74,20 +82,39 @@ def evaluate_sample_coverage(
     *,
     sample: Mapping[str, Any] | None = None,
     years: range | None = None,
+    live_probes: Mapping[str, Any] | None = None,
 ) -> RegionalCoverageReport:
     payload = dict(sample or load_adjudicated_sample())
     found = _found_ids(session)
     failures = _source_failures(session)
     failed_sources = {row["source"] for row in failures}
+    db_dates = db_bout_dates(session)
+    live_coverage = live_source_coverage_map(session, _select_live_probes(live_probes))
+    evidence_class = evidence_class_for(session)
 
-    def _score(rows: Sequence[Mapping[str, Any]], *, require_regulated_us: bool) -> tuple[int, int, int, int]:
+    pro_all = list(payload.get("professional_bouts") or [])
+    am_all = list(payload.get("amateur_regulated_us_bouts") or [])
+    fixture_pro = filter_sample_rows(pro_all, years=None, db_dates=db_dates)
+    fixture_am = filter_sample_rows(
+        am_all, years=None, db_dates=db_dates, require_regulated_us=True
+    )
+    pro_rows = filter_sample_rows(pro_all, years=years, db_dates=db_dates)
+    am_rows = filter_sample_rows(
+        am_all, years=years, db_dates=db_dates, require_regulated_us=True
+    )
+    unknown_rows = filter_sample_rows(
+        list(payload.get("unknown_classification_bouts") or []),
+        years=years,
+        db_dates=db_dates,
+    )
+    eligible = tuple(pro_rows + am_rows + unknown_rows)
+
+    def _score(rows: Sequence[Mapping[str, Any]]) -> tuple[int, int, int, int]:
         n = 0
         found_n = 0
         failed_n = 0
         unexplained = 0
         for row in rows:
-            if require_regulated_us and str(row.get("regulated_us") or "") != "true":
-                continue
             n += 1
             bout_id = str(row["bout_id"])
             source = str(row.get("source") or "")
@@ -99,14 +126,11 @@ def evaluate_sample_coverage(
                 unexplained += 1
         return n, found_n, failed_n, unexplained
 
-    pro_n, pro_found, pro_failed, pro_unexplained = _score(
-        list(payload.get("professional_bouts") or []), require_regulated_us=False
-    )
-    am_n, am_found, am_failed, am_unexplained = _score(
-        list(payload.get("amateur_regulated_us_bouts") or []),
-        require_regulated_us=True,
-    )
-    unknown_n = len(list(payload.get("unknown_classification_bouts") or []))
+    pro_n, pro_found, pro_failed, pro_unexplained = _score(pro_rows)
+    am_n, am_found, am_failed, am_unexplained = _score(am_rows)
+    fixture_pro_n, fixture_pro_found, _, _ = _score(fixture_pro)
+    fixture_am_n, fixture_am_found, _, _ = _score(fixture_am)
+    unknown_n = len(unknown_rows)
 
     agreement_n = 0
     agreement_d = 0
@@ -148,7 +172,8 @@ def evaluate_sample_coverage(
     unresolved = sum(
         1 for row in bout_rows if row.identity_status in UNRESOLVED_IDENTITY_STATUSES
     )
-    left_truncated = sum(1 for row in bout_rows if int(row.left_truncated or 0) == 1)
+    left_truncated = left_truncated_history_count(session)
+    identity_conflations = measured_identity_conflations(session)
     tier_counts: dict[str, int] = {}
     for row in bout_rows:
         tier_counts[row.quality_tier] = tier_counts.get(row.quality_tier, 0) + 1
@@ -157,13 +182,15 @@ def evaluate_sample_coverage(
     for source in (SOURCE_TAPOLOGY, SOURCE_SHERDOG, SOURCE_COMBAT_REGISTRY):
         src_bouts = [row for row in bout_rows if row.source == source]
         killed = [row for row in failures if row["source"] == source]
+        live = live_coverage.get(source) or {}
         source_rows.append(
             {
                 "source": source,
                 "source_class": SOURCE_CLASS.get(source),
                 "bouts": len(src_bouts),
-                "killed": bool(killed),
+                "killed": bool(killed) or live.get("status") in {"source_killed", "source_failed"},
                 "kill_reasons": tuple(row["reason"] for row in killed),
+                "live_status": live.get("status"),
             }
         )
     pro_rate = (pro_found / pro_n) if pro_n else None
@@ -198,12 +225,14 @@ def evaluate_sample_coverage(
         "identity_blocks": (
             identity_blocks if bout_rows else int(identity_payload.get("blocks") or 0)
         ),
-        "identity_conflations": int(identity_payload.get("conflations") or 0),
+        "identity_conflations": identity_conflations,
         "left_truncated": left_truncated,
         "unresolved_identities": unresolved,
         "pit_tiers": pit_tiers,
         "sources": source_rows,
         "invariance_hash": invariance_hash,
+        "evidence_class": evidence_class,
+        "live_source_coverage": live_coverage,
         "years": {
             "start": years.start if years else None,
             "stop": (years.stop - 1) if years else None,
@@ -227,7 +256,7 @@ def evaluate_sample_coverage(
         identity_exact_links=int(body["identity_exact_links"]),
         identity_queued=int(body["identity_queued"]),
         identity_blocks=int(body["identity_blocks"]),
-        identity_conflations=int(body["identity_conflations"]),
+        identity_conflations=identity_conflations,
         professional_source_failed=pro_failed,
         professional_missing_unexplained=pro_unexplained,
         amateur_source_failed=am_failed,
@@ -239,6 +268,13 @@ def evaluate_sample_coverage(
         invariance_hash=invariance_hash,
         report_hash=_hash_payload(body),
         notes=(),
+        evidence_class=evidence_class,  # type: ignore[arg-type]
+        live_source_coverage=live_coverage,
+        eligible_sample_bouts=eligible,
+        fixture_professional_n=fixture_pro_n,
+        fixture_professional_found=fixture_pro_found,
+        fixture_amateur_n=fixture_am_n,
+        fixture_amateur_found=fixture_am_found,
     )
     return report
 
@@ -263,24 +299,33 @@ def _segment_gate_ok(
 
 def coverage_gates_ok(report: RegionalCoverageReport) -> tuple[bool, tuple[str, ...]]:
     blockers: list[str] = []
-    if not _segment_gate_ok(
-        n=report.professional_n,
-        found=report.professional_found,
-        failed=report.professional_source_failed,
-        unexplained=report.professional_missing_unexplained,
-        gate=PRO_GATE,
-    ):
-        blockers.append("professional_coverage")
-    if not _segment_gate_ok(
-        n=report.amateur_n,
-        found=report.amateur_found,
-        failed=report.amateur_source_failed,
-        unexplained=report.amateur_missing_unexplained,
-        gate=AMATEUR_GATE,
-    ):
-        blockers.append("amateur_coverage")
-    if report.pre_fight_agreement_d and (report.pre_fight_agreement_rate or 0) < AGREEMENT_GATE:
+    if report.pre_fight_agreement_d == 0:
+        blockers.append("insufficient_comparable_records")
+    elif (report.pre_fight_agreement_rate or 0) < AGREEMENT_GATE:
         blockers.append("pre_fight_agreement")
+    if report.evidence_class != "live_source_coverage":
+        blockers.append("live_source_unmeasured")
+    else:
+        if not _segment_gate_ok(
+            n=report.professional_n,
+            found=report.professional_found,
+            failed=report.professional_source_failed,
+            unexplained=report.professional_missing_unexplained,
+            gate=PRO_GATE,
+        ):
+            blockers.append("professional_coverage")
+        if not _segment_gate_ok(
+            n=report.amateur_n,
+            found=report.amateur_found,
+            failed=report.amateur_source_failed,
+            unexplained=report.amateur_missing_unexplained,
+            gate=AMATEUR_GATE,
+        ):
+            blockers.append("amateur_coverage")
+    for source, row in (report.live_source_coverage or {}).items():
+        status = str(row.get("status") or "unmeasured")
+        if status in {"source_killed", "source_failed", "unmeasured", "accessibility_only"}:
+            blockers.append(f"live_{status}:{source}")
     if report.future_invariance_failures != 0:
         blockers.append("future_row_invariance")
     if report.identity_conflations != 0:
@@ -340,34 +385,63 @@ def render_regional_coverage_markdown(
         if report.pre_fight_agreement_rate is None
         else f"{report.pre_fight_agreement_rate:.4f}"
     )
+    live_lines = []
+    for source, row in (report.live_source_coverage or {}).items():
+        live_lines.append(
+            f"- `{source}`: status=`{row.get('status')}` result=`{row.get('result')}` "
+            f"reason=`{row.get('reason')}` http={row.get('http_status')} "
+            f"path=`{row.get('path_category')}`"
+        )
+    live_block = "\n".join(live_lines) or "- none"
+    agree_note = (
+        "blocker (insufficient_comparable_records); never a pass"
+        if report.pre_fight_agreement_d == 0
+        else agree
+    )
     return (
         "# Regional / pre-UFC history coverage\n\n"
         "Sanitized DWCS-105 evidence. No raw HTML or live payloads.\n\n"
         f"- Report hash: `{report.report_hash}`\n"
-        f"- Professional sample: {report.professional_found}/{report.professional_n} ({pro_rate}); "
+        f"- Evidence class: `{report.evidence_class}`\n"
+        f"- Year-filtered professional sample: {report.professional_found}/{report.professional_n} ({pro_rate}); "
         f"source_failed={report.professional_source_failed}; "
         f"missing_unexplained={report.professional_missing_unexplained}\n"
-        f"- Regulated-US amateur sample: {report.amateur_found}/{report.amateur_n} ({am_rate}); "
+        f"- Year-filtered regulated-US amateur sample: {report.amateur_found}/{report.amateur_n} ({am_rate}); "
         f"source_failed={report.amateur_source_failed}; "
         f"missing_unexplained={report.amateur_missing_unexplained}\n"
         f"- Unknown classification rows: {report.unknown_class_n}\n"
-        f"- Pre-fight agreement: {report.pre_fight_agreement_n}/{report.pre_fight_agreement_d} ({agree})\n"
+        f"- Pre-fight agreement: {report.pre_fight_agreement_n}/{report.pre_fight_agreement_d} ({agree_note})\n"
         f"- Pre-fight exclusions: {', '.join(report.pre_fight_exclusions) or 'none'}\n"
         f"- Future-row invariance failures: {report.future_invariance_failures}\n"
         f"- Invariance hash: `{report.invariance_hash}`\n"
         f"- Conflicts: {report.conflicts}\n"
-        f"- Left-truncated bouts: {report.left_truncated}\n"
+        f"- Left-truncated histories: {report.left_truncated}\n"
         f"- Unresolved identities: {report.unresolved_identities}\n"
         f"- PIT tiers: {dict(report.pit_tiers)}\n"
         f"- Identity exact links / queued / blocks / conflations: "
         f"{report.identity_exact_links}/{report.identity_queued}/"
         f"{report.identity_blocks}/{report.identity_conflations}\n\n"
+        "## fixture_validation\n\n"
+        "Synthetic `data-schema` decoder counts. These are **not live coverage** "
+        "and must not satisfy live 95%/80% gates.\n\n"
+        f"- Professional decoder: {report.fixture_professional_found}/{report.fixture_professional_n} "
+        f"(synthetic fixtures; not live coverage)\n"
+        f"- Amateur decoder: {report.fixture_amateur_found}/{report.fixture_amateur_n} "
+        f"(synthetic fixtures; not live coverage)\n"
+        f"- `{report.fixture_professional_found}/{report.fixture_professional_n}` and "
+        f"`{report.fixture_amateur_found}/{report.fixture_amateur_n}` must not be treated as measured live coverage.\n\n"
+        "## live_source_coverage\n\n"
+        f"{live_block}\n\n"
+        "Sherdog hash-only 200 on `/events/` is accessibility only and is not measured "
+        "fighter-history coverage. Tapology HTTP 403 and Combat Registry login wall "
+        "kill those source roles. Unknown remains unknown, not zero.\n\n"
         "## Source failures\n\n"
         f"{failed_lines}\n\n"
         "## Sources\n\n"
         + "\n".join(
             f"- `{row['source']}` ({row.get('source_class')}): "
             f"bouts={row.get('bouts')} killed={row.get('killed')} "
+            f"live_status={row.get('live_status')} "
             f"reasons={','.join(row.get('kill_reasons') or ()) or 'none'}"
             for row in report.sources
         )
@@ -376,8 +450,8 @@ def render_regional_coverage_markdown(
         + "\n"
         + "\nLicensed SportsDataIO / BALLDONTLIE validation remains `source_failed` "
         + "under recorded limitations and is not a DWCS-105 stop.\n"
-        + "Pre-fight agreement 0/0 is the committed sample placeholder exclusion; "
-        + "reconstruction agreement and future-row invariance are covered by fixture tests.\n"
+        + "Pre-fight agreement 0/0 is a blocker (`insufficient_comparable_records`), "
+        + "never a passing coverage gate.\n"
     )
 
 

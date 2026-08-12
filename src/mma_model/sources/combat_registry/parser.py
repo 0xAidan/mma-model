@@ -166,6 +166,8 @@ def parse_results_page(html: str) -> dict[str, Any]:
 
     return {
         "source": SOURCE_COMBAT_REGISTRY,
+        "parser_mode": "synthetic_contract",
+        "observation_origin": "synthetic_fixture",
         "fighter_external_id": fighter_id,
         "fighter_name": fighter_name,
         "wikidata_id": table.get("data-wikidata-id") or None,

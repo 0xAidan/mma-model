@@ -37,6 +37,10 @@ class PreFightRecord(BaseModel):
     used_current_record: bool = False
     unknown_results: int = 0
     left_truncated: bool = False
+    completeness: Literal["complete", "left_truncated", "unknown"] = "complete"
+    visibility_unknown_excluded: int = 0
+    date_precision_excluded: int = 0
+    history_unknown: bool = False
 
     def comparable_tuple(self) -> tuple[int, int, int, int]:
         return (self.wins, self.losses, self.draws, self.no_contests)
@@ -85,6 +89,15 @@ class RegionalCoverageReport(BaseModel):
     invariance_hash: str = ""
     report_hash: str = ""
     notes: tuple[str, ...] = ()
+    evidence_class: Literal["fixture_validation", "live_source_coverage", "mixed"] = (
+        "fixture_validation"
+    )
+    live_source_coverage: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    eligible_sample_bouts: tuple[dict[str, Any], ...] = ()
+    fixture_professional_n: int = 0
+    fixture_professional_found: int = 0
+    fixture_amateur_n: int = 0
+    fixture_amateur_found: int = 0
 
 
 class SourceKillEvidence(BaseModel):

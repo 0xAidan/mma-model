@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from mma_model.db.tables.core import CanonicalEvent, CanonicalFighter
+from mma_model.db.tables.core import CanonicalEvent, CanonicalFighter, FighterSourceId
 from mma_model.history.apply import conflict_observation, source_failure_observation
 from mma_model.history.constants import (
     REGIONAL_FALLBACK_ORDER,
@@ -74,6 +74,8 @@ class HistorySyncReport:
     conflicts: int = 0
     notes: list[str] = field(default_factory=list)
     licensed_optional: list[dict[str, Any]] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    unresolved_source_ids: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +90,8 @@ class HistorySyncReport:
             "conflicts": self.conflicts,
             "licensed_optional": list(self.licensed_optional),
             "notes": list(self.notes),
+            "blockers": list(self.blockers),
+            "unresolved_source_ids": self.unresolved_source_ids,
         }
 
     def human_summary(self) -> str:
@@ -107,26 +111,7 @@ def _hash_payload(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def load_upcoming_dwcs_fighters(
-    path: Path | None = None,
-    *,
-    session: Session | None = None,
-) -> list[FighterSeed]:
-    if session is not None:
-        upcoming = session.scalars(
-            select(CanonicalEvent).where(
-                CanonicalEvent.series == "dwcs",
-                CanonicalEvent.status.in_(("scheduled", "upcoming")),
-            )
-        ).all()
-        if upcoming:
-            fighters = session.scalars(
-                select(CanonicalFighter).order_by(CanonicalFighter.display_name.asc())
-            ).all()
-            return [
-                FighterSeed(display_name=f.display_name, source_ids={}, canonical_id=f.id)
-                for f in fighters
-            ]
+def _json_fighter_seeds(path: Path | None = None) -> list[FighterSeed]:
     seed_path = path or DEFAULT_UPCOMING_PATH
     raw = json.loads(seed_path.read_text(encoding="utf-8"))
     rows = []
@@ -141,6 +126,61 @@ def load_upcoming_dwcs_fighters(
             )
         )
     return rows
+
+
+def _merge_source_ids(
+    *,
+    json_ids: Mapping[str, str],
+    db_ids: Mapping[str, str],
+) -> dict[str, str]:
+    merged = dict(json_ids)
+    for key, value in db_ids.items():
+        if value:
+            merged[key] = value
+    return merged
+
+
+def load_upcoming_dwcs_fighters(
+    path: Path | None = None,
+    *,
+    session: Session | None = None,
+) -> list[FighterSeed]:
+    json_seeds = _json_fighter_seeds(path)
+    if session is None:
+        return json_seeds
+    upcoming = session.scalars(
+        select(CanonicalEvent).where(
+            CanonicalEvent.series == "dwcs",
+            CanonicalEvent.status.in_(("scheduled", "upcoming")),
+        )
+    ).all()
+    if not upcoming:
+        return json_seeds
+    by_name = {seed.display_name.casefold(): seed for seed in json_seeds}
+    fighters = session.scalars(
+        select(CanonicalFighter).order_by(CanonicalFighter.display_name.asc())
+    ).all()
+    out: list[FighterSeed] = []
+    for fighter in fighters:
+        db_rows = session.scalars(
+            select(FighterSourceId).where(FighterSourceId.fighter_id == fighter.id)
+        ).all()
+        db_ids = {row.source: row.external_id for row in db_rows if row.external_id}
+        json_match = by_name.get(fighter.display_name.casefold())
+        json_ids = dict(json_match.source_ids) if json_match else {}
+        merged = _merge_source_ids(json_ids=json_ids, db_ids=db_ids)
+        wikidata = merged.get(SOURCE_WIKIDATA)
+        if json_match and json_match.wikidata_id:
+            wikidata = wikidata or json_match.wikidata_id
+        out.append(
+            FighterSeed(
+                display_name=fighter.display_name,
+                source_ids=merged,
+                canonical_id=fighter.id,
+                wikidata_id=wikidata,
+            )
+        )
+    return out
 
 
 def _adapter_for(
@@ -233,6 +273,51 @@ def sync_regional_history(
         for seed in fighters:
             external_id = seed.source_ids.get(source)
             if not external_id:
+                has_any_id = any(seed.source_ids.get(item) for item in enabled)
+                if not has_any_id:
+                    evidence = {
+                        "reason": "missing_source_id",
+                        "display_name": seed.display_name,
+                        "canonical_id": seed.canonical_id,
+                        "source": source,
+                    }
+                    report.source_failed.append(
+                        {
+                            "source": source,
+                            "reason": "missing_source_id",
+                            "evidence": evidence,
+                        }
+                    )
+                    report.notes.append(f"{source}:{seed.display_name} missing_source_id")
+                    report.unresolved_source_ids += 1
+                    report.blockers.append(
+                        f"missing_source_id:{source}:{seed.display_name}"
+                    )
+                    if not dry_run:
+                        fail_obs = source_failure_observation(
+                            source=source,
+                            reason="missing_source_id",
+                            observed_at=observed,
+                            payload_hash=_hash_payload(evidence),
+                            scope="upcoming-dwcs",
+                            subject=seed.canonical_id or seed.display_name,
+                            checkpoint_token=f"missing_source_id:{source}",
+                            evidence=evidence,
+                        )
+                        if run is None:
+                            run = repo.start_run(
+                                source=source,
+                                stream="fighter_history",
+                                scope="upcoming-dwcs",
+                            )
+                        repo.commit_batch(
+                            run_id=run.id,
+                            observations=[fail_obs],
+                            checkpoint_token=(
+                                f"missing_source_id:{source}:{seed.display_name}"
+                            ),
+                            checkpoint_version=CHECKPOINT_VERSION,
+                        )
                 continue
             try:
                 with session_factory() as session:
@@ -307,8 +392,10 @@ def sync_regional_history(
                         observed_at=observed,
                         payload_hash=_hash_payload(evidence),
                         scope="upcoming-dwcs",
+                        subject=str(external_id),
                         host=exc.host,
                         http_status=exc.status_code,
+                        checkpoint_token=f"killed:{exc.reason}",
                         evidence=evidence,
                     )
                     assert run is not None
@@ -337,6 +424,8 @@ def sync_regional_history(
                         observed_at=observed,
                         payload_hash=_hash_payload(evidence),
                         scope="upcoming-dwcs",
+                        subject=str(external_id),
+                        checkpoint_token="killed:schema_drift",
                         evidence=evidence,
                     )
                     assert run is not None
@@ -347,8 +436,35 @@ def sync_regional_history(
                         checkpoint_version=CHECKPOINT_VERSION,
                     )
                 break
-            except FileNotFoundError:
+            except FileNotFoundError as exc:
+                evidence = {
+                    "reason": "missing_page",
+                    "fighter_external_id": external_id,
+                    "path": str(exc),
+                }
+                report.source_failed.append(
+                    {"source": source, "reason": "missing_page", "evidence": evidence}
+                )
                 report.notes.append(f"{source}:{external_id} missing_page")
+                report.blockers.append(f"missing_page:{source}:{external_id}")
+                if not dry_run:
+                    fail_obs = source_failure_observation(
+                        source=source,
+                        reason="missing_page",
+                        observed_at=observed,
+                        payload_hash=_hash_payload(evidence),
+                        scope="upcoming-dwcs",
+                        subject=str(external_id),
+                        checkpoint_token=f"missing_page:{external_id}",
+                        evidence=evidence,
+                    )
+                    assert run is not None
+                    repo.commit_batch(
+                        run_id=run.id,
+                        observations=[fail_obs],
+                        checkpoint_token=f"missing_page:{external_id}",
+                        checkpoint_version=CHECKPOINT_VERSION,
+                    )
                 continue
         if run is not None and not dry_run:
             status = "failed" if source in killed else "succeeded"
@@ -374,7 +490,12 @@ def sync_regional_history(
         report.batches_committed += 1
         repo.finish_run(run.id, status="succeeded")
 
-    report.identity = identity_summary(resolve_results)
+    with session_factory() as session:
+        report.identity = identity_summary(resolve_results, session=session)
+        if report.unresolved_source_ids:
+            report.identity["unresolved"] = (
+                int(report.identity.get("unresolved") or 0) + report.unresolved_source_ids
+            )
     return report
 
 

@@ -51,7 +51,7 @@ def test_history_sync_and_audit_fixture_cli(tmp_path: Path, capsys) -> None:
             ]
         )
         audit_out = capsys.readouterr().out
-        assert code in {0, 2}
+        assert code == 2
         audit = json.loads(audit_out)
         assert "professional_found" in audit
         assert "live_probes" in audit

@@ -10,8 +10,12 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from mma_model.db.tables.core import FighterSourceId
+from mma_model.db.tables.history import HistoryConflict
+from mma_model.db.tables.identity import IdentityReviewQueue, IdentityScoringBlock
 from mma_model.identity.models import ResolveResult
 from mma_model.identity.resolver import IdentityResolver
 
@@ -56,7 +60,10 @@ def identity_status_from_result(result: ResolveResult) -> str:
     raise ValueError(f"unhandled resolve kind: {result.kind}")
 
 
-def identity_summary(results: list[ResolveResult]) -> dict[str, Any]:
+def identity_summary(
+    results: list[ResolveResult],
+    session: Session | None = None,
+) -> dict[str, Any]:
     exact = 0
     queued = 0
     blocked = 0
@@ -72,10 +79,47 @@ def identity_summary(results: list[ResolveResult]) -> dict[str, Any]:
             blocked += 1
         else:
             raise ValueError(f"unhandled resolve kind: {row.kind}")
+    conflations = compute_identity_conflations(session) if session is not None else queued
     return {
         "exact_links": exact,
         "created": created,
         "queued": queued,
         "blocks": blocked,
-        "conflations": 0,
+        "unresolved": queued + blocked,
+        "conflations": conflations,
     }
+
+
+def compute_identity_conflations(session: Session) -> int:
+    """Count actual identity conflicts, not a hardcoded zero.
+
+    Includes pending same-name / duplicate-external review rows, identity
+    history conflicts, active scoring blocks, and duplicate (source, external_id)
+    mappings if any exist.
+    """
+    pending = session.scalar(
+        select(func.count()).select_from(IdentityReviewQueue).where(
+            IdentityReviewQueue.status == "pending"
+        )
+    ) or 0
+    identity_conflicts = session.scalar(
+        select(func.count()).select_from(HistoryConflict).where(
+            HistoryConflict.conflict_type.in_(
+                ("identity", "canonical_collision", "duplicate_external")
+            )
+        )
+    ) or 0
+    blocks = session.scalar(
+        select(func.count()).select_from(IdentityScoringBlock).where(
+            IdentityScoringBlock.active.is_(True)
+        )
+    ) or 0
+    dup_external = session.scalar(
+        select(func.count()).select_from(
+            select(FighterSourceId.source, FighterSourceId.external_id)
+            .group_by(FighterSourceId.source, FighterSourceId.external_id)
+            .having(func.count(func.distinct(FighterSourceId.fighter_id)) > 1)
+            .subquery()
+        )
+    ) or 0
+    return int(pending) + int(identity_conflicts) + int(blocks) + int(dup_external)

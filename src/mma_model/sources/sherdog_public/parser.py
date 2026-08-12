@@ -74,6 +74,41 @@ def _parse_record(text: str | None) -> dict[str, Any] | None:
 
 def parse_fighter_page(html: str) -> dict[str, Any]:
     soup = BeautifulSoup(html, "lxml")
+    table = soup.select_one(f'table[data-schema="{REQUIRED_SCHEMA}"]')
+    if table is None:
+        return _parse_live_public_page(soup, html)
+    return _parse_synthetic_contract(soup, table)
+
+
+def _parse_live_public_page(soup: BeautifulSoup, _html: str) -> dict[str, Any]:
+    """Parse actual public Sherdog HTML. Never invent fighter records from listings."""
+    listing = soup.select_one("div.event_list, table.event, div#upcoming_events, div.module.event")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    if listing is not None or "events" in title.casefold():
+        return {
+            "source": SOURCE_SHERDOG_PUBLIC,
+            "parser_mode": "live_listing",
+            "observation_origin": "live_public",
+            "fighter_external_id": "events-listing",
+            "fighter_name": "Sherdog events listing",
+            "wikidata_id": None,
+            "current_record": None,
+            "explicit_pre_fight_record": None,
+            "bouts": [],
+            "next_url": None,
+            "left_truncated": False,
+            "source_url": None,
+        }
+    live_table = soup.select_one("table.new_table, table.new_table_recent2")
+    name_el = soup.select_one("h1[itemprop='name'], span[itemprop='name'], h1")
+    if live_table is None or name_el is None:
+        raise ParserSchemaDriftError("missing results table schema sherdog_fight_history_v1")
+    raise ParserSchemaDriftError(
+        "live fighter-history schema unavailable; events listing is accessibility only"
+    )
+
+
+def _parse_synthetic_contract(soup: BeautifulSoup, table) -> dict[str, Any]:
     profile = soup.select_one("[data-fighter-id]")
     if profile is None:
         raise ParserSchemaDriftError("missing fighter profile data-fighter-id")
@@ -169,6 +204,8 @@ def parse_fighter_page(html: str) -> dict[str, Any]:
 
     return {
         "source": SOURCE_SHERDOG_PUBLIC,
+        "parser_mode": "synthetic_contract",
+        "observation_origin": "synthetic_fixture",
         "fighter_external_id": fighter_id,
         "fighter_name": fighter_name,
         "wikidata_id": profile.get("data-wikidata-id") or None,

@@ -9,7 +9,7 @@ from mma_model.sources.http.polite_client import PoliteHttpClient
 from mma_model.sources.http_politeness import HttpPolitenessConfig, load_http_politeness
 
 BASE_HOST = "tapology.com"
-BASE_URL = "http://www.tapology.com"
+BASE_URL = "https://www.tapology.com"
 
 
 class TapologyPublicClient:
@@ -39,8 +39,16 @@ class TapologyPublicClient:
     def close(self) -> None:
         self._http.close()
 
+    @classmethod
+    def live_base_url(cls) -> str:
+        return BASE_URL
+
+    @classmethod
+    def fighter_url(cls, fighter_external_id: str) -> str:
+        return f"{BASE_URL}/fightcenter/fighters/{fighter_external_id}"
+
     def fetch_fighter(self, fighter_external_id: str) -> tuple[str, str]:
-        url = f"{BASE_URL}/fightcenter/fighters/{fighter_external_id}"
+        url = self.fighter_url(fighter_external_id)
         return public_get_text(self._http, url, host=BASE_HOST)
 
     def fetch_url(self, url: str) -> tuple[str, str]:

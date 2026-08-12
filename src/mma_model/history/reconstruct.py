@@ -20,6 +20,7 @@ from mma_model.history.models import PreFightRecord
 
 COMPLETED_STATUSES = frozenset({"completed"})
 COUNTED_RESULTS = frozenset({"win", "loss", "draw", "nc"})
+DATE_ONLY_PRECISIONS = frozenset({"date_only", "unknown", ""})
 
 
 def _require_utc(value: datetime, field_name: str) -> datetime:
@@ -51,9 +52,20 @@ def _precedence_rank(source: str) -> int:
         return len(RESULT_PRECEDENCE) + 1
 
 
-def _publication_time(row: HistorySourceBout) -> datetime | None:
-    """Best allowed publication/source/proxy clock for PIT visibility."""
+def fact_visibility_at(row: HistorySourceBout) -> datetime | None:
+    """Allowed fact-visibility clock. Never uses acquisition ``observed_at``.
+
+    Eligible clocks: source publication, source update when it is a publication
+    or revision capture, or a documented publication proxy.
+    """
     return row.source_published_at or row.source_updated_at or row.proxy_published_at
+
+
+def _time_precision(row: HistorySourceBout) -> str:
+    value = getattr(row, "event_time_precision", None)
+    if value is None or value == "":
+        return "date_only"
+    return str(value)
 
 
 def _select_visible_bouts(
@@ -61,7 +73,7 @@ def _select_visible_bouts(
     *,
     fighter_id: str,
     cutoff: datetime,
-) -> list[HistorySourceBout]:
+) -> tuple[list[HistorySourceBout], int, int]:
     rows = session.scalars(
         select(HistorySourceBout).where(
             HistorySourceBout.fighter_canonical_id == fighter_id,
@@ -69,22 +81,29 @@ def _select_visible_bouts(
         )
     ).all()
     visible: list[HistorySourceBout] = []
+    visibility_unknown = 0
+    date_precision_excluded = 0
     for row in rows:
         if row.identity_status in UNRESOLVED_IDENTITY_STATUSES:
             continue
         effective_at = _as_utc(row.effective_at)
-        observed_at = _as_utc(row.observed_at)
-        if effective_at is None or observed_at is None:
+        if effective_at is None:
             continue
         if effective_at >= cutoff:
             continue
-        if observed_at > cutoff:
+        published = _as_utc(fact_visibility_at(row))
+        if published is None:
+            visibility_unknown += 1
             continue
-        published = _as_utc(_publication_time(row))
-        if published is not None and published > cutoff:
+        if published > cutoff:
             continue
+        precision = _time_precision(row)
+        if precision in DATE_ONLY_PRECISIONS and row.event_date is not None:
+            if cutoff.date() <= row.event_date:
+                date_precision_excluded += 1
+                continue
         visible.append(row)
-    return visible
+    return visible, visibility_unknown, date_precision_excluded
 
 
 def _dedupe_for_reconstruction(
@@ -129,12 +148,14 @@ def reconstruct_pre_fight_record(
 ) -> PreFightRecord:
     """Rebuild W/L/D/NC and experience from prior effective bouts only.
 
-    Current mutable profile records are ignored. Undated bouts cannot be proven
-    to precede the cutoff and are excluded. Unknown classification stays
-    unknown and is never coerced into professional/amateur counts.
+    Current mutable profile records are ignored. Acquisition ``observed_at`` is
+    provenance only and never a historical visibility clock. Facts without an
+    allowed publication/proxy clock are unknown, not zero history.
     """
     cutoff_utc = _require_utc(cutoff, "cutoff")
-    visible = _select_visible_bouts(session, fighter_id=fighter_id, cutoff=cutoff_utc)
+    visible, visibility_unknown, date_precision_excluded = _select_visible_bouts(
+        session, fighter_id=fighter_id, cutoff=cutoff_utc
+    )
     unresolved_rows = session.scalars(
         select(HistorySourceBout).where(
             HistorySourceBout.fighter_canonical_id == fighter_id,
@@ -145,11 +166,12 @@ def reconstruct_pre_fight_record(
     blocked_n = 0
     for row in unresolved_rows:
         effective_at = _as_utc(row.effective_at)
-        observed_at = _as_utc(row.observed_at)
-        if effective_at is None or observed_at is None:
+        if effective_at is None or effective_at >= cutoff_utc:
             continue
-        if effective_at < cutoff_utc and observed_at <= cutoff_utc:
-            blocked_n += 1
+        published = _as_utc(fact_visibility_at(row))
+        if published is None or published > cutoff_utc:
+            continue
+        blocked_n += 1
 
     undated = [row for row in visible if row.event_date is None]
     dated = [row for row in visible if row.event_date is not None]
@@ -199,6 +221,14 @@ def reconstruct_pre_fight_record(
     else:
         known_minutes = known_seconds / 60.0
 
+    left_truncated = any(int(row.left_truncated or 0) == 1 for row in selected)
+    if visibility_unknown > 0:
+        completeness = "unknown"
+    elif left_truncated:
+        completeness = "left_truncated"
+    else:
+        completeness = "complete"
+
     return PreFightRecord(
         fighter_id=fighter_id,
         cutoff=cutoff_utc,
@@ -218,7 +248,11 @@ def reconstruct_pre_fight_record(
         blocked_identity_excluded=blocked_n,
         used_current_record=False,
         unknown_results=unknown_results,
-        left_truncated=any(int(row.left_truncated or 0) == 1 for row in selected),
+        left_truncated=left_truncated,
+        completeness=completeness,
+        visibility_unknown_excluded=visibility_unknown,
+        date_precision_excluded=date_precision_excluded,
+        history_unknown=completeness == "unknown",
     )
 
 

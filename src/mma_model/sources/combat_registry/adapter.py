@@ -63,6 +63,12 @@ class CombatRegistryPublicAdapter:
         if self.raw_store is not None:
             self.raw_store.put(html.encode("utf-8"))
         parsed = parse_results_page(html)
+        if self.fixture_root is not None:
+            parsed["observation_origin"] = "synthetic_fixture"
+            parsed["parser_mode"] = parsed.get("parser_mode") or "synthetic_contract"
+        else:
+            parsed["observation_origin"] = parsed.get("observation_origin") or "live_public"
+        parsed["fighter_external_id"] = fighter_external_id
         yield from map_results_to_observations(
             parsed=parsed,
             observed_at=observed_at,

@@ -16,6 +16,7 @@ from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
 from mma_model.dwcs.ingest import sync_dwcs_history
 from mma_model.history.audit import (
+    DEFAULT_LIVE_PROBE_PATH,
     coverage_gates_ok,
     evaluate_sample_coverage,
     write_regional_coverage_doc,
@@ -721,6 +722,10 @@ def main(argv: list[str] | None = None) -> int:
                         print(json.dumps(payload, indent=2, sort_keys=True, default=str))
                     else:
                         print(report.human_summary())
+                        if report.blockers:
+                            print("blockers: " + ", ".join(report.blockers))
+                    if report.blockers or report.unresolved_source_ids:
+                        return 2
                     return 0
                 finally:
                     for client in clients.values():
@@ -759,6 +764,16 @@ def main(argv: list[str] | None = None) -> int:
                     with Session() as session:
                         report = evaluate_sample_coverage(session, years=years)
                         ok, blockers = coverage_gates_ok(report)
+                        if not args.live and DEFAULT_LIVE_PROBE_PATH.is_file():
+                            frozen = json.loads(
+                                DEFAULT_LIVE_PROBE_PATH.read_text(encoding="utf-8")
+                            )
+                            frozen_probes = (
+                                frozen.get("probes")
+                                if isinstance(frozen.get("probes"), dict)
+                                else frozen
+                            )
+                            probes = dict(frozen_probes or probes)
                         if args.coverage_doc is not None:
                             write_regional_coverage_doc(
                                 report, path=args.coverage_doc, live_probes=probes
@@ -785,6 +800,12 @@ def main(argv: list[str] | None = None) -> int:
                             f"agree={report.pre_fight_agreement_n}/{report.pre_fight_agreement_d} "
                             f"killed={len(report.source_failed)} hash={report.report_hash}"
                         )
+                        if blockers:
+                            print("blockers: " + ", ".join(blockers))
+                            print(
+                                "gates blocked; live unmeasured or insufficient "
+                                "comparable records"
+                            )
                     return 0 if ok else 2
                 finally:
                     for client in live_clients.values():

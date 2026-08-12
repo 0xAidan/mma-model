@@ -95,6 +95,9 @@ def map_fighter_history_to_observations(
     if not fighter_id or not fighter_name:
         raise ValueError("fighter_external_id and fighter_name are required")
     wikidata_id = parsed.get("wikidata_id")
+    origin = str(parsed.get("observation_origin") or "unknown")
+    if origin not in {"synthetic_fixture", "live_public", "unknown"}:
+        origin = "unknown"
     rows: list[SourceObservationRecord] = []
 
     current_record = parsed.get("current_record")
@@ -106,6 +109,7 @@ def map_fighter_history_to_observations(
             effective_at=observed_at,
             proxy=None,
             is_current_record=True,
+            observation_origin=origin,
         )
         attrs = {
             "fighter_external_id": fighter_id,
@@ -119,6 +123,8 @@ def map_fighter_history_to_observations(
             "classification": current_record.get("classification") or "unknown",
             "is_current_mutable": True,
             "is_current_record": True,
+            "observation_origin": origin,
+            "feature_eligible": False,
         }
         _reject_reserved(attrs, reserved)
         rows.append(
@@ -152,6 +158,8 @@ def map_fighter_history_to_observations(
             "no_contests": explicit.get("no_contests"),
             "classification": explicit.get("classification") or "unknown",
             "is_current_mutable": False,
+            "observation_origin": origin,
+            "feature_eligible": False,
         }
         _reject_reserved(attrs, reserved)
         quality_tier, ts_q, ts_src, proxy_at = resolve_regional_pit_quality(
@@ -161,6 +169,7 @@ def map_fighter_history_to_observations(
             effective_at=as_of,
             proxy=proxy_rule,
             is_current_record=False,
+            observation_origin=origin,
         )
         rows.append(
             SourceObservationRecord(
@@ -188,9 +197,15 @@ def map_fighter_history_to_observations(
         if not bout_id:
             raise ValueError("external_bout_id is required")
         event_date = bout.get("event_date")
-        event_effective = _event_effective_at(
-            str(event_date) if event_date else None, observed_at
-        )
+        event_datetime = bout.get("event_datetime")
+        if event_datetime:
+            event_effective = _parse_iso_datetime(event_datetime, observed_at)
+            time_precision = "exact"
+        else:
+            event_effective = _event_effective_at(
+                str(event_date) if event_date else None, observed_at
+            )
+            time_precision = "date_only" if event_date else "unknown"
         version_kind = str(bout.get("version_kind") or "event_night")
         revision = int(bout.get("revision") or 1)
         observation_id = f"{bout_id}#{version_kind}#{revision}"
@@ -213,6 +228,7 @@ def map_fighter_history_to_observations(
             effective_at=effective_at,
             proxy=proxy_rule if event_date else None,
             is_current_record=False,
+            observation_origin=origin,
         )
         opponent_ext = bout.get("opponent_external_id")
         source_url = parsed.get("source_url") or bout.get("source_url")
@@ -249,14 +265,16 @@ def map_fighter_history_to_observations(
             "parser_version": PARSER_VERSIONS.get(source),
             "source_class": SOURCE_CLASS.get(source),
             "source_url": source_url,
+            "event_time_precision": time_precision,
+            "observation_origin": origin,
         }
         _reject_reserved(attrs, reserved)
-        detail = (
-            DetailLevel.VERIFIED
-            if duration.allows_verified_detail
+        live_verified = (
+            origin == "live_public"
+            and duration.allows_verified_detail
             and bout.get("result") in {"win", "loss", "draw", "nc"}
-            else DetailLevel.PARTIAL
         )
+        detail = DetailLevel.VERIFIED if live_verified else DetailLevel.PARTIAL
         rows.append(
             SourceObservationRecord(
                 source=source,

@@ -68,7 +68,7 @@ class SherdogPublicAdapter:
         bout_count = 0
         while page_id:
             html, digest = self._load_fighter_html(page_id)
-            url = f"http://www.{BASE_HOST}/fighter/{page_id}"
+            url = f"https://www.{BASE_HOST}/fighter/{page_id}"
             try:
                 frontier.register_url(url)
             except PaginationLoopError as exc:
@@ -82,6 +82,12 @@ class SherdogPublicAdapter:
             if self.raw_store is not None:
                 self.raw_store.put(html.encode("utf-8"))
             parsed = parse_fighter_page(html)
+            parsed["fighter_external_id"] = fighter_external_id
+            if self.fixture_root is not None:
+                parsed["observation_origin"] = "synthetic_fixture"
+                parsed["parser_mode"] = parsed.get("parser_mode") or "synthetic_contract"
+            else:
+                parsed["observation_origin"] = parsed.get("observation_origin") or "live_public"
             rows = map_fighter_to_observations(
                 parsed=parsed,
                 observed_at=observed_at,

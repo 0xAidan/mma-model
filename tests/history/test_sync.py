@@ -44,12 +44,14 @@ def test_sync_fixtures_persists_pro_am_unknown_and_conflicts(history_env, tmp_pa
         conflicts = list(session.scalars(select(HistoryConflict)).all())
         assert conflicts
         coverage = evaluate_sample_coverage(session)
-        ok, blockers = coverage_gates_ok(coverage)
         assert coverage.professional_found == coverage.professional_n
         assert coverage.amateur_found == coverage.amateur_n
         assert coverage.professional_missing_unexplained == 0
         assert coverage.amateur_missing_unexplained == 0
-        assert ok, blockers
+        assert coverage.evidence_class == "fixture_validation"
+        ok, blockers = coverage_gates_ok(coverage)
+        assert ok is False
+        assert "insufficient_comparable_records" in blockers
         first_hash = coverage.report_hash
         second = evaluate_sample_coverage(session)
         assert second.report_hash == first_hash

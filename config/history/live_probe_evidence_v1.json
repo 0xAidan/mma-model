@@ -1,16 +1,16 @@
 {
   "label": "dwcs-105-bounded-live-probes",
-  "note": "Sanitized robots-then-one-page probes. No raw HTML, cookies, or secrets. Blocks were not bypassed.",
+  "note": "Sanitized robots-then-one-page probes via shared PoliteHttpClient. No raw HTML, cookies, auth, or secrets. Blocks were not bypassed. Tapology /rankings/ HTTP 403 remains source_killed. Combat Registry / login wall remains source_killed. Sherdog /events/ 200 is accessibility-only (live_listing parser, 0 fighter-history bouts). Sherdog fighter URL was refused as http_redirect_refused; no live fighter records claimed.",
   "probes": {
     "combat_registry": {
       "block_reason": "login_wall",
       "client_version": "0.1.0",
       "host": "combatreg.com",
       "http_status": 200,
-      "observed_at": "2026-08-12T19:33:21.491431+00:00",
+      "observed_at": "2026-08-12T19:58:45.357644+00:00",
       "parser_version": "combat_registry_parser@1",
       "path_category": "/",
-      "response_content_hash": "39ea433f78e00517afb363e7da7562d3af1b175e2703a0f5d2be02b128eac97f",
+      "response_content_hash": "d925e1d98a721d32a9ed1016a9eeec4d2eb71863eb21862f16cc88458b86e73f",
       "result": "BLOCKED",
       "robots": {
         "allowed": true,
@@ -27,7 +27,7 @@
       "client_version": "0.1.0",
       "host": "sherdog.com",
       "http_status": 200,
-      "observed_at": "2026-08-12T19:33:15.812092+00:00",
+      "observed_at": "2026-08-12T19:58:45.357644+00:00",
       "parser_version": "sherdog_public_parser@1",
       "path_category": "/events/",
       "response_content_hash": "963a293388a72a23fe9c600bf4b4b83e9d18a391949caa8179072fd1a7ca67de",
@@ -47,7 +47,7 @@
       "client_version": "0.1.0",
       "host": "tapology.com",
       "http_status": 403,
-      "observed_at": "2026-08-12T19:33:14.656458+00:00",
+      "observed_at": "2026-08-12T19:58:45.357644+00:00",
       "parser_version": "tapology_public_parser@1",
       "path_category": "/rankings/",
       "response_content_hash": null,

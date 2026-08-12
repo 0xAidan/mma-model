@@ -1,33 +1,35 @@
 {
   "schema_version": 1,
   "label": "dwcs-105-adjudicated-regional-sample",
-  "professional_bouts": [
-    {"bout_id": "tb-pro-1", "source": "tapology_public", "classification": "professional"},
-    {"bout_id": "tb-pro-2", "source": "tapology_public", "classification": "professional"},
-    {"bout_id": "tb-draw", "source": "tapology_public", "classification": "professional"},
-    {"bout_id": "tb-nc", "source": "tapology_public", "classification": "professional"},
-    {"bout_id": "tb-reversal-en", "source": "tapology_public", "classification": "professional"},
-    {"bout_id": "sh-pro-1", "source": "sherdog_public", "classification": "professional"},
-    {"bout_id": "cr-pro-1", "source": "combat_registry", "classification": "professional"},
-    {"bout_id": "tb-jose", "source": "tapology_public", "classification": "professional"},
-    {"bout_id": "tb-conflict", "source": "tapology_public", "classification": "professional"}
+    "professional_bouts": [
+    {"bout_id": "tb-pro-1", "source": "tapology_public", "classification": "professional", "event_date": "2022-03-01"},
+    {"bout_id": "tb-pro-2", "source": "tapology_public", "classification": "professional", "event_date": "2023-06-01"},
+    {"bout_id": "tb-draw", "source": "tapology_public", "classification": "professional", "event_date": "2023-09-01"},
+    {"bout_id": "tb-nc", "source": "tapology_public", "classification": "professional", "event_date": "2023-10-01"},
+    {"bout_id": "tb-reversal-en", "source": "tapology_public", "classification": "professional", "event_date": "2023-11-01"},
+    {"bout_id": "sh-pro-1", "source": "sherdog_public", "classification": "professional", "event_date": "2022-04-01"},
+    {"bout_id": "cr-pro-1", "source": "combat_registry", "classification": "professional", "event_date": "2022-05-01"},
+    {"bout_id": "tb-jose", "source": "tapology_public", "classification": "professional", "event_date": "2023-02-02"},
+    {"bout_id": "tb-conflict", "source": "tapology_public", "classification": "professional", "event_date": "2023-12-01"}
   ],
   "amateur_regulated_us_bouts": [
     {
       "bout_id": "tb-am-us-1",
       "source": "tapology_public",
       "classification": "amateur",
-      "regulated_us": "true"
+      "regulated_us": "true",
+      "event_date": "2021-05-01"
     },
     {
       "bout_id": "cr-am-us-1",
       "source": "combat_registry",
       "classification": "amateur",
-      "regulated_us": "true"
+      "regulated_us": "true",
+      "event_date": "2021-06-01"
     }
   ],
   "unknown_classification_bouts": [
-    {"bout_id": "tb-unk-1", "source": "tapology_public", "classification": "unknown"}
+    {"bout_id": "tb-unk-1", "source": "tapology_public", "classification": "unknown", "event_date": "2020-01-01"}
   ],
   "explicit_pre_fight_records": [
     {
