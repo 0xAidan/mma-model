@@ -186,3 +186,168 @@ def test_robots_401_403_complete_disallow() -> None:
         )
         assert decision.allowed is False
         assert decision.policy_decision == "rfc9309_http_401_403_complete_disallow"
+
+
+def test_robots_repeated_same_ua_groups_merged_allow_then_disallow() -> None:
+    """Later same-UA Disallow must not be skipped when an earlier group matched first."""
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body = """User-agent: mma-model-research
+Allow: /
+
+User-agent: mma-model-research
+Disallow: /statistics/
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is False
+    assert decision.policy_decision == "rfc9309_parsed_disallow"
+    assert decision.matched_user_agent_group == "mma-model-research"
+
+
+def test_robots_repeated_same_ua_groups_merged_disallow_then_allow() -> None:
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body = """User-agent: mma-model-research
+Disallow: /statistics/
+
+User-agent: mma-model-research
+Allow: /statistics/events/completed
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is True
+    assert decision.policy_decision == "rfc9309_parsed_allow"
+
+
+def test_robots_multiple_wildcard_groups_merged() -> None:
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body_allow_then_disallow = """User-agent: *
+Allow: /
+
+User-agent: *
+Disallow: /statistics/
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body_allow_then_disallow,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is False
+    assert decision.matched_user_agent_group == "*"
+
+    # Reverse order: last-group-wins would incorrectly Allow:/; merge + longest path must Disallow.
+    body_disallow_then_allow = """User-agent: *
+Disallow: /statistics/
+
+User-agent: *
+Allow: /
+"""
+    decision2 = evaluate_robots_access(
+        status_code=200,
+        body_text=body_disallow_then_allow,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision2.allowed is False
+    assert decision2.matched_user_agent_group == "*"
+
+
+def test_robots_specific_group_ignores_wildcard_even_if_more_restrictive() -> None:
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body = """User-agent: *
+Disallow: /
+
+User-agent: mma-model-research
+Allow: /statistics/
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is True
+    assert decision.matched_user_agent_group == "mma-model-research"
+
+    body_reverse = """User-agent: mma-model-research
+Allow: /statistics/
+
+User-agent: *
+Disallow: /
+"""
+    decision2 = evaluate_robots_access(
+        status_code=200,
+        body_text=body_reverse,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision2.allowed is True
+    assert decision2.matched_user_agent_group == "mma-model-research"
+
+
+def test_robots_mixed_casing_user_agent_groups_merged() -> None:
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body = """User-agent: MMA-Model-Research
+Disallow: /statistics/
+
+User-agent: mma-model-research
+Allow: /statistics/events/completed
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is True
+    assert decision.matched_user_agent_group == "mma-model-research"
+
+
+def test_robots_empty_same_ua_group_then_rules_merged() -> None:
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body = """User-agent: mma-model-research
+
+User-agent: mma-model-research
+Disallow: /statistics/
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is False
+    assert decision.policy_decision == "rfc9309_parsed_disallow"
+
+
+def test_robots_contradictory_equal_length_allow_wins_across_merged_groups() -> None:
+    from mma_model.sources.http.robots import evaluate_robots_access
+
+    body = """User-agent: mma-model-research
+Disallow: /statistics/events/
+
+User-agent: mma-model-research
+Allow: /statistics/events/
+"""
+    decision = evaluate_robots_access(
+        status_code=200,
+        body_text=body,
+        user_agent=UA,
+        target_url="http://www.ufcstats.com/statistics/events/completed",
+    )
+    assert decision.allowed is True
+    assert decision.policy_decision == "rfc9309_parsed_allow"

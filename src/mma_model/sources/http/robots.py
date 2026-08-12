@@ -108,22 +108,51 @@ def _parse_groups(body_text: str) -> list[_AgentGroup]:
     return groups
 
 
-def _select_group(
-    groups: list[_AgentGroup], user_agent: str
-) -> tuple[_AgentGroup | None, str | None]:
-    product = _product_token(user_agent)
+def _agent_matches_specific(agent: str, user_agent: str, product: str) -> bool:
+    """True when agent is a non-wildcard token matching the configured UA."""
+    if agent == "*":
+        return False
     ua_l = user_agent.lower()
-    star: _AgentGroup | None = None
+    return ua_l.startswith(agent) or product == agent
+
+
+def _collect_matching_rules(
+    groups: list[_AgentGroup], user_agent: str
+) -> tuple[tuple[_Rule, ...], str | None]:
+    """Merge rules from all groups for the most-specific matching UA token.
+
+    RFC 9309 / common robots practice: when several record-groups share the same
+    matching User-agent token, their rules are combined. Wildcard ``*`` groups
+    are used only when no specific group matches the configured UA.
+    """
+    product = _product_token(user_agent)
+    specific_rules: list[_Rule] = []
+    star_rules: list[_Rule] = []
+    matched_specific: str | None = None
+
     for group in groups:
+        group_is_specific = False
+        group_is_star = False
         for agent in group.agents:
             if agent == "*":
-                star = group
+                group_is_star = True
                 continue
-            if ua_l.startswith(agent) or product == agent:
-                return group, agent
-    if star is not None:
-        return star, "*"
-    return None, None
+            if _agent_matches_specific(agent, user_agent, product):
+                group_is_specific = True
+                # Prefer the product token label when present; else first match.
+                if matched_specific is None or agent == product:
+                    matched_specific = agent
+        if group_is_specific:
+            specific_rules.extend(group.rules)
+        elif group_is_star:
+            # Only collect '*' rules for fallback; never mix with specific.
+            star_rules.extend(group.rules)
+
+    if matched_specific is not None:
+        return tuple(specific_rules), matched_specific
+    if star_rules:
+        return tuple(star_rules), "*"
+    return (), None
 
 
 def _path_matches(rule_path: str, request_path: str) -> bool:
@@ -165,8 +194,9 @@ def evaluate_robots_access(
     - other 4xx (unavailable file): allow all
     - 5xx / network unreachable: temporary complete disallow (fail closed)
 
-    Parsing: select one User-agent group (exact product token, else ``*``);
-    do not union unrelated agents; longest-path match with Allow-on-ties.
+    Parsing: merge all groups matching the most-specific configured UA token
+    (``*`` only if none match); do not union unrelated agents; longest-path
+    match with Allow-on-ties across the merged rule set.
     """
     path = _path_of(target_url)
 
@@ -234,8 +264,8 @@ def evaluate_robots_access(
 
     try:
         groups = _parse_groups(body_text)
-        group, matched = _select_group(groups, user_agent)
-        if group is None:
+        rules, matched = _collect_matching_rules(groups, user_agent)
+        if matched is None:
             return RobotsAccessDecision(
                 allowed=True,
                 policy_decision="rfc9309_parsed_allow",
@@ -244,7 +274,7 @@ def evaluate_robots_access(
                 target_path=path,
                 matched_user_agent_group=None,
             )
-        allowed = _allowed_by_rules(group.rules, path)
+        allowed = _allowed_by_rules(rules, path)
         return RobotsAccessDecision(
             allowed=allowed,
             policy_decision=(
@@ -253,7 +283,7 @@ def evaluate_robots_access(
             robots_status_code=status_code,
             detail=(
                 "RFC 9309: parsed robots directives for configured UA "
-                f"(group={matched!r})"
+                f"(group={matched!r}, merged_rules={len(rules)})"
             ),
             target_path=path,
             matched_user_agent_group=matched,
