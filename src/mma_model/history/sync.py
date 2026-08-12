@@ -12,7 +12,13 @@ from typing import Any, Callable, Mapping, Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from mma_model.db.tables.core import CanonicalEvent, CanonicalFighter, FighterSourceId
+from mma_model.db.tables.core import (
+    BoutParticipant,
+    CanonicalBout,
+    CanonicalEvent,
+    CanonicalFighter,
+    FighterSourceId,
+)
 from mma_model.history.apply import conflict_observation, source_failure_observation
 from mma_model.history.constants import (
     REGIONAL_FALLBACK_ORDER,
@@ -51,6 +57,8 @@ CHECKPOINT_VERSION = "regional_history_v1"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_UPCOMING_PATH = REPO_ROOT / "config" / "history" / "upcoming_dwcs_fighters_v1.json"
 SCHEMA_DRIFT_TYPES = (TapologySchemaDrift, SherdogSchemaDrift, CombatSchemaDrift)
+UPCOMING_EVENT_STATUSES = frozenset({"scheduled", "upcoming"})
+EXCLUDED_UPCOMING_BOUT_STATUSES = frozenset({"scratched", "cancelled", "completed"})
 
 
 @dataclass(frozen=True)
@@ -140,6 +148,20 @@ def _merge_source_ids(
     return merged
 
 
+def _match_json_seed(
+    seeds: Sequence[FighterSeed],
+    fighter: CanonicalFighter,
+    db_ids: Mapping[str, str],
+) -> FighterSeed | None:
+    for seed in seeds:
+        if seed.canonical_id and seed.canonical_id == fighter.id:
+            return seed
+        for source, external_id in seed.source_ids.items():
+            if external_id and db_ids.get(source) == external_id:
+                return seed
+    return None
+
+
 def load_upcoming_dwcs_fighters(
     path: Path | None = None,
     *,
@@ -151,22 +173,48 @@ def load_upcoming_dwcs_fighters(
     upcoming = session.scalars(
         select(CanonicalEvent).where(
             CanonicalEvent.series == "dwcs",
-            CanonicalEvent.status.in_(("scheduled", "upcoming")),
+            CanonicalEvent.status.in_(tuple(UPCOMING_EVENT_STATUSES)),
         )
     ).all()
     if not upcoming:
         return json_seeds
-    by_name = {seed.display_name.casefold(): seed for seed in json_seeds}
-    fighters = session.scalars(
-        select(CanonicalFighter).order_by(CanonicalFighter.display_name.asc())
+    event_ids = [event.id for event in upcoming]
+    bouts = session.scalars(
+        select(CanonicalBout).where(CanonicalBout.event_id.in_(event_ids))
     ).all()
+    fighter_ids: set[str] = set()
+    active_bout_ids: list[str] = []
+    for bout in bouts:
+        status = (bout.status or "scheduled").strip().casefold()
+        if status in EXCLUDED_UPCOMING_BOUT_STATUSES:
+            continue
+        fighter_ids.add(bout.fighter_a_id)
+        fighter_ids.add(bout.fighter_b_id)
+        active_bout_ids.append(bout.id)
+    if active_bout_ids:
+        participants = session.scalars(
+            select(BoutParticipant).where(BoutParticipant.bout_id.in_(active_bout_ids))
+        ).all()
+        for participant in participants:
+            fighter_ids.add(participant.fighter_id)
+    if not fighter_ids:
+        return []
+    fighters = session.scalars(
+        select(CanonicalFighter)
+        .where(CanonicalFighter.id.in_(tuple(fighter_ids)))
+        .order_by(CanonicalFighter.id.asc())
+    ).all()
+    id_rows = session.scalars(
+        select(FighterSourceId).where(FighterSourceId.fighter_id.in_(tuple(fighter_ids)))
+    ).all()
+    ids_by_fighter: dict[str, dict[str, str]] = {}
+    for row in id_rows:
+        if row.external_id:
+            ids_by_fighter.setdefault(row.fighter_id, {})[row.source] = row.external_id
     out: list[FighterSeed] = []
     for fighter in fighters:
-        db_rows = session.scalars(
-            select(FighterSourceId).where(FighterSourceId.fighter_id == fighter.id)
-        ).all()
-        db_ids = {row.source: row.external_id for row in db_rows if row.external_id}
-        json_match = by_name.get(fighter.display_name.casefold())
+        db_ids = dict(ids_by_fighter.get(fighter.id) or {})
+        json_match = _match_json_seed(json_seeds, fighter, db_ids)
         json_ids = dict(json_match.source_ids) if json_match else {}
         merged = _merge_source_ids(json_ids=json_ids, db_ids=db_ids)
         wikidata = merged.get(SOURCE_WIKIDATA)
@@ -570,6 +618,12 @@ def compare_explicit_pre_fight(
         explicit_nc if explicit_nc is not None else 0,
     )
     actual = reconstructed.comparable_tuple()
+    if actual is None:
+        return {
+            "comparable": False,
+            "exclusion": "reconstructed_unknown",
+            "reconstructed": None,
+        }
     return {
         "comparable": True,
         "agree": actual == expected,

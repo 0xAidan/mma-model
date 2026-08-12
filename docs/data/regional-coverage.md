@@ -2,12 +2,14 @@
 
 Sanitized DWCS-105 evidence. No raw HTML or live payloads.
 
-- Report hash: `8d1db62a16c96bc8099eed1dc253761ed1a45d20e16cf72c2963dbd35039a15d`
+- Report hash: `82908154bb048296ad3cba8524d7695957fefa5be96ec472916dca1b750ca5f8`
 - Evidence class: `fixture_validation`
-- Year-filtered professional sample: 6/6 (1.0000); source_failed=0; missing_unexplained=0
-- Year-filtered regulated-US amateur sample: 0/0 (n/a); source_failed=0; missing_unexplained=0
+- Probe evidence source: `frozen/sanitized`
+- Live professional sample: 0/0 (n/a); source_failed=0; missing_unexplained=0
+- Live regulated-US amateur sample: 0/0 (n/a); source_failed=0; missing_unexplained=0
 - Unknown classification rows: 0
 - Pre-fight agreement: 0/0 (blocker (insufficient_comparable_records); never a pass)
+- Pre-fight unknown/missing excluded from agreement: 0
 - Pre-fight exclusions: placeholder_replaced_in_tests
 - Future-row invariance failures: 0
 - Invariance hash: `3c8a328b20fd2c640d91a5f3203c8ae2eb3be2801e2944ddaa55170adac4c263`
@@ -15,7 +17,7 @@ Sanitized DWCS-105 evidence. No raw HTML or live payloads.
 - Left-truncated histories: 1
 - Unresolved identities: 0
 - PIT tiers: {'silver': 17}
-- Identity exact links / queued / blocks / conflations: 17/0/0/0
+- Identity exact source-ID links / queued fighters / blocks / conflations: 6/0/0/0
 
 ## fixture_validation
 
@@ -23,6 +25,7 @@ Synthetic `data-schema` decoder counts. These are **not live coverage** and must
 
 - Professional decoder: 9/9 (synthetic fixtures; not live coverage)
 - Amateur decoder: 2/2 (synthetic fixtures; not live coverage)
+- Year-filtered eligible sample rows: 6 (not live coverage)
 - `9/9` and `2/2` must not be treated as measured live coverage.
 
 ## live_source_coverage
@@ -33,9 +36,17 @@ Synthetic `data-schema` decoder counts. These are **not live coverage** and must
 
 Sherdog hash-only 200 on `/events/` is accessibility only and is not measured fighter-history coverage. Tapology HTTP 403 and Combat Registry login wall kill those source roles. Unknown remains unknown, not zero.
 
-## Source failures
+## Persisted source failures
 
-- none
+HistorySourceFailure rows only. Probe killed/accessibility statuses are listed in the next section and are not the same as an empty failure table.
+
+- none recorded in HistorySourceFailure
+
+## Probe source statuses (frozen/sanitized)
+
+- `tapology_public`: status=`source_killed` result=`BLOCKED` reason=`http_403` http=403 path=`/rankings/`
+- `sherdog_public`: status=`accessibility_only` result=`OK` reason=`None` http=200 path=`/events/`
+- `combat_registry`: status=`source_killed` result=`BLOCKED` reason=`login_wall` http=200 path=`/`
 
 ## Sources
 

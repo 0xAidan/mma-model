@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -21,7 +21,6 @@ from mma_model.history.constants import (
     SOURCE_COMBAT_REGISTRY,
     SOURCE_SHERDOG,
     SOURCE_TAPOLOGY,
-    UNRESOLVED_IDENTITY_STATUSES,
 )
 from mma_model.history.coverage import (
     db_bout_dates,
@@ -29,7 +28,12 @@ from mma_model.history.coverage import (
     filter_sample_rows,
     left_truncated_history_count,
     live_source_coverage_map,
-    measured_identity_conflations,
+)
+from mma_model.history.identity import (
+    compute_identity_conflations,
+    count_exact_source_id_links,
+    count_unique_identity_status,
+    count_unique_unresolved_identities,
 )
 from mma_model.history.models import RegionalCoverageReport
 from mma_model.history.reconstruct import persist_reconstruction, reconstruct_pre_fight_record
@@ -83,13 +87,17 @@ def evaluate_sample_coverage(
     sample: Mapping[str, Any] | None = None,
     years: range | None = None,
     live_probes: Mapping[str, Any] | None = None,
+    probe_mode: Literal["live", "frozen", "injected", "offline"] = "offline",
 ) -> RegionalCoverageReport:
     payload = dict(sample or load_adjudicated_sample())
     found = _found_ids(session)
     failures = _source_failures(session)
     failed_sources = {row["source"] for row in failures}
     db_dates = db_bout_dates(session)
-    live_coverage = live_source_coverage_map(session, _select_live_probes(live_probes))
+    live_probes_used, probe_source = resolve_probe_evidence(
+        live_probes, probe_mode=probe_mode
+    )
+    live_coverage = live_source_coverage_map(session, live_probes_used)
     evidence_class = evidence_class_for(session)
 
     pro_all = list(payload.get("professional_bouts") or [])
@@ -134,6 +142,7 @@ def evaluate_sample_coverage(
 
     agreement_n = 0
     agreement_d = 0
+    unknown_agreement = 0
     exclusions: list[str] = []
     invariance_failures = 0
     reconstruction_hashes: list[str] = []
@@ -159,21 +168,28 @@ def evaluate_sample_coverage(
             int(row.get("draws") or 0),
             int(row.get("no_contests") or 0),
         )
+        actual = reconstructed.comparable_tuple()
+        if actual is None:
+            unknown_agreement += 1
+            exclusions.append("pre_fight_unknown")
+            continue
         agreement_d += 1
-        if reconstructed.comparable_tuple() == expected:
+        if actual == expected:
             agreement_n += 1
 
     conflicts = list(session.scalars(select(HistoryConflict)).all())
     bout_rows = list(session.scalars(select(HistorySourceBout)).all())
     identity_payload = payload.get("identity") or {}
-    identity_linked = sum(1 for row in bout_rows if row.identity_status == "linked")
-    identity_queued = sum(1 for row in bout_rows if row.identity_status == "queued")
-    identity_blocks = sum(1 for row in bout_rows if row.identity_status == "blocked")
-    unresolved = sum(
-        1 for row in bout_rows if row.identity_status in UNRESOLVED_IDENTITY_STATUSES
-    )
-    left_truncated = left_truncated_history_count(session)
-    identity_conflations = measured_identity_conflations(session)
+    identity_linked = count_exact_source_id_links(session)
+    identity_queued = count_unique_identity_status(session, "queued")
+    identity_blocks = count_unique_identity_status(session, "blocked")
+    unresolved = count_unique_unresolved_identities(session)
+    if not bout_rows:
+        identity_linked = int(identity_payload.get("exact_links") or identity_linked)
+        identity_queued = int(identity_payload.get("queued") or identity_queued)
+        identity_blocks = int(identity_payload.get("blocks") or identity_blocks)
+    left_truncated = left_truncated_history_count(session, years=years)
+    identity_conflations = compute_identity_conflations(session)
     tier_counts: dict[str, int] = {}
     for row in bout_rows:
         tier_counts[row.quality_tier] = tier_counts.get(row.quality_tier, 0) + 1
@@ -193,38 +209,41 @@ def evaluate_sample_coverage(
                 "live_status": live.get("status"),
             }
         )
-    pro_rate = (pro_found / pro_n) if pro_n else None
-    am_rate = (am_found / am_n) if am_n else None
+    if evidence_class == "live_source_coverage":
+        live_pro_n, live_pro_found = pro_n, pro_found
+        live_pro_failed, live_pro_unexplained = pro_failed, pro_unexplained
+        live_am_n, live_am_found = am_n, am_found
+        live_am_failed, live_am_unexplained = am_failed, am_unexplained
+    else:
+        live_pro_n = live_pro_found = live_pro_failed = live_pro_unexplained = 0
+        live_am_n = live_am_found = live_am_failed = live_am_unexplained = 0
+    pro_rate = (live_pro_found / live_pro_n) if live_pro_n else None
+    am_rate = (live_am_found / live_am_n) if live_am_n else None
     agree_rate = (agreement_n / agreement_d) if agreement_d else None
     invariance_hash = _hash_payload({"hashes": reconstruction_hashes})
     body = {
-        "professional_n": pro_n,
-        "professional_found": pro_found,
+        "professional_n": live_pro_n,
+        "professional_found": live_pro_found,
         "professional_rate": pro_rate,
-        "professional_source_failed": pro_failed,
-        "professional_missing_unexplained": pro_unexplained,
-        "amateur_n": am_n,
-        "amateur_found": am_found,
+        "professional_source_failed": live_pro_failed,
+        "professional_missing_unexplained": live_pro_unexplained,
+        "amateur_n": live_am_n,
+        "amateur_found": live_am_found,
         "amateur_rate": am_rate,
-        "amateur_source_failed": am_failed,
-        "amateur_missing_unexplained": am_unexplained,
+        "amateur_source_failed": live_am_failed,
+        "amateur_missing_unexplained": live_am_unexplained,
         "unknown_class_n": unknown_n,
         "source_failed": failures,
         "pre_fight_agreement_n": agreement_n,
         "pre_fight_agreement_d": agreement_d,
         "pre_fight_agreement_rate": agree_rate,
         "pre_fight_exclusions": tuple(exclusions),
+        "pre_fight_unknown_n": unknown_agreement,
         "future_invariance_failures": invariance_failures,
         "conflicts": len(conflicts),
-        "identity_exact_links": (
-            identity_linked if bout_rows else int(identity_payload.get("exact_links") or 0)
-        ),
-        "identity_queued": (
-            identity_queued if bout_rows else int(identity_payload.get("queued") or 0)
-        ),
-        "identity_blocks": (
-            identity_blocks if bout_rows else int(identity_payload.get("blocks") or 0)
-        ),
+        "identity_exact_links": identity_linked,
+        "identity_queued": identity_queued,
+        "identity_blocks": identity_blocks,
         "identity_conflations": identity_conflations,
         "left_truncated": left_truncated,
         "unresolved_identities": unresolved,
@@ -233,17 +252,19 @@ def evaluate_sample_coverage(
         "invariance_hash": invariance_hash,
         "evidence_class": evidence_class,
         "live_source_coverage": live_coverage,
+        "probe_evidence_source": probe_source,
+        "probe_evidence": live_probes_used,
         "years": {
             "start": years.start if years else None,
             "stop": (years.stop - 1) if years else None,
         },
     }
     report = RegionalCoverageReport(
-        professional_n=pro_n,
-        professional_found=pro_found,
+        professional_n=live_pro_n,
+        professional_found=live_pro_found,
         professional_rate=pro_rate,
-        amateur_n=am_n,
-        amateur_found=am_found,
+        amateur_n=live_am_n,
+        amateur_found=live_am_found,
         amateur_rate=am_rate,
         unknown_class_n=unknown_n,
         source_failed=tuple(failures),
@@ -251,16 +272,17 @@ def evaluate_sample_coverage(
         pre_fight_agreement_d=agreement_d,
         pre_fight_agreement_rate=agree_rate,
         pre_fight_exclusions=tuple(exclusions),
+        pre_fight_unknown_n=unknown_agreement,
         future_invariance_failures=invariance_failures,
         conflicts=len(conflicts),
-        identity_exact_links=int(body["identity_exact_links"]),
-        identity_queued=int(body["identity_queued"]),
-        identity_blocks=int(body["identity_blocks"]),
+        identity_exact_links=identity_linked,
+        identity_queued=identity_queued,
+        identity_blocks=identity_blocks,
         identity_conflations=identity_conflations,
-        professional_source_failed=pro_failed,
-        professional_missing_unexplained=pro_unexplained,
-        amateur_source_failed=am_failed,
-        amateur_missing_unexplained=am_unexplained,
+        professional_source_failed=live_pro_failed,
+        professional_missing_unexplained=live_pro_unexplained,
+        amateur_source_failed=live_am_failed,
+        amateur_missing_unexplained=live_am_unexplained,
         left_truncated=left_truncated,
         unresolved_identities=unresolved,
         pit_tiers=pit_tiers,
@@ -275,6 +297,8 @@ def evaluate_sample_coverage(
         fixture_professional_found=fixture_pro_found,
         fixture_amateur_n=fixture_am_n,
         fixture_amateur_found=fixture_am_found,
+        probe_evidence_source=probe_source,  # type: ignore[arg-type]
+        probe_evidence=live_probes_used,
     )
     return report
 
@@ -287,8 +311,8 @@ def _segment_gate_ok(
     unexplained: int,
     gate: float,
 ) -> bool:
-    if n == 0:
-        return True
+    if n <= 0:
+        return False
     if unexplained > 0:
         return False
     rate = found / n
@@ -305,23 +329,26 @@ def coverage_gates_ok(report: RegionalCoverageReport) -> tuple[bool, tuple[str, 
         blockers.append("pre_fight_agreement")
     if report.evidence_class != "live_source_coverage":
         blockers.append("live_source_unmeasured")
-    else:
-        if not _segment_gate_ok(
-            n=report.professional_n,
-            found=report.professional_found,
-            failed=report.professional_source_failed,
-            unexplained=report.professional_missing_unexplained,
-            gate=PRO_GATE,
-        ):
-            blockers.append("professional_coverage")
-        if not _segment_gate_ok(
-            n=report.amateur_n,
-            found=report.amateur_found,
-            failed=report.amateur_source_failed,
-            unexplained=report.amateur_missing_unexplained,
-            gate=AMATEUR_GATE,
-        ):
-            blockers.append("amateur_coverage")
+    if report.professional_n <= 0:
+        blockers.append("insufficient_live_professional_sample")
+    elif report.evidence_class == "live_source_coverage" and not _segment_gate_ok(
+        n=report.professional_n,
+        found=report.professional_found,
+        failed=report.professional_source_failed,
+        unexplained=report.professional_missing_unexplained,
+        gate=PRO_GATE,
+    ):
+        blockers.append("professional_coverage")
+    if report.amateur_n <= 0:
+        blockers.append("insufficient_live_amateur_sample")
+    elif report.evidence_class == "live_source_coverage" and not _segment_gate_ok(
+        n=report.amateur_n,
+        found=report.amateur_found,
+        failed=report.amateur_source_failed,
+        unexplained=report.amateur_missing_unexplained,
+        gate=AMATEUR_GATE,
+    ):
+        blockers.append("amateur_coverage")
     for source, row in (report.live_source_coverage or {}).items():
         status = str(row.get("status") or "unmeasured")
         if status in {"source_killed", "source_failed", "unmeasured", "accessibility_only"}:
@@ -333,34 +360,48 @@ def coverage_gates_ok(report: RegionalCoverageReport) -> tuple[bool, tuple[str, 
     return (not blockers, tuple(blockers))
 
 
-def _select_live_probes(live_probes: Mapping[str, Any] | None) -> dict[str, Any]:
+def _extract_probes(live_probes: Mapping[str, Any] | None) -> dict[str, Any]:
     payload = dict(live_probes or {})
     probes = payload.get("probes") if isinstance(payload.get("probes"), dict) else payload
-    probes = dict(probes or {})
-    live_ran = any(
-        isinstance(row, dict) and row.get("result") not in {None, "NOT_RUN"}
-        for row in probes.values()
-    )
-    if live_ran:
-        return probes
+    return dict(probes or {})
+
+
+def resolve_probe_evidence(
+    live_probes: Mapping[str, Any] | None,
+    *,
+    probe_mode: str = "offline",
+) -> tuple[dict[str, Any], str]:
+    if probe_mode in {"live", "injected"}:
+        return _extract_probes(live_probes), probe_mode
     if DEFAULT_LIVE_PROBE_PATH.is_file():
         frozen = json.loads(DEFAULT_LIVE_PROBE_PATH.read_text(encoding="utf-8"))
-        frozen_probes = frozen.get("probes") if isinstance(frozen.get("probes"), dict) else frozen
-        return dict(frozen_probes or {})
+        return _extract_probes(frozen), "frozen"
+    extracted = _extract_probes(live_probes)
+    if extracted:
+        return extracted, "offline"
+    return extracted, "not_run"
+
+
+def _select_live_probes(live_probes: Mapping[str, Any] | None) -> dict[str, Any]:
+    probes, _source = resolve_probe_evidence(live_probes, probe_mode="offline")
     return probes
 
 
-def _live_probe_lines(live_probes: Mapping[str, Any] | None) -> str:
-    probes = _select_live_probes(live_probes)
-    if not probes:
-        return "- none (live probe not executed)"
+def _live_probe_lines(
+    probes: Mapping[str, Any] | None,
+    *,
+    source_label: str,
+) -> str:
+    payload = _extract_probes(probes)
+    if not payload:
+        return f"- none ({source_label})"
     lines = []
     for source in (SOURCE_TAPOLOGY, SOURCE_SHERDOG, SOURCE_COMBAT_REGISTRY):
-        row = probes.get(source) or {}
+        row = payload.get(source) or {}
         robots = row.get("robots") if isinstance(row.get("robots"), dict) else {}
         lines.append(
             f"- `{source}`: result=`{row.get('result')}` "
-            f"reason=`{row.get('block_reason')}` "
+            f"reason=`{row.get('block_reason') or row.get('reason')}` "
             f"http={row.get('http_status')} "
             f"path=`{row.get('path_category')}` "
             f"robots=`{robots.get('policy_decision')}`"
@@ -377,7 +418,12 @@ def render_regional_coverage_markdown(
     failed_lines = "\n".join(
         f"- `{row['source']}`: `{row['reason']}`"
         for row in failed
-    ) or "- none"
+    ) or "- none recorded in HistorySourceFailure"
+    probe_source = report.probe_evidence_source
+    probe_label = (
+        "frozen/sanitized" if probe_source == "frozen" else probe_source
+    )
+    probes_for_doc = live_probes if live_probes is not None else report.probe_evidence
     pro_rate = "n/a" if report.professional_rate is None else f"{report.professional_rate:.4f}"
     am_rate = "n/a" if report.amateur_rate is None else f"{report.amateur_rate:.4f}"
     agree = (
@@ -403,14 +449,16 @@ def render_regional_coverage_markdown(
         "Sanitized DWCS-105 evidence. No raw HTML or live payloads.\n\n"
         f"- Report hash: `{report.report_hash}`\n"
         f"- Evidence class: `{report.evidence_class}`\n"
-        f"- Year-filtered professional sample: {report.professional_found}/{report.professional_n} ({pro_rate}); "
+        f"- Probe evidence source: `{probe_label}`\n"
+        f"- Live professional sample: {report.professional_found}/{report.professional_n} ({pro_rate}); "
         f"source_failed={report.professional_source_failed}; "
         f"missing_unexplained={report.professional_missing_unexplained}\n"
-        f"- Year-filtered regulated-US amateur sample: {report.amateur_found}/{report.amateur_n} ({am_rate}); "
+        f"- Live regulated-US amateur sample: {report.amateur_found}/{report.amateur_n} ({am_rate}); "
         f"source_failed={report.amateur_source_failed}; "
         f"missing_unexplained={report.amateur_missing_unexplained}\n"
         f"- Unknown classification rows: {report.unknown_class_n}\n"
         f"- Pre-fight agreement: {report.pre_fight_agreement_n}/{report.pre_fight_agreement_d} ({agree_note})\n"
+        f"- Pre-fight unknown/missing excluded from agreement: {report.pre_fight_unknown_n}\n"
         f"- Pre-fight exclusions: {', '.join(report.pre_fight_exclusions) or 'none'}\n"
         f"- Future-row invariance failures: {report.future_invariance_failures}\n"
         f"- Invariance hash: `{report.invariance_hash}`\n"
@@ -418,7 +466,7 @@ def render_regional_coverage_markdown(
         f"- Left-truncated histories: {report.left_truncated}\n"
         f"- Unresolved identities: {report.unresolved_identities}\n"
         f"- PIT tiers: {dict(report.pit_tiers)}\n"
-        f"- Identity exact links / queued / blocks / conflations: "
+        f"- Identity exact source-ID links / queued fighters / blocks / conflations: "
         f"{report.identity_exact_links}/{report.identity_queued}/"
         f"{report.identity_blocks}/{report.identity_conflations}\n\n"
         "## fixture_validation\n\n"
@@ -428,6 +476,8 @@ def render_regional_coverage_markdown(
         f"(synthetic fixtures; not live coverage)\n"
         f"- Amateur decoder: {report.fixture_amateur_found}/{report.fixture_amateur_n} "
         f"(synthetic fixtures; not live coverage)\n"
+        f"- Year-filtered eligible sample rows: {len(report.eligible_sample_bouts)} "
+        f"(not live coverage)\n"
         f"- `{report.fixture_professional_found}/{report.fixture_professional_n}` and "
         f"`{report.fixture_amateur_found}/{report.fixture_amateur_n}` must not be treated as measured live coverage.\n\n"
         "## live_source_coverage\n\n"
@@ -435,8 +485,12 @@ def render_regional_coverage_markdown(
         "Sherdog hash-only 200 on `/events/` is accessibility only and is not measured "
         "fighter-history coverage. Tapology HTTP 403 and Combat Registry login wall "
         "kill those source roles. Unknown remains unknown, not zero.\n\n"
-        "## Source failures\n\n"
+        "## Persisted source failures\n\n"
+        "HistorySourceFailure rows only. Probe killed/accessibility statuses are listed "
+        "in the next section and are not the same as an empty failure table.\n\n"
         f"{failed_lines}\n\n"
+        f"## Probe source statuses ({probe_label})\n\n"
+        f"{live_block}\n\n"
         "## Sources\n\n"
         + "\n".join(
             f"- `{row['source']}` ({row.get('source_class')}): "
@@ -446,7 +500,7 @@ def render_regional_coverage_markdown(
             for row in report.sources
         )
         + "\n\n## Live probes\n\n"
-        + _live_probe_lines(live_probes)
+        + _live_probe_lines(probes_for_doc, source_label=probe_label)
         + "\n"
         + "\nLicensed SportsDataIO / BALLDONTLIE validation remains `source_failed` "
         + "under recorded limitations and is not a DWCS-105 stop.\n"

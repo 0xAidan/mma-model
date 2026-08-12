@@ -21,14 +21,14 @@ class PreFightRecord(BaseModel):
     fighter_id: str
     cutoff: datetime
     reconstruction_version: str
-    wins: int
-    losses: int
-    draws: int
-    no_contests: int
-    professional_bouts: int
-    amateur_bouts: int
-    unknown_class_bouts: int
-    experience_bouts: int
+    wins: int | None
+    losses: int | None
+    draws: int | None
+    no_contests: int | None
+    professional_bouts: int | None
+    amateur_bouts: int | None
+    unknown_class_bouts: int | None
+    experience_bouts: int | None
     known_minutes: float | None
     minutes_unknown: bool
     undated_excluded: int
@@ -42,7 +42,11 @@ class PreFightRecord(BaseModel):
     date_precision_excluded: int = 0
     history_unknown: bool = False
 
-    def comparable_tuple(self) -> tuple[int, int, int, int]:
+    def comparable_tuple(self) -> tuple[int, int, int, int] | None:
+        if self.completeness == "unknown" or self.history_unknown:
+            return None
+        if None in (self.wins, self.losses, self.draws, self.no_contests):
+            return None
         return (self.wins, self.losses, self.draws, self.no_contests)
 
 
@@ -72,6 +76,7 @@ class RegionalCoverageReport(BaseModel):
     pre_fight_agreement_d: int = 0
     pre_fight_agreement_rate: float | None = None
     pre_fight_exclusions: tuple[str, ...] = ()
+    pre_fight_unknown_n: int = 0
     future_invariance_failures: int = 0
     conflicts: int = 0
     identity_exact_links: int = 0
@@ -98,6 +103,10 @@ class RegionalCoverageReport(BaseModel):
     fixture_professional_found: int = 0
     fixture_amateur_n: int = 0
     fixture_amateur_found: int = 0
+    probe_evidence_source: Literal["live", "frozen", "injected", "offline", "not_run"] = (
+        "not_run"
+    )
+    probe_evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class SourceKillEvidence(BaseModel):

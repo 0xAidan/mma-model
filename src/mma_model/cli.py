@@ -16,7 +16,6 @@ from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
 from mma_model.dwcs.ingest import sync_dwcs_history
 from mma_model.history.audit import (
-    DEFAULT_LIVE_PROBE_PATH,
     coverage_gates_ok,
     evaluate_sample_coverage,
     write_regional_coverage_doc,
@@ -762,26 +761,25 @@ def main(argv: list[str] | None = None) -> int:
                                 path_category=path,
                             )
                     with Session() as session:
-                        report = evaluate_sample_coverage(session, years=years)
+                        probe_mode = "live" if args.live else "offline"
+                        report = evaluate_sample_coverage(
+                            session,
+                            years=years,
+                            live_probes={"probes": probes} if args.live else None,
+                            probe_mode=probe_mode,
+                        )
                         ok, blockers = coverage_gates_ok(report)
-                        if not args.live and DEFAULT_LIVE_PROBE_PATH.is_file():
-                            frozen = json.loads(
-                                DEFAULT_LIVE_PROBE_PATH.read_text(encoding="utf-8")
-                            )
-                            frozen_probes = (
-                                frozen.get("probes")
-                                if isinstance(frozen.get("probes"), dict)
-                                else frozen
-                            )
-                            probes = dict(frozen_probes or probes)
                         if args.coverage_doc is not None:
                             write_regional_coverage_doc(
-                                report, path=args.coverage_doc, live_probes=probes
+                                report,
+                                path=args.coverage_doc,
+                                live_probes=report.probe_evidence or probes,
                             )
                     payload = {
                         **report.model_dump(mode="json"),
                         "years": {"start": years.start, "stop": years.stop - 1},
-                        "live_probes": probes,
+                        "live_probes": report.probe_evidence or probes,
+                        "probe_evidence_source": report.probe_evidence_source,
                         "gates_ok": ok,
                         "blockers": list(blockers),
                     }

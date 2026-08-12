@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select, text
 
-from mma_model.db.tables.core import CanonicalEvent, CanonicalFighter, FighterProfileObservation
+from mma_model.db.tables.core import (
+    BoutParticipant,
+    CanonicalBout,
+    CanonicalEvent,
+    CanonicalFighter,
+    FighterProfileObservation,
+    FighterSourceId,
+)
 from mma_model.db.tables.history import HistorySourceBout, HistorySourceFailure
 from mma_model.history.apply import apply_history_observation
 from mma_model.history.audit import (
@@ -114,7 +121,10 @@ def test_missing_visibility_clock_is_unknown_not_zero_history(history_env) -> No
         )
         session.commit()
         record = reconstruct_pre_fight_record(fighter_id=fid, cutoff=CUTOFF, session=session)
-        assert record.wins == 0
+        assert record.wins is None
+        assert record.comparable_tuple() is None
+        assert record.known_minutes is None
+        assert record.minutes_unknown is True
         assert record.visibility_unknown_excluded == 1
         assert record.completeness == "unknown"
         assert record.history_unknown is True
@@ -282,6 +292,7 @@ def test_upcoming_db_seed_merges_exact_source_ids(history_env) -> None:
     Session = history_env["Session"]
     with Session() as session:
         session.add(CanonicalFighter(id="f-alex", display_name="Alex Sample"))
+        session.add(CanonicalFighter(id="f-opp", display_name="Opp"))
         session.add(
             CanonicalEvent(
                 id="e-dwcs",
@@ -290,11 +301,35 @@ def test_upcoming_db_seed_merges_exact_source_ids(history_env) -> None:
                 status="scheduled",
             )
         )
+        session.flush()
+        session.add(
+            CanonicalBout(
+                id="b-up",
+                event_id="e-dwcs",
+                fighter_a_id="f-alex",
+                fighter_b_id="f-opp",
+                status="scheduled",
+            )
+        )
+        session.flush()
+        session.add(BoutParticipant(bout_id="b-up", fighter_id="f-alex", corner="a"))
+        session.add(BoutParticipant(bout_id="b-up", fighter_id="f-opp", corner="b"))
+        session.add(
+            FighterSourceId(
+                fighter_id="f-alex", source="tapology_public", external_id="tap-100"
+            )
+        )
+        session.add(
+            FighterSourceId(
+                fighter_id="f-alex", source="sherdog_public", external_id="sh-100"
+            )
+        )
         session.commit()
         seeds = load_upcoming_dwcs_fighters(session=session)
-    alex = next(row for row in seeds if row.display_name == "Alex Sample")
+    alex = next(row for row in seeds if row.canonical_id == "f-alex")
     assert alex.source_ids.get("tapology_public") == "tap-100"
     assert alex.source_ids.get("sherdog_public") == "sh-100"
+    assert alex.source_ids.get("combat_registry") == "cr-100"
 
 
 def test_missing_source_id_persists_failure_not_silent_zero(history_env) -> None:
@@ -370,7 +405,8 @@ def test_years_filter_excludes_out_of_range_bouts(history_env) -> None:
         ids = {row["bout_id"] for row in coverage.eligible_sample_bouts}
         assert "y2024" in ids
         assert "y2022" not in ids
-        assert coverage.professional_n == 1
+        assert coverage.professional_n == 0
+        assert coverage.fixture_professional_n >= 1
 
 
 def test_conflations_are_measured_not_hardcoded(history_env) -> None:

@@ -12,4 +12,5 @@ data/*
 build/
 dist/
 *.egg-info/
+.DS_Store
 .local-probe-cache/

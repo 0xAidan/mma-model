@@ -19,6 +19,10 @@ from mma_model.history.identity import compute_identity_conflations
 REGIONAL_SOURCES = (SOURCE_TAPOLOGY, SOURCE_SHERDOG, SOURCE_COMBAT_REGISTRY)
 EXCLUDED_TRUNCATION_KINDS = frozenset({"current", "correction"})
 EXCLUDED_TRUNCATION_STATUS = frozenset({"scheduled", "cancelled", "unknown"})
+FIGHTER_HISTORY_PATH_MARKERS = ("/fighter", "/fighters", "/fightcenter/fighters")
+KILLED_PROBE_REASONS = frozenset(
+    {"http_403", "login_wall", "http_redirect_refused", "source_killed"}
+)
 
 
 def bout_event_date(
@@ -73,6 +77,23 @@ def filter_sample_rows(
     return eligible
 
 
+def _probe_coverage_status(probe: Mapping[str, Any]) -> str:
+    result = probe.get("result")
+    reason = str(probe.get("block_reason") or probe.get("reason") or "")
+    path = str(probe.get("path_category") or "").casefold()
+    if reason == "schema_drift":
+        return "source_failed"
+    if result == "BLOCKED" or reason in KILLED_PROBE_REASONS:
+        return "source_killed"
+    if result == "OK":
+        if any(marker in path for marker in FIGHTER_HISTORY_PATH_MARKERS):
+            return "accessible"
+        return "accessibility_only"
+    if result in {None, "NOT_RUN", ""}:
+        return "unmeasured"
+    return "source_failed"
+
+
 def live_source_coverage_map(
     session: Session,
     probes: Mapping[str, Any],
@@ -85,27 +106,9 @@ def live_source_coverage_map(
     for source in REGIONAL_SOURCES:
         probe = dict(probes.get(source) or {})
         result = probe.get("result")
-        reason = probe.get("block_reason")
+        reason = probe.get("block_reason") or probe.get("reason")
         db_fail = failed_by_source.get(source) or []
-        if result == "BLOCKED" or reason in {"http_403", "login_wall", "http_redirect_refused"}:
-            status = "source_killed"
-        elif db_fail and any("kill" in (row.reason or "") or row.reason in {
-            "http_403",
-            "login_wall",
-            "schema_drift",
-        } for row in db_fail):
-            status = "source_failed"
-        elif result == "OK" and source == SOURCE_SHERDOG:
-            status = "accessibility_only"
-        elif result in {None, "NOT_RUN"}:
-            status = "unmeasured"
-        elif result == "OK":
-            status = "unmeasured"
-        else:
-            status = "source_failed"
-        if status == "source_killed" and source in {SOURCE_TAPOLOGY, SOURCE_COMBAT_REGISTRY}:
-            # Frozen live probes: Tapology 403 and Combat login wall are killed.
-            status = "source_killed"
+        status = _probe_coverage_status(probe)
         out[source] = {
             "status": status,
             "result": result,
@@ -131,7 +134,11 @@ def evidence_class_for(session: Session) -> str:
     return "fixture_validation"
 
 
-def left_truncated_history_count(session: Session) -> int:
+def left_truncated_history_count(
+    session: Session,
+    *,
+    years: range | None = None,
+) -> int:
     """Count truncated fighter histories/segments, not raw bout/version rows."""
     rows = list(session.scalars(select(HistorySourceBout)).all())
     histories: set[tuple[str, str]] = set()
@@ -144,7 +151,7 @@ def left_truncated_history_count(session: Session) -> int:
             continue
         if row.result in {"unknown", "cancelled"}:
             continue
-        if row.event_date is not None and row.event_date.year >= 2026:
+        if not year_in_range(row.event_date, years):
             continue
         if getattr(row, "missing_reason", None) in {"invalid", "invalid_time"}:
             continue

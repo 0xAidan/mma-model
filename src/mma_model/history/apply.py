@@ -35,6 +35,7 @@ HISTORY_ENTITY_KINDS = frozenset(
         ENTITY_EXPLICIT_PRE_FIGHT,
     }
 )
+REVISION_RETRY_LIMIT = 16
 
 
 def _as_optional_str(value: object) -> str | None:
@@ -75,10 +76,48 @@ def apply_history_observation(session: Session, obs: SourceObservationRecord) ->
     return None
 
 
+def _max_revision(
+    session: Session,
+    *,
+    source: str,
+    external_bout_id: str,
+    version_kind: str,
+) -> int:
+    current = session.scalar(
+        select(func.max(HistorySourceBout.revision)).where(
+            HistorySourceBout.source == source,
+            HistorySourceBout.external_bout_id == external_bout_id,
+            HistorySourceBout.version_kind == version_kind,
+        )
+    )
+    return int(current or 0)
+
+
+def _flush_new_row(session: Session, row: object) -> bool:
+    try:
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
+        return True
+    except IntegrityError:
+        session.expire_all()
+        return False
+
+
+def _correction_conflict_key(
+    *,
+    source: str,
+    external_bout_id: str,
+    version_kind: str,
+    payload_hash: str,
+    revision: int,
+) -> str:
+    return f"correction:{source}:{external_bout_id}:{version_kind}:{payload_hash}:{revision}"
+
+
 def _apply_regional_bout(session: Session, obs: SourceObservationRecord) -> str | None:
     attrs = dict(obs.attributes)
     version_kind = obs.version_kind or "event_night"
-    revision = int(attrs.get("revision") or 1)
     external_bout_id = str(attrs.get("external_bout_id") or obs.external_id.split("#", 1)[0])
     existing_payload = session.scalars(
         select(HistorySourceBout).where(
@@ -90,49 +129,6 @@ def _apply_regional_bout(session: Session, obs: SourceObservationRecord) -> str 
     ).first()
     if existing_payload is not None:
         return "skipped_identical"
-    existing = session.scalars(
-        select(HistorySourceBout).where(
-            HistorySourceBout.source == obs.source,
-            HistorySourceBout.external_bout_id == external_bout_id,
-            HistorySourceBout.version_kind == version_kind,
-            HistorySourceBout.revision == revision,
-        )
-    ).first()
-    if existing is not None:
-        max_rev = session.scalar(
-            select(func.max(HistorySourceBout.revision)).where(
-                HistorySourceBout.source == obs.source,
-                HistorySourceBout.external_bout_id == external_bout_id,
-                HistorySourceBout.version_kind == version_kind,
-            )
-        )
-        revision = int(max_rev or revision) + 1
-        session.add(
-            HistoryConflict(
-                id=str(uuid.uuid4()),
-                conflict_key=f"correction:{obs.source}:{external_bout_id}:{version_kind}:{existing.revision}",
-                conflict_type="correction_append",
-                fighter_canonical_id=_as_optional_str(attrs.get("fighter_canonical_id")),
-                left_source=obs.source,
-                left_external_id=external_bout_id,
-                right_source=obs.source,
-                right_external_id=external_bout_id,
-                detail_json=json.dumps(
-                    {
-                        "prior_revision": existing.revision,
-                        "next_revision": revision,
-                        "prior_hash": existing.payload_hash,
-                        "next_hash": obs.payload_hash,
-                        "prior_result": existing.result,
-                        "next_result": str(attrs.get("result") or "unknown"),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                quality_tier="conflict",
-                observed_at=obs.observed_at,
-            )
-        )
 
     classification = str(attrs.get("classification") or "unknown")
     if classification not in {"professional", "amateur", "unknown"}:
@@ -150,81 +146,113 @@ def _apply_regional_bout(session: Session, obs: SourceObservationRecord) -> str 
     if origin not in {"synthetic_fixture", "live_public", "unknown"}:
         origin = "unknown"
 
-    row = HistorySourceBout(
-        id=str(uuid.uuid4()),
-        source=obs.source,
-        stream=obs.stream,
-        external_bout_id=external_bout_id,
-        fighter_source=str(attrs.get("fighter_source") or obs.source),
-        fighter_external_id=str(attrs.get("fighter_external_id") or ""),
-        fighter_name=str(attrs.get("fighter_name") or ""),
-        fighter_canonical_id=_as_optional_str(attrs.get("fighter_canonical_id")),
-        opponent_source=_as_optional_str(attrs.get("opponent_source")),
-        opponent_external_id=_as_optional_str(attrs.get("opponent_external_id")),
-        opponent_name=str(attrs.get("opponent_name") or ""),
-        opponent_canonical_id=_as_optional_str(attrs.get("opponent_canonical_id")),
-        event_name=_as_optional_str(attrs.get("event_name")),
-        event_date=_as_optional_date(attrs.get("event_date")),
-        event_external_id=_as_optional_str(attrs.get("event_external_id")),
-        classification=classification,
-        regulated_us=regulated_us,
-        result=result,
-        method=_as_optional_str(attrs.get("method")),
-        ending_round=_as_optional_int(attrs.get("ending_round")),
-        time_str=_as_optional_str(attrs.get("time_str")),
-        elapsed_seconds=_as_optional_int(attrs.get("elapsed_seconds")),
-        scheduled_rounds=_as_optional_int(attrs.get("scheduled_rounds")),
-        promotion=_as_optional_str(attrs.get("promotion")),
-        missing_reason=_as_optional_str(attrs.get("missing_reason")),
-        left_truncated=1 if attrs.get("left_truncated") else 0,
-        parser_version=_as_optional_str(attrs.get("parser_version")),
-        source_class=_as_optional_str(attrs.get("source_class")),
-        source_url=_as_optional_str(attrs.get("source_url")),
-        version_kind=version_kind,
-        revision=revision,
-        bout_status=str(attrs.get("bout_status") or "completed"),
-        quality_tier=obs.quality_tier,
-        timestamp_quality=obs.timestamp_quality,
-        timestamp_quality_source=obs.timestamp_quality_source,
-        observed_at=obs.observed_at,
-        effective_at=obs.effective_at,
-        source_published_at=obs.source_published_at,
-        source_updated_at=obs.source_updated_at,
-        proxy_published_at=obs.proxy_published_at,
-        payload_hash=obs.payload_hash,
-        raw_ref=obs.raw_ref,
-        identity_status=str(attrs.get("identity_status") or "unresolved"),
-        is_current_record=1 if attrs.get("is_current_record") else 0,
-        event_time_precision=precision,
-        observation_origin=origin,
-        wikidata_id=_as_optional_str(attrs.get("wikidata_id")),
-    )
-    try:
-        with session.begin_nested():
-            session.add(row)
-            session.flush()
-    except IntegrityError:
-        session.add(
-            HistoryConflict(
-                id=str(uuid.uuid4()),
-                conflict_key=f"collision:{obs.source}:{external_bout_id}:{version_kind}:{revision}",
-                conflict_type="revision_collision",
-                fighter_canonical_id=_as_optional_str(attrs.get("fighter_canonical_id")),
-                left_source=obs.source,
-                left_external_id=external_bout_id,
-                right_source=obs.source,
-                right_external_id=external_bout_id,
-                detail_json=json.dumps(
-                    {"payload_hash": obs.payload_hash, "revision": revision},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                quality_tier="conflict",
-                observed_at=obs.observed_at,
-            )
+    for _attempt in range(REVISION_RETRY_LIMIT):
+        prior_max = _max_revision(
+            session,
+            source=obs.source,
+            external_bout_id=external_bout_id,
+            version_kind=version_kind,
         )
-        return "revision_collision"
-    return None
+        revision = prior_max + 1
+        row = HistorySourceBout(
+            id=str(uuid.uuid4()),
+            source=obs.source,
+            stream=obs.stream,
+            external_bout_id=external_bout_id,
+            fighter_source=str(attrs.get("fighter_source") or obs.source),
+            fighter_external_id=str(attrs.get("fighter_external_id") or ""),
+            fighter_name=str(attrs.get("fighter_name") or ""),
+            fighter_canonical_id=_as_optional_str(attrs.get("fighter_canonical_id")),
+            opponent_source=_as_optional_str(attrs.get("opponent_source")),
+            opponent_external_id=_as_optional_str(attrs.get("opponent_external_id")),
+            opponent_name=str(attrs.get("opponent_name") or ""),
+            opponent_canonical_id=_as_optional_str(attrs.get("opponent_canonical_id")),
+            event_name=_as_optional_str(attrs.get("event_name")),
+            event_date=_as_optional_date(attrs.get("event_date")),
+            event_external_id=_as_optional_str(attrs.get("event_external_id")),
+            classification=classification,
+            regulated_us=regulated_us,
+            result=result,
+            method=_as_optional_str(attrs.get("method")),
+            ending_round=_as_optional_int(attrs.get("ending_round")),
+            time_str=_as_optional_str(attrs.get("time_str")),
+            elapsed_seconds=_as_optional_int(attrs.get("elapsed_seconds")),
+            scheduled_rounds=_as_optional_int(attrs.get("scheduled_rounds")),
+            promotion=_as_optional_str(attrs.get("promotion")),
+            missing_reason=_as_optional_str(attrs.get("missing_reason")),
+            left_truncated=1 if attrs.get("left_truncated") else 0,
+            parser_version=_as_optional_str(attrs.get("parser_version")),
+            source_class=_as_optional_str(attrs.get("source_class")),
+            source_url=_as_optional_str(attrs.get("source_url")),
+            version_kind=version_kind,
+            revision=revision,
+            bout_status=str(attrs.get("bout_status") or "completed"),
+            quality_tier=obs.quality_tier,
+            timestamp_quality=obs.timestamp_quality,
+            timestamp_quality_source=obs.timestamp_quality_source,
+            observed_at=obs.observed_at,
+            effective_at=obs.effective_at,
+            source_published_at=obs.source_published_at,
+            source_updated_at=obs.source_updated_at,
+            proxy_published_at=obs.proxy_published_at,
+            payload_hash=obs.payload_hash,
+            raw_ref=obs.raw_ref,
+            identity_status=str(attrs.get("identity_status") or "unresolved"),
+            is_current_record=1 if attrs.get("is_current_record") else 0,
+            event_time_precision=precision,
+            observation_origin=origin,
+            wikidata_id=_as_optional_str(attrs.get("wikidata_id")),
+        )
+        if not _flush_new_row(session, row):
+            continue
+        if prior_max >= 1:
+            _flush_new_row(
+                session,
+                HistoryConflict(
+                    id=str(uuid.uuid4()),
+                    conflict_key=_correction_conflict_key(
+                        source=obs.source,
+                        external_bout_id=external_bout_id,
+                        version_kind=version_kind,
+                        payload_hash=obs.payload_hash,
+                        revision=revision,
+                    ),
+                    conflict_type="correction_append",
+                    fighter_canonical_id=_as_optional_str(attrs.get("fighter_canonical_id")),
+                    left_source=obs.source,
+                    left_external_id=external_bout_id,
+                    right_source=obs.source,
+                    right_external_id=external_bout_id,
+                    detail_json=json.dumps(
+                        {
+                            "prior_revision": prior_max,
+                            "next_revision": revision,
+                            "next_hash": obs.payload_hash,
+                            "next_result": result,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    quality_tier="conflict",
+                    observed_at=obs.observed_at,
+                ),
+            )
+            return "correction"
+        return None
+
+    same = session.scalars(
+        select(HistorySourceBout).where(
+            HistorySourceBout.source == obs.source,
+            HistorySourceBout.external_bout_id == external_bout_id,
+            HistorySourceBout.version_kind == version_kind,
+            HistorySourceBout.payload_hash == obs.payload_hash,
+        )
+    ).first()
+    if same is not None:
+        return "skipped_identical"
+    raise RuntimeError(
+        f"could not persist regional bout {obs.source}:{external_bout_id} after revision retries"
+    )
 
 
 def _apply_conflict(session: Session, obs: SourceObservationRecord) -> str | None:
@@ -235,7 +263,8 @@ def _apply_conflict(session: Session, obs: SourceObservationRecord) -> str | Non
     ).first()
     if existing is not None:
         return "skipped_identical"
-    session.add(
+    _flush_new_row(
+        session,
         HistoryConflict(
             id=str(uuid.uuid4()),
             conflict_key=conflict_key,
@@ -253,7 +282,7 @@ def _apply_conflict(session: Session, obs: SourceObservationRecord) -> str | Non
             ),
             quality_tier="conflict",
             observed_at=obs.observed_at,
-        )
+        ),
     )
     return None
 
@@ -274,7 +303,8 @@ def _apply_source_failure(session: Session, obs: SourceObservationRecord) -> str
     if existing is not None:
         return "skipped_identical"
     evidence = dict(attrs.get("evidence") or {})
-    session.add(
+    _flush_new_row(
+        session,
         HistorySourceFailure(
             id=str(uuid.uuid4()),
             source=obs.source,
@@ -284,11 +314,13 @@ def _apply_source_failure(session: Session, obs: SourceObservationRecord) -> str
             host=_as_optional_str(attrs.get("host")),
             path_category=_as_optional_str(attrs.get("path_category")),
             http_status=_as_optional_int(attrs.get("http_status")),
-            evidence_json=json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str),
+            evidence_json=json.dumps(
+                evidence, sort_keys=True, separators=(",", ":"), default=str
+            ),
             payload_hash=obs.payload_hash,
             checkpoint_token=_as_optional_str(attrs.get("checkpoint_token")),
             observed_at=obs.observed_at,
-        )
+        ),
     )
     return None
 
@@ -316,7 +348,8 @@ def _apply_explicit_record(
     ).first()
     if existing is not None:
         return "skipped_identical"
-    session.add(
+    _flush_new_row(
+        session,
         HistoryExplicitRecord(
             id=str(uuid.uuid4()),
             source=obs.source,
@@ -332,7 +365,7 @@ def _apply_explicit_record(
             feature_eligible=0,
             payload_hash=obs.payload_hash,
             observed_at=obs.observed_at,
-        )
+        ),
     )
     return None
 

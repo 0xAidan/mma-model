@@ -177,6 +177,38 @@ def reconstruct_pre_fight_record(
     dated = [row for row in visible if row.event_date is not None]
     selected = _dedupe_for_reconstruction(dated)
 
+    if visibility_unknown > 0:
+        cancelled_n = sum(
+            1
+            for row in selected
+            if row.bout_status == "cancelled" or row.result == "cancelled"
+        )
+        return PreFightRecord(
+            fighter_id=fighter_id,
+            cutoff=cutoff_utc,
+            reconstruction_version=RECONSTRUCTION_VERSION,
+            wins=None,
+            losses=None,
+            draws=None,
+            no_contests=None,
+            professional_bouts=None,
+            amateur_bouts=None,
+            unknown_class_bouts=None,
+            experience_bouts=None,
+            known_minutes=None,
+            minutes_unknown=True,
+            undated_excluded=len(undated),
+            cancelled_excluded=cancelled_n,
+            blocked_identity_excluded=blocked_n,
+            used_current_record=False,
+            unknown_results=0,
+            left_truncated=False,
+            completeness="unknown",
+            visibility_unknown_excluded=visibility_unknown,
+            date_precision_excluded=date_precision_excluded,
+            history_unknown=True,
+        )
+
     wins = losses = draws = ncs = unknown_results = 0
     pro = amateur = unknown_class = 0
     experience = 0

@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from mma_model.db.tables.core import FighterSourceId
-from mma_model.db.tables.history import HistoryConflict
+from mma_model.db.tables.history import HistoryConflict, HistorySourceBout
 from mma_model.db.tables.identity import IdentityReviewQueue, IdentityScoringBlock
 from mma_model.identity.models import ResolveResult
 from mma_model.identity.resolver import IdentityResolver
@@ -123,3 +123,30 @@ def compute_identity_conflations(session: Session) -> int:
         )
     ) or 0
     return int(pending) + int(identity_conflicts) + int(blocks) + int(dup_external)
+
+
+def count_exact_source_id_links(session: Session) -> int:
+    """Count unique exact source-ID / crosswalk rows, not bout observations."""
+    n = session.scalar(select(func.count()).select_from(FighterSourceId))
+    return int(n or 0)
+
+
+def count_unique_identity_status(session: Session, status: str) -> int:
+    rows = session.scalars(
+        select(HistorySourceBout).where(HistorySourceBout.identity_status == status)
+    ).all()
+    keys = {
+        row.fighter_canonical_id or row.fighter_external_id or row.id for row in rows
+    }
+    return len(keys)
+
+
+def count_unique_unresolved_identities(session: Session) -> int:
+    rows = session.scalars(
+        select(HistorySourceBout).where(
+            HistorySourceBout.identity_status.in_(("blocked", "queued", "unresolved"))
+        )
+    ).all()
+    return len(
+        {row.fighter_canonical_id or row.fighter_external_id or row.id for row in rows}
+    )
