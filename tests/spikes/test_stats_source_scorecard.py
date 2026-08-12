@@ -989,11 +989,12 @@ def test_match_bout_to_event_by_participants_and_date(audit: Any) -> None:
 
 
 def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
-    """Lock the exact DWCS-003 refresh evidence snapshot committed in this PR.
+    """Lock the exact post-entitlement-upgrade evidence snapshot in this PR.
 
-    Adoption-path decision logic is covered separately by
-    ``test_decision_thresholds_balldontlie_boundary`` (synthetic gates), not by
-    relaxing this artifact regression.
+    Coverage/outcome/features measured pass, but PIT remains explicitly unknown
+    (reconstruction/revision unproven), so primary stays null. Adoption-path
+    decision logic with a synthetic PIT pass is covered by
+    ``test_decision_thresholds_balldontlie_boundary``, not by inventing PIT here.
     """
     path = ROOT / "output" / "research" / "stats-source-scorecard.json"
     if not path.is_file():
@@ -1011,7 +1012,8 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
         assert f"http://{host}" not in blob
     assert payload["decision"]["prohibited_scraping_selected"] is False
     assert payload["capture_mode"] == "live"
-    assert payload["live_measurements_claimed"] is False
+    assert payload["live_measurements_claimed"] is True
+    assert payload["captured_at"] == "2026-08-12T02:05:00+00:00"
     assert payload["budget_context"]["recurring_monthly"]["usd_cents"] == 6999
 
     # Exact hard-blocker evidence for this PR (not an adopted-or-blocked union).
@@ -1020,34 +1022,47 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert payload["decision"]["path"] == "hard_blocker"
 
     balldontlie = payload["providers"]["balldontlie"]
-    assert balldontlie["access_status"] == "entitlement_blocked"
-    assert balldontlie["metrics_status"] == "blocked"
-    assert balldontlie["error"] == "fights_endpoint_entitlement_blocked"
+    assert balldontlie["access_status"] == "ok"
+    assert balldontlie["metrics_status"] == "measured"
+    assert balldontlie["error"] is None
+    assert balldontlie["rate_limit_limit_header"] == "600"
 
     metrics = balldontlie["metrics"]
     event_metric = metrics["event_coverage"]
     bout_metric = metrics["bout_coverage"]
     outcome_metric = metrics["outcome_agreement"]
     assert event_metric["denominator"] == 30
-    assert event_metric["numerator"] is None
-    assert event_metric["rate"] is None
-    assert event_metric["status"] == "unknown"
-    assert event_metric["reason"] == "entitlement_blocked"
+    assert event_metric["numerator"] == 30
+    assert event_metric["rate"] == pytest.approx(1.0)
+    assert event_metric["status"] == "measured"
     assert bout_metric["denominator"] == 149
-    assert bout_metric["numerator"] is None
-    assert bout_metric["rate"] is None
-    assert bout_metric["status"] == "unknown"
-    assert bout_metric["reason"] == "entitlement_blocked"
-    assert outcome_metric["numerator"] is None
-    assert outcome_metric["rate"] is None
-    assert outcome_metric["status"] == "unknown"
-    assert outcome_metric["reason"] == "entitlement_blocked"
-    assert metrics["required_features"]["status"] == "unknown"
+    assert bout_metric["numerator"] == 149
+    assert bout_metric["rate"] == pytest.approx(1.0)
+    assert bout_metric["status"] == "measured"
+    assert outcome_metric["denominator"] == 149
+    assert outcome_metric["numerator"] == 149
+    assert outcome_metric["rate"] == pytest.approx(1.0)
+    assert outcome_metric["status"] == "measured"
+    assert metrics["required_features"]["status"] == "pass"
     assert metrics["pit_fitness"]["status"] == "unknown"
-    assert metrics["stat_coverage"]["numerator"] is None
-    assert metrics["stat_coverage"]["status"] == "unknown"
+    assert "pre_fight_reconstruction_unproven" in str(
+        metrics["pit_fitness"].get("reason") or ""
+    )
+    assert "revision_support_unproven" in str(
+        metrics["pit_fitness"].get("reason") or ""
+    )
+    identity = metrics["difficult_identity_coverage"]
+    assert identity["status"] == "measured"
+    assert identity["hit"] == 50
+    assert identity["miss"] == 0
+    assert identity["unknown"] == 0
 
     gates = payload["decision"]["gates"]["balldontlie"]
+    assert gates["event_coverage_rate"] == pytest.approx(1.0)
+    assert gates["bout_coverage_rate"] == pytest.approx(1.0)
+    assert gates["outcome_agreement_rate"] == pytest.approx(1.0)
+    assert gates["required_features_status"] == "pass"
+    assert gates["pit_fitness_status"] == "unknown"
     assert gates["technical_pass"] is False
     assert gates["rights_status"] == "pass"
     assert gates["budget_status"] == "pass"
