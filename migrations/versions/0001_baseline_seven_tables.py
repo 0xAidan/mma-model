@@ -152,7 +152,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    existing = _existing_tables()
-    for table in reversed(LEGACY_TABLES):
-        if table in existing:
-            op.drop_table(table)
+    """Preserve legacy tables and rows.
+
+    Baseline is an additive stamp for pre-existing schemas. Dropping these tables
+    on downgrade would destroy operator research data after a temporary upgrade,
+    so downgrade only reverses the Alembic version pointer.
+    """
+    return

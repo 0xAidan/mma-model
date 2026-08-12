@@ -152,13 +152,14 @@ def upgrade() -> None:
             },
         )
 
-    # Fights → bouts
+    # Fights → bouts (fail closed on dirty/orphan rows; never silent skip).
     fights = conn.execute(
         text(
             "SELECT id, event_id, fighter_a_id, fighter_b_id, winner_id, "
             "weight_class, method, fight_round, time_str FROM fights"
         )
     ).mappings().all()
+    unresolved: list[str] = []
     for row in fights:
         existing = conn.execute(
             text(
@@ -172,11 +173,28 @@ def upgrade() -> None:
         event_id = event_map.get(row["event_id"])
         fighter_a = fighter_map.get(row["fighter_a_id"])
         fighter_b = fighter_map.get(row["fighter_b_id"])
-        if not event_id or not fighter_a or not fighter_b:
-            # Orphan legacy row: skip without inventing identities.
+        problems: list[str] = []
+        if not event_id:
+            problems.append(f"missing_event={row['event_id']!r}")
+        if not fighter_a:
+            problems.append(f"missing_fighter_a={row['fighter_a_id']!r}")
+        if not fighter_b:
+            problems.append(f"missing_fighter_b={row['fighter_b_id']!r}")
+        if fighter_a and fighter_b and fighter_a == fighter_b:
+            problems.append("fighters_not_distinct")
+        winner = None
+        if row["winner_id"]:
+            winner = fighter_map.get(row["winner_id"])
+            if winner is None:
+                problems.append(f"missing_winner={row['winner_id']!r}")
+            elif fighter_a and fighter_b and winner not in (fighter_a, fighter_b):
+                problems.append(
+                    f"winner_not_participant={row['winner_id']!r}"
+                )
+        if problems:
+            unresolved.append(f"fight_id={row['id']}: " + ", ".join(problems))
             continue
-        if fighter_a == fighter_b:
-            continue
+        assert event_id is not None and fighter_a is not None and fighter_b is not None
         bout_id = str(uuid.uuid4())
         status = "completed" if row["winner_id"] or row["method"] else "scheduled"
         conn.execute(
@@ -224,11 +242,6 @@ def upgrade() -> None:
                     "created_at": now,
                 },
             )
-        winner = None
-        if row["winner_id"]:
-            winner = fighter_map.get(row["winner_id"])
-            if winner not in (fighter_a, fighter_b):
-                winner = None
         result_type = None
         if winner:
             result_type = "win"
@@ -262,6 +275,15 @@ def upgrade() -> None:
                     "created_at": now,
                 },
             )
+    if unresolved:
+        sample = "; ".join(unresolved[:20])
+        more = f" (+{len(unresolved) - 20} more)" if len(unresolved) > 20 else ""
+        raise RuntimeError(
+            "Legacy UFCStats import failed closed: unresolved fights cannot be "
+            f"mapped without inventing identities ({len(unresolved)} total). "
+            f"Evidence: {sample}{more}. Repair orphan event/fighter FKs or remove "
+            "dirty fights, then re-run alembic upgrade."
+        )
 
 
 def downgrade() -> None:
@@ -326,6 +348,22 @@ def downgrade() -> None:
             {"source": SOURCE},
         )
     ]
+    # Delete fighter-linked observations first (including bout_id IS NULL rows).
+    for fighter_id in fighter_ids:
+        conn.execute(
+            text("DELETE FROM fighter_stat_observations WHERE fighter_id = :fighter_id"),
+            {"fighter_id": fighter_id},
+        )
+        conn.execute(
+            text(
+                "DELETE FROM fighter_profile_observations WHERE fighter_id = :fighter_id"
+            ),
+            {"fighter_id": fighter_id},
+        )
+        conn.execute(
+            text("DELETE FROM fighter_aliases WHERE fighter_id = :fighter_id"),
+            {"fighter_id": fighter_id},
+        )
     conn.execute(
         text("DELETE FROM fighter_source_ids WHERE source = :source"),
         {"source": SOURCE},
@@ -336,16 +374,6 @@ def downgrade() -> None:
             {"fighter_id": fighter_id},
         ).scalar()
         if remaining == 0:
-            conn.execute(
-                text("DELETE FROM fighter_aliases WHERE fighter_id = :fighter_id"),
-                {"fighter_id": fighter_id},
-            )
-            conn.execute(
-                text(
-                    "DELETE FROM fighter_profile_observations WHERE fighter_id = :fighter_id"
-                ),
-                {"fighter_id": fighter_id},
-            )
             conn.execute(
                 text("DELETE FROM canonical_fighters WHERE id = :fighter_id"),
                 {"fighter_id": fighter_id},
