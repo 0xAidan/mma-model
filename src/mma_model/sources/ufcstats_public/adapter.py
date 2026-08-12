@@ -23,7 +23,7 @@ from mma_model.sources.ufcstats_public.parser import (
 if TYPE_CHECKING:
     from mma_model.ingest.raw_store import ContentAddressedRawStore
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_EVENTS_MANIFEST = REPO_ROOT / "data" / "manifests" / "dwcs_events_v1.jsonl"
 DEFAULT_BOUTS_MANIFEST = REPO_ROOT / "data" / "manifests" / "dwcs_bouts_v1.jsonl"
 
