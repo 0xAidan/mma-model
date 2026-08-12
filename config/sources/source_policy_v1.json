@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract_id": "dwcs_source_policy",
-  "contract_version": "1.1.0",
+  "contract_version": "1.1.1",
   "effective_date": "2026-08-12",
   "ticket": "DWCS-003",
   "decision_recorded_by": "user_explicit_approval",
@@ -159,7 +159,29 @@
       "bronze",
       "missing",
       "conflict"
-    ]
+    ],
+    "reserved_attribute_keys": [
+      "observed_at",
+      "source_published_at",
+      "source_updated_at",
+      "effective_at",
+      "proxy_published_at",
+      "timestamp_quality",
+      "timestamp_quality_source",
+      "quality_tier",
+      "payload_hash",
+      "raw_ref",
+      "raw_blob_absent",
+      "detail_level",
+      "source",
+      "stream",
+      "external_id",
+      "entity_kind",
+      "version_kind",
+      "schema_version",
+      "subject_id"
+    ],
+    "attributes_json_rule": "source_specific_non_contract_metadata_only_never_shadow_reserved_keys"
   },
   "dwcs_102_persistence": {
     "implement_in_this_pr": false,
@@ -197,15 +219,18 @@
       "persist_all_timestamp_and_quality_columns",
       "persist_attributes_json_without_drop",
       "round_trip_read_equals_written_observation",
-      "reject_verified_detail_when_required_metadata_missing"
+      "reject_verified_detail_when_required_metadata_missing",
+      "reject_attributes_containing_reserved_contract_keys"
     ],
     "required_tests": [
       "round_trip_silver_vs_gold_quality_tier",
       "proxy_published_at_persisted_when_timestamp_quality_publication_proxy",
       "attributes_json_not_dropped_on_commit_batch",
-      "source_published_at_distinct_from_observed_at"
+      "source_published_at_distinct_from_observed_at",
+      "mapper_first_class_pit_quality_round_trip",
+      "mapper_rejects_reserved_attribute_key_collision"
     ],
-    "gap_note": "DWCS-101 IngestRepository currently constructs RawObservation without attributes and without proxy/quality columns, so silver vs gold metadata cannot survive commit. DWCS-102 must close this before public adapters write production history."
+    "gap_note": "DWCS-101 IngestRepository currently constructs RawObservation without attributes and without proxy/quality columns, so silver vs gold metadata cannot survive commit. DWCS-102 must close this before public adapters write production history. Mappers must set first-class PIT/quality fields; attributes_json is source-specific only."
   },
   "quality_tiers": {
     "gold": "direct_timestamp_or_revision",

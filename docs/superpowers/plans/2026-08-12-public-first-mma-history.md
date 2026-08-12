@@ -16,6 +16,7 @@
 - Reconciliation ≥0.98 where comparable; result agreement ≥0.99; zero unresolved evaluated/upcoming identity conflicts; zero future-row leakage failures; zero mutable-current historical feature leakage.
 - Never bypass logins, paywalls, CAPTCHAs, robots/access controls, or technical restrictions.
 - Never backdate `observed_at`. Separate acquisition, source-update, effective, and proxy clocks.
+- Mappers populate first-class `quality_tier`, `timestamp_quality`, `timestamp_quality_source`, and `proxy_published_at` (plus the other contract clocks/hash/ref). `attributes` / `attributes_json` are source-specific non-contract metadata only and must never shadow reserved contract keys.
 - Never train on opaque precomputed feature CSVs.
 - No planned source file may exceed ~1000 lines; split client/parser/mapper/cli.
 - CI: no live network; fixtures only. Live probes are operator-flagged only.
@@ -182,10 +183,10 @@ git commit -m "feat(sources): Add PIT proxy and HTTP politeness contracts"
   - `timestamp_quality: TimestampQualityId`
   - `timestamp_quality_source: str | None`
   - `quality_tier: QualityTierId`
-  - `attributes: Mapping[str, object]` (frozen)
+  - `attributes: Mapping[str, object]` (frozen; source-specific only — never reserved contract keys)
   - `payload_hash: str`, `raw_ref: str | None`, `raw_blob_absent: bool`
-- `RawObservation` gains matching nullable/typed columns plus `attributes_json: str` (JSON object)
-- `IngestRepository.commit_batch` must persist all of the above; reading back must equal written silver and gold rows
+- `RawObservation` gains matching nullable/typed columns plus `attributes_json: str` (JSON object of non-contract keys only)
+- `IngestRepository.commit_batch` must persist all first-class PIT/quality columns and `attributes_json`; reading back must equal written silver and gold rows; reject commits whose `attributes` contain any `observation_metadata.reserved_attribute_keys`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -318,25 +319,38 @@ git commit -m "feat(sources): Add polite HTTP client with block stops"
 - Create: `src/mma_model/sources/ufcstats_public/parser.py`
 - Create: `src/mma_model/sources/ufcstats_public/mapper.py`
 - Create: `tests/sources/ufcstats_public/test_parser.py`
+- Create: `tests/sources/ufcstats_public/test_mapper.py`
 - Create: `tests/fixtures/sources/ufcstats/event_details_sample.html`
 - Create: `tests/fixtures/sources/ufcstats/fight_details_sample.html`
 - Create: `tests/fixtures/sources/ufcstats/fight_details_schema_drift.html`
 
 **Interfaces:**
+- Consumes: `load_source_policy().observation_metadata.reserved_attribute_keys`, `PitProxyRule`
 - Produces:
   - `class ParserSchemaDriftError(ValueError)`
+  - `class ReservedAttributeKeyError(ValueError)`
   - `parse_event_details(html: str) -> dict[str, object]`
   - `parse_fight_details(html: str) -> dict[str, object]`
-  - `map_fight_to_observations(*, parsed: dict[str, object], observed_at: datetime, effective_at: datetime, source_updated_at: datetime | None, proxy: PitProxyRule | None, payload_hash: str) -> list[SourceObservationRecord]`
+  - `map_fight_to_observations(*, parsed: dict[str, object], observed_at: datetime, effective_at: datetime, source_published_at: datetime | None, source_updated_at: datetime | None, proxy: PitProxyRule | None, payload_hash: str) -> list[SourceObservationRecord]`
+  - First-class fields on every returned record: `quality_tier`, `timestamp_quality`, `timestamp_quality_source`, `proxy_published_at`, `source_published_at`, `source_updated_at`, `observed_at`, `effective_at`
+  - `attributes` / later `attributes_json` hold **only** source-specific non-contract stats/payload keys (e.g. `significant_strikes_landed`); reserved contract keys are rejected
   - source name constant: `SOURCE_UFCSTATS_PUBLIC = "ufcstats_public"`
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
+from datetime import datetime, timezone
 from pathlib import Path
-from mma_model.sources.ufcstats_public.parser import parse_fight_details, ParserSchemaDriftError
 import pytest
+from mma_model.sources.policy import load_source_policy
+from mma_model.sources.ufcstats_public.parser import parse_fight_details, ParserSchemaDriftError
+from mma_model.sources.ufcstats_public.mapper import (
+    map_fight_to_observations,
+    ReservedAttributeKeyError,
+)
+from mma_model.sources.pit_proxy import load_pit_proxy_rule
 
+ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures/sources/ufcstats"
 
 def test_parse_fight_details_sample():
@@ -351,20 +365,68 @@ def test_schema_drift_raises():
     html = (FIXTURES / "fight_details_schema_drift.html").read_text(encoding="utf-8")
     with pytest.raises(ParserSchemaDriftError):
         parse_fight_details(html)
+
+def test_mapper_sets_first_class_pit_and_quality_fields():
+    policy = load_source_policy()
+    proxy = load_pit_proxy_rule()
+    html = (FIXTURES / "fight_details_sample.html").read_text(encoding="utf-8")
+    parsed = parse_fight_details(html)
+    observed = datetime(2026, 8, 12, 15, 0, tzinfo=timezone.utc)
+    rows = map_fight_to_observations(
+        parsed=parsed,
+        observed_at=observed,
+        effective_at=datetime(2019, 1, 1, tzinfo=timezone.utc),
+        source_published_at=None,
+        source_updated_at=None,
+        proxy=proxy,
+        payload_hash="a" * 64,
+    )
+    assert rows
+    for row in rows:
+        assert row.quality_tier in policy.observation_metadata.quality_tier_values
+        assert row.timestamp_quality in policy.observation_metadata.timestamp_quality_values
+        assert row.timestamp_quality_source is not None
+        assert row.observed_at == observed
+        assert row.observed_at != row.effective_at
+        if row.timestamp_quality == "publication_proxy":
+            assert row.proxy_published_at is not None
+            assert row.quality_tier == "silver"
+        for reserved in policy.observation_metadata.reserved_attribute_keys:
+            assert reserved not in row.attributes
+        assert "significant_strikes_landed" in row.attributes
+
+def test_mapper_rejects_reserved_attribute_key_collision():
+    policy = load_source_policy()
+    assert "quality_tier" in policy.observation_metadata.reserved_attribute_keys
+    parsed = {
+        "external_fight_id": "x",
+        "fighter_a": {"name": "A", "stats": {"quality_tier": "gold"}},
+        "fighter_b": {"name": "B", "stats": {}},
+    }
+    with pytest.raises(ReservedAttributeKeyError, match="quality_tier"):
+        map_fight_to_observations(
+            parsed=parsed,
+            observed_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+            effective_at=datetime(2019, 1, 1, tzinfo=timezone.utc),
+            source_published_at=None,
+            source_updated_at=None,
+            proxy=None,
+            payload_hash="b" * 64,
+        )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/sources/ufcstats_public/test_parser.py -v`  
-Expected: FAIL (module missing)
+Run: `pytest tests/sources/ufcstats_public/test_mapper.py::test_mapper_sets_first_class_pit_and_quality_fields -v`  
+Expected: FAIL (module missing or first-class fields absent)
 
 - [ ] **Step 3: Write minimal implementation**
 
-Reuse patterns from `src/mma_model/ufcstats/parsers.py` but isolate under `ufcstats_public/` with explicit required column labels. On missing required labels raise `ParserSchemaDriftError` (do not return partial as `verified`). Mapper sets `detail_level=VERIFIED` only when all required fields present; attaches `attributes["quality_tier"]` (`gold` if `source_updated_at` present else `silver` when proxy applied else `bronze`); never sets `observed_at` from event date.
+Reuse patterns from `src/mma_model/ufcstats/parsers.py` but isolate under `ufcstats_public/` with explicit required column labels. On missing required labels raise `ParserSchemaDriftError` (do not return partial as `verified`). Mapper sets `detail_level=VERIFIED` only when all required fields present. Populate first-class `quality_tier`, `timestamp_quality`, `timestamp_quality_source`, and `proxy_published_at` on `SourceObservationRecord` (`gold` + `direct_source_timestamp` when `source_published_at` or revision timestamp exists; else apply `PitProxyRule` → `silver` + `publication_proxy` + `proxy_published_at`; else `bronze` + `unknown`). Never put those contract fields in `attributes`. Never set `observed_at` from event date. If a source-specific key collides with `reserved_attribute_keys`, raise `ReservedAttributeKeyError` (do not silently rename into attributes).
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/sources/ufcstats_public/test_parser.py -q`  
+Run: `pytest tests/sources/ufcstats_public -q`  
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -404,7 +466,11 @@ def test_adapter_maps_fixture_without_network(tmp_path):
     assert rows
     assert all(r.source == "ufcstats_public" for r in rows)
     assert all(r.observed_at.year == 2026 for r in rows)
+    assert all(r.quality_tier in {"gold", "silver", "bronze"} for r in rows)
+    assert all(r.timestamp_quality_source is not None for r in rows)
+    assert all("quality_tier" not in r.attributes for r in rows)
 ```
+
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -471,7 +537,7 @@ Expected: FAIL
 
 - [ ] **Step 3: Write minimal implementation**
 
-Require ≥99% hash agreement on sampled fight pages when hashes provided; row counts must match `expected_counts` exactly for keys present; schema must include fight/event/fighter ids and result fields. On failure return/raise kill reason `mma_ai_bootstrap` per policy.
+Require ≥99% hash agreement on sampled fight pages when hashes provided; row counts must match `expected_counts` exactly for keys present; schema must include fight/event/fighter ids and result fields. `import_reconciled_observations` must emit `SourceObservationRecord` rows with first-class PIT/quality fields (same rules as Task 4); source-specific dump columns go in `attributes` only and must not collide with reserved contract keys. On failure return/raise kill reason `mma_ai_bootstrap` per policy.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -522,7 +588,7 @@ Expected: FAIL until loader exists (or PASS if loader only — next tests must f
 
 - [ ] **Step 3: Write minimal implementation**
 
-Ingest order: (1) manifest rows as observations with source `dwcs_manifest`, (2) UFCStats mapped facts, (3) fail closed on participant/result disagreement (`conflict` tier, do not overwrite). Distinguish event-night vs current result versions using existing `BoutResultVersion` patterns. Derive elapsed seconds with validation against scheduled rounds.
+Ingest order: (1) manifest rows as observations with source `dwcs_manifest`, (2) UFCStats mapped facts, (3) fail closed on participant/result disagreement (first-class `quality_tier=conflict`, do not overwrite). Distinguish event-night vs current result versions using existing `BoutResultVersion` patterns. Derive elapsed seconds with validation against scheduled rounds.
 
 - [ ] **Step 4: Run tests**
 
@@ -639,7 +705,7 @@ Expected: FAIL
 
 - [ ] **Step 3: Write minimal implementation**
 
-Tapology adapter is primary regional; Sherdog only for conflicts/misses; Combat Registry overrides on official disagreement. Frontier crawl is budgeted (`max_pages_per_run`, `max_depth`). Professional/amateur classification stored explicitly; unknown stays unknown (not zero). Coverage acceptance on sampled sets: ≥95% pro, ≥80% regulated-US amateur found or source failure declared; pre-fight agreement ≥98% where comparable.
+Tapology adapter is primary regional; Sherdog only for conflicts/misses; Combat Registry overrides on official disagreement. Each regional mapper populates first-class `quality_tier`, `timestamp_quality`, `timestamp_quality_source`, and `proxy_published_at` exactly like Task 4; `attributes` stay source-specific and reject reserved-key collisions. Frontier crawl is budgeted (`max_pages_per_run`, `max_depth`). Professional/amateur classification stored explicitly; unknown stays unknown (not zero). Coverage acceptance on sampled sets: ≥95% pro, ≥80% regulated-US amateur found or source failure declared; pre-fight agreement ≥98% where comparable.
 
 - [ ] **Step 4: Run tests**
 

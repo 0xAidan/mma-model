@@ -113,6 +113,17 @@ def test_observation_metadata_names_are_required() -> None:
     assert set(meta.timestamp_quality_values) == set(REQUIRED_TIMESTAMP_QUALITY_IDS)
     assert set(meta.quality_tier_values) == set(REQUIRED_QUALITY_TIER_IDS)
     assert set(policy.quality_tiers.keys()) == set(REQUIRED_QUALITY_TIER_IDS)
+    for key in (
+        "quality_tier",
+        "timestamp_quality",
+        "timestamp_quality_source",
+        "proxy_published_at",
+        "observed_at",
+    ):
+        assert key in meta.reserved_attribute_keys
+    assert meta.attributes_json_rule == (
+        "source_specific_non_contract_metadata_only_never_shadow_reserved_keys"
+    )
 
 
 def test_dwcs_102_persistence_requirements_are_documented() -> None:
@@ -138,6 +149,9 @@ def test_dwcs_102_persistence_requirements_are_documented() -> None:
     assert "source_published_at" in req.source_observation_record_fields
     assert "proxy_published_at" in req.source_observation_record_fields
     assert "round_trip_silver_vs_gold_quality_tier" in req.required_tests
+    assert "mapper_first_class_pit_quality_round_trip" in req.required_tests
+    assert "mapper_rejects_reserved_attribute_key_collision" in req.required_tests
+    assert "reject_attributes_containing_reserved_contract_keys" in req.repository_requirements
     assert req.implement_in_this_pr is False
 
 
@@ -264,6 +278,25 @@ def test_spec_and_plan_document_four_clock_persistence_gap() -> None:
         assert "attributes_json" in text
         assert "0006_observation_pit_metadata" in text
         assert "round-trip" in text.lower() or "round_trip" in text
+        assert "reserved_attribute_keys" in text or "reserved contract" in text.lower()
+
+
+def test_plan_forbids_attribute_shadowed_quality_tier() -> None:
+    plan = (
+        ROOT / "docs/superpowers/plans/2026-08-12-public-first-mma-history.md"
+    ).read_text(encoding="utf-8")
+    for stale in (
+        'attributes["quality_tier"]',
+        "attributes['quality_tier']",
+        'attributes["timestamp_quality"]',
+        'attributes["proxy_published_at"]',
+        'attributes["timestamp_quality_source"]',
+        "attaches `attributes[\"quality_tier\"]`",
+    ):
+        assert stale not in plan
+    assert "test_mapper_sets_first_class_pit_and_quality_fields" in plan
+    assert "ReservedAttributeKeyError" in plan
+    assert "first-class `quality_tier`" in plan or "first-class fields" in plan
 
 
 def test_plan_task1_does_not_recreate_policy_loader() -> None:

@@ -172,8 +172,16 @@ DWCS-102 **must** ship (tests first) before public adapters write production his
 | Alembic migration | `migrations/versions/0006_observation_pit_metadata.py` |
 | Table `raw_observations` columns | `source_published_at`, `proxy_published_at`, `timestamp_quality`, `timestamp_quality_source`, `quality_tier`, `attributes_json` (retain existing `observed_at`, `effective_at`, `source_updated_at`, `payload_hash`, `raw_ref`) |
 | `SourceObservationRecord` first-class fields | `source_published_at: datetime \| None`, `proxy_published_at: datetime \| None`, `timestamp_quality: TimestampQualityId`, `timestamp_quality_source: str \| None`, `quality_tier: QualityTierId`, plus existing clocks/hash/ref |
-| `IngestRepository` | Persist every timestamp/quality/raw field and `attributes_json`; never drop attributes on commit |
-| Required tests | `round_trip_silver_vs_gold_quality_tier`; `proxy_published_at_persisted_when_timestamp_quality_publication_proxy`; `attributes_json_not_dropped_on_commit_batch`; `source_published_at_distinct_from_observed_at` |
+| `IngestRepository` | Persist every timestamp/quality/raw field and `attributes_json`; never drop attributes on commit; reject reserved-key collisions in attributes |
+| Required tests | `round_trip_silver_vs_gold_quality_tier`; `proxy_published_at_persisted_when_timestamp_quality_publication_proxy`; `attributes_json_not_dropped_on_commit_batch`; `source_published_at_distinct_from_observed_at`; mapper first-class round-trip + reserved-attribute rejection |
+
+**`attributes` / `attributes_json` rule:** source-specific non-contract metadata
+only (strikes, method strings, dump columns). Mappers and repositories must
+populate `quality_tier`, `timestamp_quality`, `timestamp_quality_source`,
+`proxy_published_at`, and the other contract clocks/hash/ref as **first-class
+fields**. Reserved keys listed in
+`observation_metadata.reserved_attribute_keys` must never appear inside
+`attributes`; collisions raise (no silent ignore that still stores the shadow).
 
 Policy field `dwcs_102_persistence.implement_in_this_pr` remains `false` for this
 policy PR. Do **not** land the migration here.

@@ -76,6 +76,27 @@ REQUIRED_QUALITY_FIELDS: tuple[str, ...] = (
     "quality_tier",
 )
 REQUIRED_RAW_FIELDS: tuple[str, ...] = ("payload_hash", "raw_ref")
+REQUIRED_RESERVED_ATTRIBUTE_KEYS: tuple[str, ...] = (
+    "observed_at",
+    "source_published_at",
+    "source_updated_at",
+    "effective_at",
+    "proxy_published_at",
+    "timestamp_quality",
+    "timestamp_quality_source",
+    "quality_tier",
+    "payload_hash",
+    "raw_ref",
+    "raw_blob_absent",
+    "detail_level",
+    "source",
+    "stream",
+    "external_id",
+    "entity_kind",
+    "version_kind",
+    "schema_version",
+    "subject_id",
+)
 
 
 def _freeze_str_map(values: Mapping[str, str]) -> Mapping[str, str]:
@@ -187,6 +208,8 @@ class ObservationMetadata(BaseModel):
     required_raw_fields: tuple[str, ...]
     timestamp_quality_values: tuple[str, ...]
     quality_tier_values: tuple[str, ...]
+    reserved_attribute_keys: tuple[str, ...]
+    attributes_json_rule: str
 
     @model_validator(mode="after")
     def _validate_required_sets(self) -> ObservationMetadata:
@@ -208,6 +231,24 @@ class ObservationMetadata(BaseModel):
                 "observation_metadata.quality_tier_values must equal "
                 f"{list(REQUIRED_QUALITY_TIER_IDS)}"
             )
+        if set(self.reserved_attribute_keys) != set(REQUIRED_RESERVED_ATTRIBUTE_KEYS):
+            raise SourcePolicyError(
+                "observation_metadata.reserved_attribute_keys must equal "
+                f"{list(REQUIRED_RESERVED_ATTRIBUTE_KEYS)}"
+            )
+        for key in (
+            *REQUIRED_TIMESTAMP_FIELDS,
+            *REQUIRED_QUALITY_FIELDS,
+            *REQUIRED_RAW_FIELDS,
+        ):
+            if key not in self.reserved_attribute_keys:
+                raise SourcePolicyError(
+                    f"reserved_attribute_keys missing contract field {key!r}"
+                )
+        if self.attributes_json_rule != (
+            "source_specific_non_contract_metadata_only_never_shadow_reserved_keys"
+        ):
+            raise SourcePolicyError("observation_metadata.attributes_json_rule drift")
         return self
 
 
