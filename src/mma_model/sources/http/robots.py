@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import unquote, urljoin, urlparse, urlunparse
+from urllib.parse import ParseResult, unquote, urljoin, urlparse, urlunparse
 
 MAX_ROBOTS_REDIRECTS = 5
+_DEFAULT_PORT_BY_SCHEME: dict[str, int] = {"http": 80, "https": 443}
+# Narrow ASCII DNS hostname: labels of [a-z0-9-], no trailing dot, no IP, no IDN.
+_ASCII_DNS_HOST_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)"
+    r"(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$"
+)
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
 class RobotsRedirectError(ValueError):
@@ -60,23 +68,92 @@ def _path_of(target_url: str) -> str:
 
 
 def allowed_robots_hosts(configured_host: str) -> frozenset[str]:
-    """Hosts permitted for robots redirects (configured host + www variant)."""
+    """Exact canonical ASCII host set for robots redirects.
+
+    Narrow configured↔www rule only:
+    - Take the configured host, ASCII-lowercase.
+    - If it begins with a single ``www.`` label, the bare remainder is the apex.
+    - Otherwise the configured host is the apex and ``www.{apex}`` is added.
+    - No other prefixes, trailing dots, IDN, IPs, or multi-``www`` forms.
+    """
     host = configured_host.strip().lower()
+    if not _is_exact_ascii_dns_hostname(host):
+        raise RobotsRedirectError(
+            "robots_redirect_off_host",
+            f"configured robots host is not a canonical ASCII DNS name: {configured_host!r}",
+        )
     if host.startswith("www."):
-        bare = host[4:]
-        return frozenset({bare, host})
-    return frozenset({host, f"www.{host}"})
+        apex = host[4:]
+        if not _is_exact_ascii_dns_hostname(apex) or apex.startswith("www."):
+            raise RobotsRedirectError(
+                "robots_redirect_off_host",
+                f"configured robots host www canonicalization failed: {configured_host!r}",
+            )
+    else:
+        apex = host
+    return frozenset({apex, f"www.{apex}"})
+
+
+def _is_exact_ascii_dns_hostname(hostname: str) -> bool:
+    """True only for a strict ASCII DNS hostname (no IP/IDN/trailing-dot/%)."""
+    if not hostname or "%" in hostname or hostname.endswith("."):
+        return False
+    if any(ord(ch) > 127 for ch in hostname):
+        return False
+    if "[" in hostname or "]" in hostname:
+        return False
+    lowered = hostname.lower()
+    if "xn--" in lowered:
+        return False
+    if _IPV4_RE.fullmatch(lowered):
+        return False
+    return _ASCII_DNS_HOST_RE.fullmatch(lowered) is not None
 
 
 def normalize_robots_url(url: str) -> str:
-    """Normalize a robots URL for loop detection (no fragment; lower host)."""
+    """Normalize a robots URL for loop detection (no fragment; lower host).
+
+    Default scheme ports are omitted from the authority; non-default ports are
+    preserved only for loop-keying of rejected URLs (callers must validate first).
+    """
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
     netloc = host
-    if parsed.port:
-        netloc = f"{host}:{parsed.port}"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    default = _DEFAULT_PORT_BY_SCHEME.get(scheme)
+    if port is not None and port != default:
+        netloc = f"{host}:{port}"
     path = parsed.path or "/"
-    return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+    return urlunparse((scheme, netloc, path, "", parsed.query, ""))
+
+
+def _validate_robots_redirect_port(*, scheme: str, parsed: ParseResult) -> None:
+    default = _DEFAULT_PORT_BY_SCHEME[scheme]
+    netloc = parsed.netloc or ""
+    # Empty or non-numeric port suffixes are invalid (urlparse may raise or drop).
+    if ":" in netloc and not netloc.startswith("["):
+        port_text = netloc.rsplit(":", 1)[1]
+        if port_text == "" or not port_text.isdigit():
+            raise RobotsRedirectError(
+                "robots_redirect_invalid_port",
+                f"robots redirect invalid port in authority: {netloc!r}",
+            )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RobotsRedirectError(
+            "robots_redirect_invalid_port",
+            f"robots redirect invalid port: {exc}",
+        ) from exc
+    if port is not None and port != default:
+        raise RobotsRedirectError(
+            "robots_redirect_non_default_port",
+            f"robots redirect port {port} not default {default} for {scheme}",
+        )
 
 
 def resolve_robots_redirect_url(
@@ -89,10 +166,10 @@ def resolve_robots_redirect_url(
 ) -> str:
     """Resolve one robots redirect hop under the bounded same-host policy.
 
-    Allows at most ``MAX_ROBOTS_REDIRECTS`` hops, only to the configured host
-    (including ``www.``) over http/https, including canonical http↔https
-    same-host transitions. Relative ``Location`` values are resolved against
-    ``current_url``.
+    Allows at most ``MAX_ROBOTS_REDIRECTS`` hops, only to the exact canonical
+    host set (configured apex + single ``www.`` twin) over http/https with
+    default ports only (implicit/explicit 80 or 443). Relative ``Location``
+    values are resolved against ``current_url``.
     """
     if redirect_count >= MAX_ROBOTS_REDIRECTS:
         raise RobotsRedirectError(
@@ -115,8 +192,8 @@ def resolve_robots_redirect_url(
             f"robots redirect malformed Location: {raw_location!r}",
         ) from exc
 
-    # urlparse tolerates some broken values; require a usable http(s) host.
-    if parsed.scheme not in {"http", "https"}:
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _DEFAULT_PORT_BY_SCHEME:
         raise RobotsRedirectError(
             "robots_redirect_non_http",
             f"robots redirect scheme not http(s): {parsed.scheme!r}",
@@ -126,27 +203,41 @@ def resolve_robots_redirect_url(
             "robots_redirect_userinfo",
             "robots redirect must not include userinfo",
         )
-    # Reject userinfo that urlparse left in netloc for odd inputs.
     netloc = parsed.netloc or ""
     if "@" in netloc:
         raise RobotsRedirectError(
             "robots_redirect_userinfo",
             "robots redirect must not include userinfo",
         )
+    if netloc.startswith("["):
+        raise RobotsRedirectError(
+            "robots_redirect_off_host",
+            "robots redirect IPv6 literals are not allowed",
+        )
 
-    hostname = (parsed.hostname or "").lower()
+    hostname = parsed.hostname or ""
     if not hostname:
         raise RobotsRedirectError(
             "robots_redirect_malformed_location",
             f"robots redirect malformed Location: {raw_location!r}",
         )
-    if hostname not in allowed_robots_hosts(configured_host):
+    if not _is_exact_ascii_dns_hostname(hostname):
         raise RobotsRedirectError(
             "robots_redirect_off_host",
-            f"robots redirect host not allowed: {hostname!r}",
+            f"robots redirect host not canonical ASCII DNS: {hostname!r}",
+        )
+    canonical_host = hostname.lower()
+    if canonical_host not in allowed_robots_hosts(configured_host):
+        raise RobotsRedirectError(
+            "robots_redirect_off_host",
+            f"robots redirect host not allowed: {canonical_host!r}",
         )
 
-    normalized = normalize_robots_url(joined)
+    _validate_robots_redirect_port(scheme=scheme, parsed=parsed)
+
+    # Rebuild with lowercase host and omitted default port (no open redirect tricks).
+    path = parsed.path or "/"
+    normalized = urlunparse((scheme, canonical_host, path, "", parsed.query, ""))
     if normalized in visited:
         raise RobotsRedirectError(
             "robots_redirect_loop",

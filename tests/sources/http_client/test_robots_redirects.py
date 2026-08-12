@@ -341,3 +341,105 @@ def test_page_client_still_rejects_same_host_redirects(tmp_path: Path) -> None:
     )
     with pytest.raises(UrlNotAllowedError, match="refusing to follow redirect"):
         client.get_text("http://www.ufcstats.com/event-details/abc")
+
+
+# Canonical host set for configured host "ufcstats.com": exact {ufcstats.com, www.ufcstats.com}.
+_CONFIGURED_HOST = "ufcstats.com"
+_CURRENT = "http://www.ufcstats.com/robots.txt?start=1"
+
+
+@pytest.mark.parametrize(
+    ("location", "outcome"),
+    [
+        # Allowed: exact canonical hosts, case fold, www↔bare, default ports, http↔https.
+        ("http://www.ufcstats.com/robots.txt", "allow"),
+        ("http://ufcstats.com/robots.txt", "allow"),
+        ("http://WWW.UFCSTATS.COM/robots.txt", "allow"),
+        ("http://UFCSTATS.COM/robots.txt", "allow"),
+        ("https://www.ufcstats.com/robots.txt", "allow"),
+        ("https://ufcstats.com/robots.txt", "allow"),
+        ("http://www.ufcstats.com:80/robots.txt", "allow"),
+        ("http://ufcstats.com:80/robots.txt", "allow"),
+        ("https://www.ufcstats.com:443/robots.txt", "allow"),
+        ("https://ufcstats.com:443/robots.txt", "allow"),
+        ("/robots.txt?rel=1", "allow"),
+        # Non-default / wrong-scheme ports.
+        ("http://www.ufcstats.com:8080/robots.txt", "robots_redirect_non_default_port"),
+        ("https://www.ufcstats.com:8443/robots.txt", "robots_redirect_non_default_port"),
+        ("http://www.ufcstats.com:443/robots.txt", "robots_redirect_non_default_port"),
+        ("https://www.ufcstats.com:80/robots.txt", "robots_redirect_non_default_port"),
+        ("http://www.ufcstats.com:1/robots.txt", "robots_redirect_non_default_port"),
+        ("http://www.ufcstats.com:65535/robots.txt", "robots_redirect_non_default_port"),
+        # Invalid ports.
+        ("http://www.ufcstats.com:abc/robots.txt", "robots_redirect_invalid_port"),
+        ("http://www.ufcstats.com:80a/robots.txt", "robots_redirect_invalid_port"),
+        ("http://www.ufcstats.com:/robots.txt", "robots_redirect_invalid_port"),
+        # Off-host / authority tricks.
+        ("https://evil.example/robots.txt", "robots_redirect_off_host"),
+        ("http://evil.ufcstats.com/robots.txt", "robots_redirect_off_host"),
+        ("http://www.www.ufcstats.com/robots.txt", "robots_redirect_off_host"),
+        ("http://notufcstats.com/robots.txt", "robots_redirect_off_host"),
+        ("http://ufcstats.com.evil.example/robots.txt", "robots_redirect_off_host"),
+        ("http://www.ufcstats.com.evil.example/robots.txt", "robots_redirect_off_host"),
+        ("http://127.0.0.1/robots.txt", "robots_redirect_off_host"),
+        ("http://[::1]/robots.txt", "robots_redirect_off_host"),
+        ("http://[::1]:80/robots.txt", "robots_redirect_off_host"),
+        ("http://www.ufcstats.com./robots.txt", "robots_redirect_off_host"),
+        ("http://ufcstats.com./robots.txt", "robots_redirect_off_host"),
+        ("http://www.ufcstats.com.:80/robots.txt", "robots_redirect_off_host"),
+        ("http://www.ufcstats.com%2eevil.com/robots.txt", "robots_redirect_off_host"),
+        ("http://www.ufcstats.com%2Eevil.com/robots.txt", "robots_redirect_off_host"),
+        ("http://www.xn--ufcstats-r9a.com/robots.txt", "robots_redirect_off_host"),
+        # Cyrillic 'с' confusable in place of Latin 'c'.
+        ("http://www.uf\u0441stats.com/robots.txt", "robots_redirect_off_host"),
+        # Userinfo edge cases.
+        ("https://user:pass@www.ufcstats.com/robots.txt", "robots_redirect_userinfo"),
+        ("https://user@www.ufcstats.com/robots.txt", "robots_redirect_userinfo"),
+        # userinfo@host form: authority is evil.example with userinfo www.ufcstats.com
+        ("https://www.ufcstats.com@evil.example/robots.txt", "robots_redirect_userinfo"),
+        ("ftp://www.ufcstats.com/robots.txt", "robots_redirect_non_http"),
+    ],
+)
+def test_robots_redirect_trust_boundary_matrix(location: str, outcome: str) -> None:
+    from mma_model.sources.http.robots import (
+        RobotsRedirectError,
+        resolve_robots_redirect_url,
+    )
+
+    if outcome == "allow":
+        resolved = resolve_robots_redirect_url(
+            current_url=_CURRENT,
+            location=location,
+            configured_host=_CONFIGURED_HOST,
+            visited={_CURRENT},
+            redirect_count=0,
+        )
+        assert resolved.startswith(("http://", "https://"))
+        # Default ports only: never retain a non-default authority port.
+        assert ":8080" not in resolved
+        assert ":8443" not in resolved
+        return
+
+    with pytest.raises(RobotsRedirectError) as excinfo:
+        resolve_robots_redirect_url(
+            current_url=_CURRENT,
+            location=location,
+            configured_host=_CONFIGURED_HOST,
+            visited={_CURRENT},
+            redirect_count=0,
+        )
+    assert excinfo.value.reason == outcome
+
+
+def test_robots_redirect_canonical_host_set_is_narrow() -> None:
+    from mma_model.sources.http.robots import allowed_robots_hosts
+
+    assert allowed_robots_hosts("ufcstats.com") == frozenset(
+        {"ufcstats.com", "www.ufcstats.com"}
+    )
+    assert allowed_robots_hosts("www.ufcstats.com") == frozenset(
+        {"ufcstats.com", "www.ufcstats.com"}
+    )
+    assert allowed_robots_hosts("WWW.UFCSTATS.COM") == frozenset(
+        {"ufcstats.com", "www.ufcstats.com"}
+    )
