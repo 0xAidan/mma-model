@@ -37,6 +37,11 @@ CANONICAL_TABLES = {
     "fighter_profile_observations",
     "fighter_stat_observations",
 }
+PROVENANCE_TABLES = {
+    "ingest_runs",
+    "raw_observations",
+    "source_checkpoints",
+}
 
 
 def _alembic_config(db_path: Path) -> Config:
@@ -69,6 +74,7 @@ def test_clean_upgrade_creates_baseline_and_canonical_tables(tmp_path: Path) -> 
     names = _table_names(db_path)
     assert LEGACY_TABLES.issubset(names)
     assert CANONICAL_TABLES.issubset(names)
+    assert PROVENANCE_TABLES.issubset(names)
 
 
 def _seed_legacy_schema(db_path: Path) -> None:
@@ -233,10 +239,10 @@ def test_distinct_fighters_and_winner_checks(tmp_path: Path) -> None:
             conn.execute(
                 text(
                     "INSERT INTO bout_result_versions "
-                    "(bout_id, version_kind, fighter_a_id, fighter_b_id, winner_fighter_id, "
-                    "result_type, method, ending_round, time_str, effective_at, observed_at, "
-                    "created_at) "
-                    "VALUES ('b1', 'event_night', 'fa', 'fb', 'fc', 'win', 'KO', 1, '1:00', "
+                    "(bout_id, version_kind, revision, fighter_a_id, fighter_b_id, "
+                    "winner_fighter_id, result_type, method, ending_round, time_str, "
+                    "effective_at, observed_at, created_at) "
+                    "VALUES ('b1', 'event_night', 1, 'fa', 'fb', 'fc', 'win', 'KO', 1, '1:00', "
                     ":now, :now, :now)"
                 ),
                 {"now": now},
