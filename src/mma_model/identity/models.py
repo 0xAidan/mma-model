@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ResolveKind = Literal["linked", "created", "queued", "blocked"]
 ReviewStatus = Literal["pending", "approved", "rejected", "reversed"]
 ReviewDecision = Literal["approve", "reject"]
+
+
+def dump_evidence_json(evidence: Mapping[str, Any]) -> str:
+    """Serialize evidence as a JSON object; reject NaN/non-serializable values."""
+    try:
+        payload = dict(evidence)
+        blob = json.dumps(payload, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"malformed evidence: {exc}") from exc
+    parsed = json.loads(blob)
+    if not isinstance(parsed, dict):
+        raise ValueError("malformed evidence: must be a JSON object")
+    return blob
 
 
 class ReviewCandidate(BaseModel):
@@ -27,6 +41,12 @@ class ReviewCandidate(BaseModel):
     bout_id: str | None = None
     bout_status: str | None = None
     prior_mapping_json: str | None = None
+
+    @field_validator("evidence")
+    @classmethod
+    def evidence_must_be_json_object(cls, value: Mapping[str, Any]) -> Mapping[str, Any]:
+        dump_evidence_json(value)
+        return value
 
 
 class ResolveResult(BaseModel):

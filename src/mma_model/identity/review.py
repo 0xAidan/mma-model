@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from mma_model.db.tables.core import CanonicalFighter, FighterSourceId
 from mma_model.db.tables.identity import (
@@ -17,7 +18,7 @@ from mma_model.db.tables.identity import (
     IdentityScoringBlock,
 )
 from mma_model.identity.constants import RESOLVER_VERSION
-from mma_model.identity.models import ReviewCandidate
+from mma_model.identity.models import ReviewCandidate, dump_evidence_json
 from mma_model.identity.normalize import normalize_person_name
 
 ReviewDecision = Literal["approve", "reject"]
@@ -43,6 +44,36 @@ def _require_review_id(review_id: str) -> str:
     if not text:
         raise ReviewDecisionError("review_id is required")
     return text
+
+
+def _committed_review_snapshot(
+    session: Session, review_id: str
+) -> tuple[str, int, str | None] | None:
+    """Read committed review state on a fresh connection (SQLite snapshot-safe)."""
+    bind = session.get_bind()
+    with bind.connect() as conn:
+        row = conn.execute(
+            select(
+                IdentityReviewQueue.status,
+                IdentityReviewQueue.version,
+                IdentityReviewQueue.decision_canonical_id,
+            ).where(IdentityReviewQueue.id == review_id)
+        ).one_or_none()
+    if row is None:
+        return None
+    return (str(row[0]), int(row[1]), row[2])
+
+
+def _sync_review_from_committed(
+    review: IdentityReviewQueue,
+    *,
+    status: str,
+    version: int,
+    decision_canonical_id: str | None,
+) -> None:
+    set_committed_value(review, "status", status)
+    set_committed_value(review, "version", version)
+    set_committed_value(review, "decision_canonical_id", decision_canonical_id)
 
 
 def _write_evidence(
@@ -82,7 +113,7 @@ def _write_evidence(
         after_canonical_id=after_canonical_id,
         review_id=review_id,
         bout_id=bout_id,
-        evidence_json=json.dumps(evidence, sort_keys=True, default=str),
+        evidence_json=dump_evidence_json(evidence),
         reversible=reversible,
         status="active",
     )
@@ -146,7 +177,7 @@ def enqueue_review(
         candidate_canonical_ids_json=json.dumps(
             list(candidate.candidate_canonical_ids), sort_keys=False
         ),
-        evidence_json=json.dumps(dict(candidate.evidence), sort_keys=True, default=str),
+        evidence_json=dump_evidence_json(dict(candidate.evidence)),
         bout_id=candidate.bout_id,
         bout_status=candidate.bout_status,
         prior_mapping_json=candidate.prior_mapping_json,
@@ -256,6 +287,17 @@ def apply_review_decision(
     if review is None:
         raise ReviewDecisionError(f"review_id not found: {review_id}")
 
+    committed = _committed_review_snapshot(session, review_id)
+    if committed is not None:
+        committed_status, committed_version, committed_canonical = committed
+        if committed_version > int(review.version):
+            _sync_review_from_committed(
+                review,
+                status=committed_status,
+                version=committed_version,
+                decision_canonical_id=committed_canonical,
+            )
+
     if expected_version is not None and int(review.version) != int(expected_version):
         raise ReviewDecisionError(
             f"stale review version: expected {expected_version}, got {review.version}"
@@ -362,6 +404,14 @@ def reverse_review_decision(
     review = session.get(IdentityReviewQueue, review_id)
     if review is None:
         raise ReviewDecisionError(f"review_id not found: {review_id}")
+    committed = _committed_review_snapshot(session, review_id)
+    if committed is not None and committed[1] > int(review.version):
+        _sync_review_from_committed(
+            review,
+            status=committed[0],
+            version=committed[1],
+            decision_canonical_id=committed[2],
+        )
     if not review.reversible:
         raise ReviewDecisionError("review is not reversible")
     if review.status not in {"approved", "rejected"}:

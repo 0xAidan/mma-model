@@ -26,6 +26,7 @@ from mma_model.db.tables.identity import (
     IdentityScoringBlock,
 )
 from mma_model.dwcs.ids import canonical_fighter_id
+from mma_model.identity.models import ReviewCandidate
 from mma_model.identity.normalize import normalize_person_name
 from mma_model.identity.resolver import (
     RESOLVER_VERSION,
@@ -39,6 +40,7 @@ from mma_model.identity.resolver import (
 )
 from mma_model.identity.review import (
     apply_review_decision,
+    enqueue_review,
     list_reviews,
     reverse_review_decision,
 )
@@ -345,6 +347,30 @@ def test_duplicate_external_id_conflict_queues_and_evidence(env) -> None:
     assert all(e.resolver_version == RESOLVER_VERSION for e in evidence)
 
 
+def test_exact_wikidata_beats_transliteration_hint(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        fid = _seed_espn_fighter(session, "2201", "Wiki First")
+        session.add(
+            FighterSourceId(fighter_id=fid, source="wikidata", external_id="Q2201")
+        )
+        session.commit()
+        result = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="sd-wiki-hint",
+            display_name="Wiki First ASCII",
+            wikidata_id="Q2201",
+            candidate_hints=("transliterated", "nickname"),
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+    assert result.kind == "linked"
+    assert result.canonical_id == fid
+    assert result.rule_id == RULE_EXACT_WIKIDATA
+
+
 def test_rule_priority_exact_source_beats_name(env) -> None:
     Session = env["Session"]
     with Session() as session:
@@ -467,10 +493,55 @@ def test_upcoming_block_isolates_unrelated(env) -> None:
         session.commit()
         blocks = session.scalars(select(IdentityScoringBlock)).all()
         resolver = IdentityResolver(session, actor="system", now=FIXED_NOW)
-    assert result.kind == "queued"
+    assert result.kind == "blocked"
     assert any(b.bout_id == "up-bout-blocked" and b.active for b in blocks)
     assert resolver.is_bout_scoring_blocked("up-bout-blocked") is True
     assert resolver.is_bout_scoring_blocked("up-bout-clear") is False
+
+
+def test_completed_bout_unresolved_does_not_block_scoring(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        _seed_espn_fighter(session, "9011", "Completed Name")
+        session.commit()
+        result = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="done-1",
+            display_name="Completed Name",
+            bout_id="completed-bout",
+            bout_status="completed",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        blocks = session.scalars(select(IdentityScoringBlock)).all()
+        resolver = IdentityResolver(session, actor="system", now=FIXED_NOW)
+    assert result.kind == "queued"
+    assert not any(b.active for b in blocks)
+    assert resolver.is_bout_scoring_blocked("completed-bout") is False
+
+
+def test_evaluated_unresolved_blocks_only_that_bout(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        _seed_espn_fighter(session, "9021", "Eval Name")
+        session.commit()
+        result = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="eval-1",
+            display_name="Eval Name",
+            bout_id="eval-bout",
+            bout_status="evaluated",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        resolver = IdentityResolver(session, actor="system", now=FIXED_NOW)
+    assert result.kind == "blocked"
+    assert resolver.is_bout_scoring_blocked("eval-bout") is True
+    assert resolver.is_bout_scoring_blocked("other-eval-bout") is False
 
 
 def test_malformed_evidence_and_unknown_source_fail_closed(env) -> None:
@@ -491,6 +562,20 @@ def test_malformed_evidence_and_unknown_source_fail_closed(env) -> None:
                 source="espn",
                 external_id="",
                 display_name="X",
+                actor="system",
+                now=FIXED_NOW,
+            )
+        with pytest.raises(ValueError, match="malformed evidence"):
+            enqueue_review(
+                session,
+                ReviewCandidate(
+                    source="tapology_public",
+                    external_id="bad-ev",
+                    display_name="Bad Evidence",
+                    normalized_name="bad evidence",
+                    rule_id="manual_enqueue",
+                    evidence={"nan": float("nan")},
+                ),
                 actor="system",
                 now=FIXED_NOW,
             )

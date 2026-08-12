@@ -366,6 +366,79 @@ def test_reversal_after_dependent_bout_mapping_safe(env) -> None:
     assert len(evidence) >= 3
 
 
+def test_stale_session_approve_does_not_duplicate_evidence(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        fid = _seed(session, "108", "Stale Session")
+        session.commit()
+        queued = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="stale-sess-1",
+            display_name="Stale Session",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        review_id = queued.review_id
+
+    with Session() as session_a:
+        loaded = session_a.get(IdentityReviewQueue, review_id)
+        assert loaded is not None
+        assert loaded.status == "pending"
+        with Session() as session_b:
+            apply_review_decision(
+                session_b,
+                review_id=review_id,
+                decision="approve",
+                canonical_id=fid,
+                actor="first",
+                now=FIXED_NOW,
+            )
+            session_b.commit()
+        apply_review_decision(
+            session_a,
+            review_id=review_id,
+            decision="approve",
+            canonical_id=fid,
+            actor="second",
+            now=FIXED_NOW,
+        )
+        session_a.commit()
+
+    with Session() as session:
+        review = session.get(IdentityReviewQueue, review_id)
+        approved = [
+            e
+            for e in session.scalars(select(IdentityMatchEvidence)).all()
+            if e.action == "approved"
+        ]
+    assert review is not None
+    assert review.status == "approved"
+    assert len(approved) == 1
+
+
+def test_malformed_evidence_rejected_on_enqueue(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        _seed(session, "109", "Bad JSON")
+        session.commit()
+        with pytest.raises(ValueError, match="malformed evidence"):
+            enqueue_review(
+                session,
+                ReviewCandidate(
+                    source="tapology_public",
+                    external_id="bad-json-1",
+                    display_name="Bad JSON",
+                    normalized_name="bad json",
+                    rule_id="manual_enqueue",
+                    evidence={"oops": object()},
+                ),
+                actor="system",
+                now=FIXED_NOW,
+            )
+
+
 def test_enqueue_review_direct_and_list(env) -> None:
     Session = env["Session"]
     with Session() as session:

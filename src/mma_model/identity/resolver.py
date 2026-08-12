@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Sequence
@@ -33,7 +32,7 @@ from mma_model.identity.constants import (
     RULE_QUEUE_FUZZY,
     RULE_QUEUE_SAME_NAME,
 )
-from mma_model.identity.models import ResolveResult, ReviewCandidate
+from mma_model.identity.models import ResolveResult, ReviewCandidate, dump_evidence_json
 from mma_model.identity.normalize import normalize_person_name
 
 # Re-export rule constants for tests.
@@ -96,7 +95,7 @@ def _write_evidence(
         after_canonical_id=after_canonical_id,
         review_id=review_id,
         bout_id=bout_id,
-        evidence_json=json.dumps(evidence, sort_keys=True, default=str),
+        evidence_json=dump_evidence_json(evidence),
         reversible=reversible,
         status="active",
     )
@@ -184,28 +183,6 @@ class IdentityResolver:
                 },
             )
 
-        # Fuzzy / nickname / reordered / transliteration never auto-merge.
-        if set(hints) & {"nickname", "reordered", "transliterated", "fuzzy", "alias"}:
-            return self._queue(
-                rule_id=RULE_QUEUE_FUZZY,
-                source=source,
-                external_id=external_id,
-                display_name=display_name,
-                normalized_name=normalized,
-                wikidata_id=wikidata_id,
-                dob=dob,
-                bout_id=bout_id,
-                bout_status=bout_status,
-                candidates=self._candidates_by_normalized_name(normalized),
-                evidence={
-                    "reason": "candidate_hints_forbid_auto_link",
-                    "candidate_hints": list(hints),
-                    "display_name_original": display_name,
-                    "normalized_name": normalized,
-                },
-                create_if_absent=create_if_absent and "nickname" in hints,
-            )
-
         # 2) Exact Wikidata crosswalk.
         if wikidata_id:
             wiki_rows = list(
@@ -283,6 +260,29 @@ class IdentityResolver:
                         "fighter_ids": wiki_fighter_ids,
                     },
                 )
+
+        # Fuzzy / nickname / reordered / transliteration never auto-merge.
+        # Exact source ID and Wikidata already won above.
+        if set(hints) & {"nickname", "reordered", "transliterated", "fuzzy", "alias"}:
+            return self._queue(
+                rule_id=RULE_QUEUE_FUZZY,
+                source=source,
+                external_id=external_id,
+                display_name=display_name,
+                normalized_name=normalized,
+                wikidata_id=wikidata_id,
+                dob=dob,
+                bout_id=bout_id,
+                bout_status=bout_status,
+                candidates=self._candidates_by_normalized_name(normalized),
+                evidence={
+                    "reason": "candidate_hints_forbid_auto_link",
+                    "candidate_hints": list(hints),
+                    "display_name_original": display_name,
+                    "normalized_name": normalized,
+                },
+                create_if_absent=create_if_absent and "nickname" in hints,
+            )
 
         # 3) Exact normalized name + exact DOB when unique/nonconflicting.
         if dob is not None:
@@ -713,9 +713,8 @@ class IdentityResolver:
         )
         kind = "queued"
         if bout_id and (bout_status or "") in {"upcoming", "evaluated", "scheduled"}:
-            kind = "queued"
             if self.is_bout_scoring_blocked(bout_id):
-                # Surface blocked via evidence action annotation without dropping queue.
+                kind = "blocked"
                 _write_evidence(
                     self.session,
                     action="blocked",

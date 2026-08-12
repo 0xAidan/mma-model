@@ -1,6 +1,6 @@
 """Identity resolution package (DWCS-104)."""
 
-from mma_model.identity.models import ResolveResult, ReviewCandidate
+from mma_model.identity.models import ResolveResult, ReviewCandidate, dump_evidence_json
 from mma_model.identity.normalize import name_tokens, normalize_person_name
 from mma_model.identity.resolver import resolve_fighter
 from mma_model.identity.review import (
@@ -18,6 +18,7 @@ __all__ = [
     "list_reviews",
     "name_tokens",
     "normalize_person_name",
+    "dump_evidence_json",
     "resolve_fighter",
     "reverse_review_decision",
 ]
