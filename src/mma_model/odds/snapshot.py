@@ -63,7 +63,7 @@ class SnapshotResult:
     unknown_deduped: int
     skipped_unsupported_markets: tuple[str, ...]
     skipped_unsupported_line_points: tuple[str, ...]
-    quota: dict[str, int | None]
+    quota: dict[str, Any]
     snapshot_at: str | None
     observed_at: str
     used_fixtures: bool
@@ -418,10 +418,12 @@ def run_odds_audit(
 
 def empty_quota_report(quota: QuotaHeaders, *, empty: bool) -> dict[str, Any]:
     """Report empty-response quota semantics for operators/tests."""
+    expected = quota.expected_cost
     return {
         "empty": empty,
         "quota": quota.as_dict(),
-        "billed": bool(quota.requests_last and quota.requests_last > 0),
+        "billed": bool(expected is not None and expected > 0),
+        "requests_last_source": quota.requests_last_source,
     }
 
 

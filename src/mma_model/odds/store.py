@@ -17,6 +17,7 @@ from mma_model.db.tables.odds import (
     OddsQuote,
 )
 from mma_model.odds.types import (
+    PERSISTED_MARKET_FAMILY_VALUES,
     NormalizedQuote,
     OddsEvent,
     QuotaHeaders,
@@ -85,6 +86,8 @@ class OddsQuoteStore:
             requests_remaining=quota.requests_remaining,
             requests_used=quota.requests_used,
             requests_last=quota.requests_last,
+            requests_last_inferred=quota.requests_last_inferred,
+            requests_last_source=quota.requests_last_source,
             empty_response=1 if empty_response else 0,
         )
         self._session.add(row)
@@ -171,6 +174,11 @@ class OddsQuoteStore:
         event_upserts = 0
 
         for obs in observations:
+            if obs.market_family.value not in PERSISTED_MARKET_FAMILY_VALUES:
+                raise ValueError(
+                    f"refusing availability row with unsupported market_family "
+                    f"{obs.market_family!r}"
+                )
             event_row = event_map.get(obs.event_id)
             if event_row is None:
                 event_row = self.upsert_event(

@@ -35,6 +35,7 @@ from mma_model.odds.normalize import (
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
+    empty_quota_report,
     require_disposable_database_url,
     resolve_odds_client,
     run_odds_audit,
@@ -43,7 +44,12 @@ from mma_model.odds.snapshot import (
 )
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, TheOddsApiClient
-from mma_model.odds.types import QuoteAvailability
+from mma_model.odds.types import (
+    REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+    REQUESTS_LAST_SOURCE_PROVIDER,
+    QuotaHeaders,
+    QuoteAvailability,
+)
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "odds"
 OBSERVED = datetime(2026, 8, 11, 21, 5, tzinfo=UTC)
@@ -551,6 +557,111 @@ def test_append_only_quote_guards(tmp_path: Path) -> None:
 def test_unsupported_series_rejected() -> None:
     with pytest.raises(OddsConfigurationError, match="unsupported requested series"):
         validate_requested_series("ufc-only")
+
+
+def test_empty_quota_explicit_zero_vs_missing_header(tmp_path: Path) -> None:
+    explicit = QuotaHeaders.from_headers(
+        {
+            "x-requests-remaining": "480",
+            "x-requests-used": "20",
+            "x-requests-last": "0",
+        },
+        empty=True,
+    )
+    assert explicit.requests_last == 0
+    assert explicit.requests_last_inferred is None
+    assert explicit.requests_last_source == REQUESTS_LAST_SOURCE_PROVIDER
+    assert explicit.expected_cost == 0
+    explicit_report = empty_quota_report(explicit, empty=True)
+    assert explicit_report["billed"] is False
+    assert explicit_report["requests_last_source"] == REQUESTS_LAST_SOURCE_PROVIDER
+    assert explicit_report["quota"]["x-requests-last"] == 0
+
+    missing = QuotaHeaders.from_headers(
+        {"x-requests-remaining": "480", "x-requests-used": "20"},
+        empty=True,
+    )
+    assert missing.requests_last is None
+    assert missing.requests_last_inferred == 0
+    assert missing.requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY
+    assert missing.expected_cost == 0
+    missing_report = empty_quota_report(missing, empty=True)
+    assert missing_report["billed"] is False
+    assert missing_report["requests_last_source"] == REQUESTS_LAST_SOURCE_INFERRED_EMPTY
+    assert missing_report["quota"]["x-requests-last"] is None
+    assert missing_report["quota"]["requests_last_inferred"] == 0
+
+    # Disposable fixtures distinguish provider-reported 0 vs missing header.
+    fixture_dir = tmp_path / "fixtures"
+    fixture_dir.mkdir()
+    (fixture_dir / "current_odds.json").write_text(
+        json.dumps(
+            {
+                "headers": {
+                    "x-requests-remaining": "10",
+                    "x-requests-used": "1",
+                    "x-requests-last": "0",
+                },
+                "data": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    explicit_client = TheOddsApiClient(api_key="", fixture_dir=fixture_dir)
+    explicit_resp = explicit_client.fetch_current_odds()
+    assert explicit_resp.empty is True
+    assert explicit_resp.quota.requests_last == 0
+    assert explicit_resp.quota.requests_last_source == REQUESTS_LAST_SOURCE_PROVIDER
+
+    missing_dir = tmp_path / "fixtures-missing"
+    missing_dir.mkdir()
+    (missing_dir / "current_odds.json").write_text(
+        json.dumps(
+            {
+                "headers": {
+                    "x-requests-remaining": "10",
+                    "x-requests-used": "1",
+                },
+                "data": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    missing_client = TheOddsApiClient(api_key="", fixture_dir=missing_dir)
+    missing_resp = missing_client.fetch_current_odds()
+    assert missing_resp.empty is True
+    assert missing_resp.quota.requests_last is None
+    assert missing_resp.quota.requests_last_inferred == 0
+    assert missing_resp.quota.requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY
+
+    session = _session(tmp_path)
+    store = OddsQuoteStore(session)
+    store.record_quota(
+        provider="the_odds_api",
+        endpoint="current_odds",
+        observed_at=OBSERVED,
+        quota=explicit_resp.quota,
+        empty_response=True,
+    )
+    store.record_quota(
+        provider="the_odds_api",
+        endpoint="current_odds",
+        observed_at=OBSERVED + timedelta(minutes=1),
+        quota=missing_resp.quota,
+        empty_response=True,
+    )
+    session.commit()
+    rows = session.scalars(
+        select(OddsQuotaObservation).order_by(OddsQuotaObservation.id)
+    ).all()
+    assert len(rows) == 2
+    assert rows[0].requests_last == 0
+    assert rows[0].requests_last_inferred is None
+    assert rows[0].requests_last_source == REQUESTS_LAST_SOURCE_PROVIDER
+    assert rows[1].requests_last is None
+    assert rows[1].requests_last_inferred == 0
+    assert rows[1].requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY
+    session.close()
 
 
 def test_unsupported_markets_never_persist_unknown_present_or_absent() -> None:

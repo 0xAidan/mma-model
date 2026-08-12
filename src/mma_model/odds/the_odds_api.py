@@ -63,8 +63,9 @@ class TheOddsApiClient:
             return self._events_from_fixture("events.json")
         payload, headers = self._get_json(f"/sports/{sport}/events", params={})
         events = tuple(self._parse_event(item) for item in _as_list(payload))
-        quota = QuotaHeaders.from_headers(headers)
-        return EventsResponse(events=events, quota=quota, empty=len(events) == 0)
+        empty = len(events) == 0
+        quota = QuotaHeaders.from_headers(headers, empty=empty)
+        return EventsResponse(events=events, quota=quota, empty=empty)
 
     def discover_markets(
         self,
@@ -85,11 +86,12 @@ class TheOddsApiClient:
             if isinstance(item, Mapping)
         )
         markets = tuple(_iter_discovered_markets(bookmakers))
+        empty = len(markets) == 0
         return MarketDiscoveryResponse(
             event_id=event_id,
             markets=markets,
-            quota=QuotaHeaders.from_headers(headers),
-            empty=len(markets) == 0,
+            quota=QuotaHeaders.from_headers(headers, empty=empty),
+            empty=empty,
             raw_bookmakers=bookmakers,
         )
 
@@ -111,14 +113,8 @@ class TheOddsApiClient:
         }
         payload, headers = self._get_json(f"/sports/{sport}/odds", params=params)
         events = tuple(dict(item) for item in _as_list(payload) if isinstance(item, Mapping))
-        quota = QuotaHeaders.from_headers(headers)
         empty = len(events) == 0
-        if empty and quota.requests_last is None:
-            quota = QuotaHeaders(
-                requests_remaining=quota.requests_remaining,
-                requests_used=quota.requests_used,
-                requests_last=0,
-            )
+        quota = QuotaHeaders.from_headers(headers, empty=empty)
         return OddsResponse(events=events, quota=quota, empty=empty, historical=False)
 
     def fetch_historical_odds(
@@ -145,14 +141,8 @@ class TheOddsApiClient:
             raise OddsApiError("Unexpected historical odds payload; expected an object")
         data = payload.get("data") or []
         events = tuple(dict(item) for item in _as_list(data) if isinstance(item, Mapping))
-        quota = QuotaHeaders.from_headers(headers)
         empty = len(events) == 0
-        if empty and quota.requests_last is None:
-            quota = QuotaHeaders(
-                requests_remaining=quota.requests_remaining,
-                requests_used=quota.requests_used,
-                requests_last=0,
-            )
+        quota = QuotaHeaders.from_headers(headers, empty=empty)
         try:
             snapshot_at = parse_utc_datetime(payload.get("timestamp"), field="timestamp")
             previous_timestamp = parse_utc_datetime(
@@ -208,8 +198,9 @@ class TheOddsApiClient:
     def _events_from_fixture(self, name: str) -> EventsResponse:
         payload = self._load_fixture(name)
         events = tuple(self._parse_event(item) for item in _as_list(payload.get("data", payload)))
-        quota = QuotaHeaders.from_headers(payload.get("headers") or {})
-        return EventsResponse(events=events, quota=quota, empty=len(events) == 0)
+        empty = len(events) == 0
+        quota = QuotaHeaders.from_headers(payload.get("headers") or {}, empty=empty)
+        return EventsResponse(events=events, quota=quota, empty=empty)
 
     def _markets_from_fixture(self, event_id: str) -> MarketDiscoveryResponse:
         payload = self._load_fixture("market_discovery.json")
@@ -236,17 +227,18 @@ class TheOddsApiClient:
             if isinstance(item, Mapping)
         )
         markets = tuple(_iter_discovered_markets(bookmakers))
+        empty = len(markets) == 0
         return MarketDiscoveryResponse(
             event_id=event_id,
             markets=markets,
-            quota=QuotaHeaders.from_headers(payload.get("headers") or {}),
-            empty=len(markets) == 0,
+            quota=QuotaHeaders.from_headers(payload.get("headers") or {}, empty=empty),
+            empty=empty,
             raw_bookmakers=bookmakers,
         )
 
     def _odds_from_fixture(self, name: str, *, historical: bool) -> OddsResponse:
         payload = self._load_fixture(name)
-        headers = QuotaHeaders.from_headers(payload.get("headers") or {})
+        raw_headers = payload.get("headers") or {}
         if historical:
             data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
             if not isinstance(data, Mapping):
@@ -261,12 +253,7 @@ class TheOddsApiClient:
                     dict(item) for item in payload["events"] if isinstance(item, Mapping)
                 )
             empty = len(events) == 0
-            if empty and headers.requests_last is None:
-                headers = QuotaHeaders(
-                    requests_remaining=headers.requests_remaining,
-                    requests_used=headers.requests_used,
-                    requests_last=0,
-                )
+            headers = QuotaHeaders.from_headers(raw_headers, empty=empty)
             try:
                 snapshot_at = parse_utc_datetime(
                     payload.get("timestamp") or data.get("timestamp"),
@@ -297,12 +284,7 @@ class TheOddsApiClient:
             if isinstance(item, Mapping)
         )
         empty = len(events) == 0
-        if empty and headers.requests_last is None:
-            headers = QuotaHeaders(
-                requests_remaining=headers.requests_remaining,
-                requests_used=headers.requests_used,
-                requests_last=0,
-            )
+        headers = QuotaHeaders.from_headers(raw_headers, empty=empty)
         return OddsResponse(events=events, quota=headers, empty=empty, historical=False)
 
     def _load_fixture(self, name: str) -> dict[str, Any]:

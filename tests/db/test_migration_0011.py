@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ODDS_TABLES = {
@@ -93,6 +95,66 @@ def test_upgrade_head_creates_odds_tables_and_append_only_triggers(tmp_path: Pat
                 """
             )
         )
+    engine.dispose()
+
+
+def test_availability_market_family_rejects_null_and_unsupported(tmp_path: Path) -> None:
+    db_path = tmp_path / "odds-check.db"
+    command.upgrade(_alembic_config(db_path), "head")
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO odds_events (
+                  id, provider, external_event_id, sport_key, home_team, away_team,
+                  commence_time, created_at, updated_at
+                ) VALUES (
+                  'e1', 'the_odds_api', 'ext-1', 'mma_mixed_martial_arts',
+                  'A', 'B', '2026-08-12T00:00:00+00:00',
+                  '2026-08-11T00:00:00+00:00', '2026-08-11T00:00:00+00:00'
+                )
+                """
+            )
+        )
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO odds_availability_observations (
+                      dedupe_key, provider, region, event_id, external_event_id,
+                      bookmaker_key, bookmaker_title, provider_market_key, market_family,
+                      availability, observed_at, commence_time, snapshot_at, created_at
+                    ) VALUES (
+                      'null-family', 'the_odds_api', 'us', 'e1', 'ext-1',
+                      'draftkings', 'DraftKings', 'totals', NULL,
+                      'unknown', '2026-08-11T21:00:00+00:00',
+                      '2026-08-12T00:00:00+00:00', NULL, '2026-08-11T21:00:00+00:00'
+                    )
+                    """
+                )
+            )
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO odds_availability_observations (
+                      dedupe_key, provider, region, event_id, external_event_id,
+                      bookmaker_key, bookmaker_title, provider_market_key, market_family,
+                      availability, observed_at, commence_time, snapshot_at, created_at
+                    ) VALUES (
+                      'bad-family', 'the_odds_api', 'us', 'e1', 'ext-1',
+                      'draftkings', 'DraftKings', 'method_of_victory', 'method_of_victory',
+                      'unknown', '2026-08-11T21:00:00+00:00',
+                      '2026-08-12T00:00:00+00:00', NULL, '2026-08-11T21:00:00+00:00'
+                    )
+                    """
+                )
+            )
     engine.dispose()
 
 

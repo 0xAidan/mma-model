@@ -78,8 +78,15 @@ def upgrade() -> None:
             sa.Column("requests_remaining", sa.Integer(), nullable=True),
             sa.Column("requests_used", sa.Integer(), nullable=True),
             sa.Column("requests_last", sa.Integer(), nullable=True),
+            sa.Column("requests_last_inferred", sa.Integer(), nullable=True),
+            sa.Column("requests_last_source", sa.String(length=32), nullable=False),
             sa.Column("empty_response", sa.Integer(), nullable=False),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.CheckConstraint(
+                "requests_last_source IN "
+                "('inferred_empty_zero', 'missing', 'provider')",
+                name="ck_odds_quota_requests_last_source",
+            ),
             sa.PrimaryKeyConstraint("id"),
         )
         op.create_index(

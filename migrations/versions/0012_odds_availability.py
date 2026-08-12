@@ -17,11 +17,14 @@ from alembic import op
 from sqlalchemy import inspect
 
 from mma_model.db.odds_guards import drop_odds_sqlite_guards, install_odds_sqlite_guards
+from mma_model.domain.markets import MarketFamily
 
 revision: str = "0012_odds_availability"
 down_revision: Union[str, Sequence[str], None] = "0011_odds_quotes"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+_MARKET_FAMILY_SQL = ", ".join(repr(member.value) for member in MarketFamily)
 
 
 def _existing_tables() -> set[str]:
@@ -42,12 +45,16 @@ def upgrade() -> None:
             sa.Column("bookmaker_key", sa.String(length=64), nullable=True),
             sa.Column("bookmaker_title", sa.String(length=128), nullable=True),
             sa.Column("provider_market_key", sa.String(length=64), nullable=False),
-            sa.Column("market_family", sa.String(length=64), nullable=True),
+            sa.Column("market_family", sa.String(length=64), nullable=False),
             sa.Column("availability", sa.String(length=32), nullable=False),
             sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("commence_time", sa.DateTime(timezone=True), nullable=False),
             sa.Column("snapshot_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.CheckConstraint(
+                f"market_family IN ({_MARKET_FAMILY_SQL})",
+                name="ck_odds_availability_market_family",
+            ),
             sa.ForeignKeyConstraint(["event_id"], ["odds_events.id"]),
             sa.PrimaryKeyConstraint("id"),
             sa.UniqueConstraint("dedupe_key", name="uq_odds_availability_dedupe_key"),
@@ -56,6 +63,11 @@ def upgrade() -> None:
             "ix_odds_availability_observations_dedupe_key",
             "odds_availability_observations",
             ["dedupe_key"],
+        )
+        op.create_index(
+            "ix_odds_availability_observations_market_family",
+            "odds_availability_observations",
+            ["market_family"],
         )
         op.create_index(
             "ix_odds_availability_observations_provider",

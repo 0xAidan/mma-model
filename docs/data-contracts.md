@@ -249,7 +249,7 @@ Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 | **Offline** | Explicit only: `--offline-fixtures --fixture-dir PATH --database-url disposable-sqlite`. No implicit tests/ fixtures; fail closed without `ODDS_API_KEY`. |
 | **Product rule** | Exact bookmaker lines remain optional enrichment. Reference quotes are never labeled Bet365. |
 
-Quota headers persisted: `x-requests-remaining`, `x-requests-used`, `x-requests-last`. Empty odds responses are recorded with `requests_last=0` when the provider does not bill.
+Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-requests-last`, plus `requests_last_inferred` and `requests_last_source` (`provider` | `missing` | `inferred_empty_zero`). Empty responses with a missing last header keep `requests_last=NULL` and record inferred cost `0` separately; provider-reported `0` stays `requests_last=0` with source `provider`.
 
 ## Governing product rule (odds)
 

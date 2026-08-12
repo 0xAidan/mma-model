@@ -46,28 +46,85 @@ PROVIDER_MARKET_TO_FAMILY: Final[Mapping[str, MarketFamily]] = {
     OddsMarketKey.TOTALS.value: MarketFamily.TOTALS,
 }
 
+# DWCS-200 families allowed on persisted availability rows (DB CHECK + Python).
+PERSISTED_MARKET_FAMILY_VALUES: Final[tuple[str, ...]] = tuple(
+    member.value for member in MarketFamily
+)
+
+REQUESTS_LAST_SOURCE_PROVIDER: Final[str] = "provider"
+REQUESTS_LAST_SOURCE_MISSING: Final[str] = "missing"
+REQUESTS_LAST_SOURCE_INFERRED_EMPTY: Final[str] = "inferred_empty_zero"
+REQUESTS_LAST_SOURCES: Final[frozenset[str]] = frozenset(
+    {
+        REQUESTS_LAST_SOURCE_PROVIDER,
+        REQUESTS_LAST_SOURCE_MISSING,
+        REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+    }
+)
+
 
 @dataclass(frozen=True)
 class QuotaHeaders:
-    """Usage quota headers returned by The Odds API."""
+    """Usage quota headers returned by The Odds API.
+
+    ``requests_last`` is the raw parsed ``x-requests-last`` header only.
+    Empty-response zero-cost policy is recorded separately via
+    ``requests_last_inferred`` / ``requests_last_source`` so provider-reported
+    ``0`` remains distinguishable from a missing header.
+    """
 
     requests_remaining: int | None
     requests_used: int | None
     requests_last: int | None
+    requests_last_inferred: int | None = None
+    requests_last_source: str = REQUESTS_LAST_SOURCE_MISSING
 
     @classmethod
-    def from_headers(cls, headers: Mapping[str, str]) -> QuotaHeaders:
+    def from_headers(
+        cls, headers: Mapping[str, str], *, empty: bool = False
+    ) -> QuotaHeaders:
+        remaining = _parse_int_header(headers, "x-requests-remaining")
+        used = _parse_int_header(headers, "x-requests-used")
+        last = _parse_int_header(headers, "x-requests-last")
+        if last is not None:
+            return cls(
+                requests_remaining=remaining,
+                requests_used=used,
+                requests_last=last,
+                requests_last_inferred=None,
+                requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+            )
+        if empty:
+            return cls(
+                requests_remaining=remaining,
+                requests_used=used,
+                requests_last=None,
+                requests_last_inferred=0,
+                requests_last_source=REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+            )
         return cls(
-            requests_remaining=_parse_int_header(headers, "x-requests-remaining"),
-            requests_used=_parse_int_header(headers, "x-requests-used"),
-            requests_last=_parse_int_header(headers, "x-requests-last"),
+            requests_remaining=remaining,
+            requests_used=used,
+            requests_last=None,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_MISSING,
         )
 
-    def as_dict(self) -> dict[str, int | None]:
+    @property
+    def expected_cost(self) -> int | None:
+        """Provider-reported last cost, else inferred empty-policy cost."""
+        if self.requests_last is not None:
+            return self.requests_last
+        return self.requests_last_inferred
+
+    def as_dict(self) -> dict[str, Any]:
         return {
             "x-requests-remaining": self.requests_remaining,
             "x-requests-used": self.requests_used,
             "x-requests-last": self.requests_last,
+            "requests_last_inferred": self.requests_last_inferred,
+            "requests_last_source": self.requests_last_source,
+            "expected_cost": self.expected_cost,
         }
 
 
@@ -142,6 +199,21 @@ class UnknownMarketObservation:
     commence_time: datetime
     snapshot_at: datetime | None
     dedupe_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.market_family, MarketFamily):
+            raise TypeError(
+                f"market_family must be MarketFamily, got {type(self.market_family)!r}"
+            )
+        if self.market_family.value not in PERSISTED_MARKET_FAMILY_VALUES:
+            raise ValueError(
+                f"unsupported market_family for availability: {self.market_family!r}"
+            )
+        if self.availability is not QuoteAvailability.UNKNOWN:
+            raise ValueError(
+                "UnknownMarketObservation.availability must be UNKNOWN "
+                f"(got {self.availability!r})"
+            )
 
     @property
     def poll_kind(self) -> str:
