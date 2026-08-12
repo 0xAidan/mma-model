@@ -7,8 +7,14 @@ import json
 import tempfile
 from pathlib import Path
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from mma_model.config import get_settings
-from mma_model.db.session import init_db, session_scope
+from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
+from mma_model.dwcs.ingest import sync_dwcs_history
+from mma_model.ingest.raw_store import ContentAddressedRawStore
+from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.the_odds_api import fetch_mma_odds
 from mma_model.predict.backtest import walk_forward_backtest
 from mma_model.predict.train import predict_fight_a_win_prob, train_and_save
@@ -131,6 +137,52 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional path for sanitized aggregate audit summary JSON",
+    )
+
+    p_dwcs = sub.add_parser("dwcs", help="DWCS universe history utilities")
+    dwcs_sub = p_dwcs.add_subparsers(dest="dwcs_cmd", required=True)
+    p_sync_hist = dwcs_sub.add_parser(
+        "sync-history",
+        help="Ingest frozen DWCS manifest history into an explicit DB target",
+    )
+    p_sync_hist.add_argument(
+        "--through",
+        type=int,
+        default=2025,
+        help="Inclusive calendar year upper bound (default 2025)",
+    )
+    p_sync_hist.add_argument(
+        "--database-url",
+        required=True,
+        help="Explicit disposable SQLite URL (never implied live data/mma.db)",
+    )
+    p_sync_hist.add_argument(
+        "--raw-store",
+        type=Path,
+        required=True,
+        help="Explicit disposable content-addressed raw store root",
+    )
+    p_sync_hist.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate/classify only; do not mutate the database",
+    )
+    p_sync_hist.add_argument(
+        "--json",
+        action="store_true",
+        help="Print JSON report",
+    )
+    p_sync_hist.add_argument(
+        "--events-manifest",
+        type=Path,
+        default=None,
+        help="Optional override path for dwcs_events_v1.jsonl",
+    )
+    p_sync_hist.add_argument(
+        "--bouts-manifest",
+        type=Path,
+        default=None,
+        help="Optional override path for dwcs_bouts_v1.jsonl",
     )
 
     args = p.parse_args(argv)
@@ -271,6 +323,54 @@ def main(argv: list[str] | None = None) -> int:
                 client.close()
             if tmp_ctx is not None:
                 tmp_ctx.cleanup()
+
+    if args.cmd == "dwcs" and args.dwcs_cmd == "sync-history":
+        db_url = str(args.database_url).strip()
+        if not db_url:
+            print("refusing empty --database-url")
+            return 2
+        # Guard against accidental live DB use when operator omits an explicit temp target.
+        if db_url in {"sqlite:///data/mma.db", "sqlite:///./data/mma.db"}:
+            print(
+                "refusing default live data/mma.db; pass an explicit disposable "
+                "--database-url for DWCS-103 verification"
+            )
+            return 2
+
+        engine = create_engine(db_url, future=True)
+        _attach_sqlite_listeners(engine)
+        if not args.dry_run:
+            # Apply migrations against the explicit target only.
+            from alembic import command
+            from alembic.config import Config
+
+            root = get_settings().project_root
+            cfg = Config(str(root / "alembic.ini"))
+            cfg.set_main_option("script_location", str(root / "migrations"))
+            cfg.set_main_option("sqlalchemy.url", db_url)
+            command.upgrade(cfg, "head")
+
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        store = ContentAddressedRawStore(Path(args.raw_store))
+        repo = IngestRepository(session_factory=Session, raw_store=store)
+        try:
+            report = sync_dwcs_history(
+                through_year=int(args.through),
+                repo=repo,
+                session_factory=Session,
+                adapter=None,
+                events_path=args.events_manifest,
+                bouts_path=args.bouts_manifest,
+                dry_run=bool(args.dry_run),
+                provider_blocked=True,
+            )
+            if args.json:
+                print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+            else:
+                print(report.human_summary())
+            return 0
+        finally:
+            engine.dispose()
 
     return 1
 

@@ -71,7 +71,7 @@ event-block 90% UCB on delta log loss versus M1 is **strictly below** `+0.02`
 | **Path** | `config/sources/source_policy_v1.json` |
 | **Loader** | `mma_model.sources.policy.load_source_policy` |
 | **Mode** | `public_first_hybrid_personal_project` |
-| **Canonical source IDs** | `ufcstats_public`, `mma_ai_bootstrap`, `tapology_public`, `sherdog_public`, `combat_registry`, `wikidata`, `bestfightodds_archive`, `the_odds_api`, `sportsdataio`, `balldontlie`, `explicit_missing` |
+| **Canonical source IDs** | `ufcstats_public`, `mma_ai_bootstrap`, `dwcs_manifest`, `tapology_public`, `sherdog_public`, `combat_registry`, `wikidata`, `bestfightodds_archive`, `the_odds_api`, `sportsdataio`, `balldontlie`, `explicit_missing`. `dwcs_manifest` is a frozen internal universe/result seed (not an external observation fallback; never `explicit_missing` for manifest facts). |
 | **Licensed primary** | Remains `null` in the scorecard until a measured audit passes |
 | **Gates** | 89/440; exclusions categorized; ≥98% reconciliation; ≥99% result agreement; zero unresolved evaluated/upcoming identity conflicts; zero future-row leakage; no mutable-current historical features |
 | **Observation metadata** | Required clocks/fields: `observed_at`, `source_published_at`, `source_updated_at`, `effective_at`, `proxy_published_at`, `timestamp_quality`, `timestamp_quality_source`, `quality_tier`, `payload_hash`, `raw_ref`. `attributes_json` is source-specific only; reserved contract keys must never appear inside attributes. |

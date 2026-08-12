@@ -52,10 +52,11 @@ here in DWCS-001.
 5. Typed source adapters; no provider-specific fields leaking through features.
 6. Production data rights (amended 2026-08-12, DWCS-003): personal-project
    **public-first hybrid** per `config/sources/source_policy_v1.json` using
-   canonical source IDs (`ufcstats_public`, `mma_ai_bootstrap`,
+   canonical source IDs (`ufcstats_public`, `mma_ai_bootstrap`, `dwcs_manifest`,
    `tapology_public`, `sherdog_public`, `combat_registry`, `wikidata`,
    `bestfightodds_archive`, `the_odds_api`, `sportsdataio`, `balldontlie`,
-   `explicit_missing`). Canonical UFC/DWCS facts come from `ufcstats_public`
+   `explicit_missing`). `dwcs_manifest` seeds the frozen DWCS universe/results
+   and is not an external observation fallback. Canonical UFC/DWCS facts come from `ufcstats_public`
    snapshots (optional `mma_ai_bootstrap` only after hash/count/schema
    reconciliation). Licensed providers remain validation/enrichment until a
    measured audit sets `decision.primary`. Never bypass logins, paywalls,
