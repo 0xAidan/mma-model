@@ -70,7 +70,7 @@ Selection is encoded in `scripts/spikes/audit_stats_sources.py`:
 | Outcome agreement | Comparable mapped pairs only: provider winner/result vs manifest **event-night** result. Unmapped/ambiguous excluded (`denominator_policy=comparable_mapped_pairs_only`). |
 | Difficult identities | Partition of probed sample into hit / miss / unknown. |
 | Required features | Fight-level fields and fight_stats fields scored **separately**. Denominator for every required field is the matched-bout universe (149). Pass requires full-universe stat probing and each field rate ≥ **0.98**. Partial samples ⇒ `unknown` (`stat_probe_incomplete`), never pass. SportsDataIO also records diagnostic result/elapsed-time field presence on accessible seasons only. |
-| PIT / nulls / revisions / latency / request cost | Measured when evidenced; otherwise `unknown` with reason. HTTP success alone does **not** auto-fail or auto-pass. |
+| PIT / nulls / revisions / latency / request cost | PIT **pass** requires every explicit dimension: pre-fight reconstruction, revision/correction support, **and** publication/source-update timestamps. Missing/unknown timestamp proof can never pass. HTTP success alone does **not** auto-fail or auto-pass. |
 | API-Sports non-overlap | Fingerprinted provider pre-DWCS history bouts not present in the DWCS universe / total fingerprintable history. |
 | Year diagnostics | Informational only (`years_with_any_provider_dwcs_named_events`); never used as event coverage. |
 
@@ -115,7 +115,12 @@ Checked at scorecard `evidence_timestamps` (committed capture uses fixed
 Official endpoints used for credentialed probing:
 [API docs](https://sportsdata.io/developers/api-documentation/mma)
 (`Schedule/{league}/{season}`, `Event/{eventid}`, `FightFinal/{fightid}`,
-`FightersBasic`, `Leagues`). Auth via subscription key header or query.
+`FightersBasic`, `Leagues`). Auth uses the least-exposing supported mechanism:
+`Ocp-Apim-Subscription-Key` **header only** (never query/URL).
+
+Access classification rule: entitlement may be claimed only after an earlier
+request in the same probe authenticated successfully. A first-call 401/403 with
+generic “access” text is `auth_failed`, not entitlement.
 
 Public field/workflow citations only for rights/price. Monthly price, retention,
 revision semantics, SLA contract language, and commercial reuse rights remain
@@ -174,7 +179,7 @@ Technical gate snapshot (BALLDONTLIE, preserved):
 | bout_coverage | 149/149 = 1.0 (≥0.98) |
 | outcome_agreement | 149/149 = 1.0 (≥0.99) |
 | required_features | **fail** (`control_time_seconds` 98/149 < 0.98) |
-| pit_fitness | **unknown** (reconstruction + revision unproven) |
+| pit_fitness | **unknown** (reconstruction + revision + publication timestamps unproven) |
 | rights | pass |
 | budget | pass (6999¢ ≤ 10000¢) |
 | technical_pass / adopt | **false** |
@@ -196,11 +201,14 @@ Reasons:
 
 1. BALLDONTLIE clears coverage and outcome agreement, but required features fail
    under the universe-wide fight_stats contract (`control_time_seconds` coverage
-   below 0.98). PIT fitness also remains unknown. Decision tree keeps
+   below 0.98). PIT fitness also remains unknown (reconstruction, revision, and
+   publication/source-update timestamps all unproven). Decision tree keeps
    `primary=null`.
-2. SportsDataIO authenticates, but audit seasons 2023–2024 are entitlement-blocked.
-   Full-universe technical gates remain unknown/blocked (not invented zeros).
-   Written rights and monthly quote remain unanswered blockers.
+2. SportsDataIO auth was established independently (Leagues ok), then audit
+   seasons 2023–2024 returned post-auth feed denials classified as
+   entitlement-blocked. Full-universe technical gates remain unknown/blocked
+   (not invented zeros). Written rights and monthly quote remain unanswered
+   blockers.
 3. API-Sports probe cannot be kept without measured ≥10% non-overlap + accuracy.
 4. Prohibited scraping was not selected.
 

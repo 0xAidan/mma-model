@@ -41,6 +41,7 @@ AccessStatus = Literal[
     "quota_exceeded",
     "ok",
     "request_failed",
+    "unknown",
 ]
 ObservationStatus = Literal["present", "absent", "unknown", "request_failed"]
 MetricStatus = Literal["measured", "unknown", "blocked", "not_applicable"]
@@ -140,7 +141,10 @@ SECRET_KEY_FRAGMENTS = (
     "token",
     "secret",
     "credential",
+    "subscription-key",
+    "ocp-apim",
 )
+SPORTSDATAIO_AUTH_HEADER = "Ocp-Apim-Subscription-Key"
 
 PAYLOAD_KEY_FRAGMENTS = (
     "raw_payload",
@@ -174,6 +178,7 @@ def _as_access_status(value: Any) -> AccessStatus:
         "quota_exceeded",
         "ok",
         "request_failed",
+        "unknown",
     }
     if text in allowed:
         return text  # type: ignore[return-value]
@@ -369,6 +374,12 @@ def classify_provider_access(
     body: Mapping[str, Any] | None,
     authenticated_ok_prior: bool = False,
 ) -> AccessStatus:
+    """Classify HTTP access outcomes without inventing entitlement from auth failures.
+
+    Entitlement may be claimed only after authentication has already succeeded in
+    the same probe session (``authenticated_ok_prior=True``). Generic first-call
+    401/403 bodies containing words like ``access`` are ``auth_failed``.
+    """
     if not api_key:
         return "not_configured"
     if http_status is None:
@@ -377,15 +388,37 @@ def classify_provider_access(
         return "quota_exceeded"
     if http_status in {401, 403}:
         text = json.dumps(body or {}).lower()
-        if (
-            authenticated_ok_prior
-            or "tier" in text
-            or "entitlement" in text
-            or "plan" in text
-            or "access" in text
-        ):
+        # Auth must be established independently before entitlement classification.
+        if not authenticated_ok_prior:
+            return "auth_failed"
+
+        auth_loss_markers = (
+            "invalid api key",
+            "invalid key",
+            "api key not valid",
+            "authentication failed",
+            "not authenticated",
+            "unauthorized",
+        )
+        entitlement_markers = (
+            "tier",
+            "entitlement",
+            "subscription",
+            "plan",
+            "feed",
+            "package",
+            "does not include",
+        )
+        has_auth_loss = any(marker in text for marker in auth_loss_markers)
+        has_entitlement = any(marker in text for marker in entitlement_markers)
+        empty_body = not text or text in {"{}", "null"}
+
+        if has_auth_loss and not has_entitlement:
+            return "auth_failed"
+        if has_entitlement or empty_body:
             return "entitlement_blocked"
-        return "auth_failed"
+        # Ambiguous post-auth denial: fail closed — do not claim entitlement.
+        return "unknown"
     if http_status >= 400:
         return "request_failed"
     return "ok"
@@ -1363,7 +1396,12 @@ def evaluate_required_features(
 
 
 def evaluate_pit_fitness(probe: Mapping[str, Any]) -> dict[str, Any]:
-    """Measure or leave unknown; never auto-fail solely because HTTP succeeded."""
+    """Measure or leave unknown; never auto-fail solely because HTTP succeeded.
+
+    PIT pass requires every explicit dimension to pass: pre-fight reconstruction,
+    revision/correction support, and publication/source-update timestamps.
+    Missing or unknown timestamp proof can never produce ``status=pass``.
+    """
     latencies = list(probe.get("latencies_ms") or [])
     latency_p50 = None
     if latencies:
@@ -1372,6 +1410,10 @@ def evaluate_pit_fitness(probe: Mapping[str, Any]) -> dict[str, Any]:
 
     reconstruction = probe.get("pre_fight_reconstruction_status")
     revision = probe.get("revision_support_status")
+    publication = probe.get("publication_timestamp_status")
+    if publication is None:
+        publication = probe.get("source_update_timestamp_status")
+
     reasons: list[str] = []
     if reconstruction not in {"pass", "fail"}:
         reasons.append("pre_fight_reconstruction_unproven")
@@ -1383,11 +1425,17 @@ def evaluate_pit_fitness(probe: Mapping[str, Any]) -> dict[str, Any]:
         revision_status: GateStatus = "unknown"
     else:
         revision_status = _as_gate_status(revision)
+    if publication not in {"pass", "fail"}:
+        reasons.append("publication_timestamps_unproven")
+        publication_status: GateStatus = "unknown"
+    else:
+        publication_status = _as_gate_status(publication)
 
-    if reconstruction_status == "pass" and revision_status == "pass":
+    dimensions = (reconstruction_status, revision_status, publication_status)
+    if all(status == "pass" for status in dimensions):
         status: GateStatus = "pass"
         reason = None
-    elif reconstruction_status == "fail" or revision_status == "fail":
+    elif any(item == "fail" for item in dimensions):
         status = "fail"
         reason = "pit_dimension_failed"
     else:
@@ -1407,9 +1455,44 @@ def evaluate_pit_fitness(probe: Mapping[str, Any]) -> dict[str, Any]:
         "reason": reason,
         "pre_fight_reconstruction": reconstruction_status,
         "revision_support": revision_status,
+        "publication_timestamps": publication_status,
         "latency_ms_p50": latency_p50,
         "request_cost_units": probe.get("request_count"),
         "field_null_rates": dict(null_rates),
+    }
+
+
+def build_sportsdataio_get_request(*, path: str, api_key: str) -> dict[str, Any]:
+    """Construct a SportsDataIO GET using header auth only (no key in URL/query)."""
+    normalized = path if str(path).startswith("/") else f"/{path}"
+    return {
+        "method": "GET",
+        "url": f"{SPORTSDATAIO_BASE}{normalized}",
+        "headers": {SPORTSDATAIO_AUTH_HEADER: api_key},
+        "params": {},
+    }
+
+
+def redact_sportsdataio_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Sanitize a SportsDataIO request object for logs/tests (never emit the key)."""
+    headers_in = (
+        dict(request["headers"]) if isinstance(request.get("headers"), Mapping) else {}
+    )
+    headers_out: dict[str, str] = {}
+    for key, value in headers_in.items():
+        if str(key).lower() in {
+            SPORTSDATAIO_AUTH_HEADER.lower(),
+            "authorization",
+        } or any(frag in str(key).lower() for frag in SECRET_KEY_FRAGMENTS):
+            headers_out[str(key)] = "[REDACTED]"
+        else:
+            headers_out[str(key)] = str(value)
+    url = str(request.get("url") or "")
+    return {
+        "method": request.get("method") or "GET",
+        "url": _redact_url(url),
+        "headers": headers_out,
+        "params": {},
     }
 
 
@@ -1649,12 +1732,31 @@ def _redact_url(url: str) -> str:
         (
             key,
             "[REDACTED]"
-            if any(frag in key.lower() for frag in SECRET_KEY_FRAGMENTS)
+            if key.lower() == "key"
+            or any(frag in key.lower() for frag in SECRET_KEY_FRAGMENTS)
             else value,
         )
         for key, value in parse_qsl(parts.query, keep_blank_values=True)
     ]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _redact_secret_text(text: str) -> str:
+    """Strip common credential shapes from free-form log/error strings."""
+    redacted = text
+    redacted = re.sub(
+        r"(?i)(api[_-]?key=|authorization:\s*)(\S+)",
+        r"\1[REDACTED]",
+        redacted,
+    )
+    # Bare query/form key=... (SportsDataIO docs allow query auth; we never emit it).
+    redacted = re.sub(r"(?i)(\bkey=)([^\s&\"']+)", r"\1[REDACTED]", redacted)
+    redacted = re.sub(
+        r"(?i)(Ocp-Apim-Subscription-Key\s*[:=]\s*)(\S+)",
+        r"\1[REDACTED]",
+        redacted,
+    )
+    return redacted
 
 
 def redact_scorecard(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1677,14 +1779,7 @@ def redact_scorecard(payload: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, list):
             return [_walk(item) for item in value]
         if isinstance(value, str):
-            redacted = value
-            if re.search(r"(?i)(api[_-]?key=|authorization:\s*)\S+", redacted):
-                redacted = re.sub(
-                    r"(?i)(api[_-]?key=|authorization:\s*)(\S+)",
-                    r"\1[REDACTED]",
-                    redacted,
-                )
-            return redacted
+            return _redact_secret_text(value)
         return value
 
     return _walk(dict(payload))
@@ -1766,6 +1861,7 @@ def _empty_provider_metrics(
             "reason": unknown,
             "pre_fight_reconstruction": "unknown",
             "revision_support": "unknown",
+            "publication_timestamps": "unknown",
             "latency_ms_p50": None,
             "request_cost_units": None,
             "field_null_rates": {"status": "unknown", "reason": unknown, "fields": {}},
@@ -1814,6 +1910,7 @@ def measure_balldontlie_from_observations(
     request_count: int | None = None,
     pre_fight_reconstruction_status: str | None = None,
     revision_support_status: str | None = None,
+    publication_timestamp_status: str | None = None,
     field_null_rates: Mapping[str, Any] | None = None,
     years_with_any_provider_dwcs_named_events: int | None = None,
 ) -> dict[str, Any]:
@@ -1849,6 +1946,7 @@ def measure_balldontlie_from_observations(
             "request_count": request_count,
             "pre_fight_reconstruction_status": pre_fight_reconstruction_status,
             "revision_support_status": revision_support_status,
+            "publication_timestamp_status": publication_timestamp_status,
             "field_null_rates": field_null_rates,
         }
     )
@@ -2548,6 +2646,7 @@ def evaluate_sportsdataio_universe_gates(
             ),
             "pre_fight_reconstruction": "unknown",
             "revision_support": "unknown",
+            "publication_timestamps": "unknown",
             "latency_ms_p50": None,
             "request_cost_units": None,
             "field_null_rates": {
@@ -2644,7 +2743,6 @@ def probe_sportsdataio_live(
     max_stat_probes: int = 8,
 ) -> dict[str, Any]:
     """Credentialed SportsDataIO probe. Returns sanitized aggregates only."""
-    headers = {"Ocp-Apim-Subscription-Key": api_key}
     request_count = 0
     latencies: list[float] = []
     access: AccessStatus = "ok"
@@ -2661,13 +2759,15 @@ def probe_sportsdataio_live(
         if request_count > 0 and polite_delay_sec > 0:
             sleep_fn(polite_delay_sec)
         request_count += 1
+        request = build_sportsdataio_get_request(path=path, api_key=api_key)
         started = time.perf_counter()
         try:
             with httpx.Client(timeout=timeout_sec) as client:
                 response = client.get(
-                    f"{SPORTSDATAIO_BASE}{path}",
-                    headers=headers,
-                    params={"key": api_key},
+                    str(request["url"]),
+                    headers=dict(request["headers"]),
+                    # Header auth only — never put the key in query/URL.
+                    params=dict(request.get("params") or {}),
                 )
             latencies.append((time.perf_counter() - started) * 1000.0)
             try:
@@ -2720,8 +2820,8 @@ def probe_sportsdataio_live(
             f"/scores/json/Schedule/{SPORTSDATAIO_LEAGUE}/{season}"
         )
         season_access[season] = access
-        if access == "entitlement_blocked":
-            # Restore access for subsequent seasons after a season-scoped block.
+        if access in {"entitlement_blocked", "unknown"}:
+            # Restore access for subsequent seasons after a season-scoped denial.
             access = "ok"
             error = None
             continue
@@ -2908,9 +3008,10 @@ def probe_sportsdataio_live(
             "latencies_ms": latencies,
             "request_count": request_count,
             # Pre-fight record fields exist on accessible Event cards, but that is
-            # not full historical reconstruction / revision evidence.
+            # not full historical reconstruction / revision / publication evidence.
             "pre_fight_reconstruction_status": None,
             "revision_support_status": None,
+            "publication_timestamp_status": None,
             "field_null_rates": {
                 "status": "unknown",
                 "reason": "full_universe_field_nulls_not_probed",
@@ -2942,7 +3043,7 @@ def probe_sportsdataio_live(
         "dwcs_event_name_filter": "strict_dana_white_contender_or_dwcs",
         "stat_probe": "bounded_FightFinal_diagnostic_only",
         "max_stat_probes": max_stat_probes,
-        "auth_mode": "subscription_key_header_or_query",
+        "auth_mode": "subscription_key_header_only",
     }
     if gated.get("error") is None and error:
         gated["error"] = error

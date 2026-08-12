@@ -621,7 +621,8 @@
           },
           "latency_ms_p50": 258.4521658718586,
           "pre_fight_reconstruction": "unknown",
-          "reason": "pre_fight_reconstruction_unproven,revision_support_unproven",
+          "publication_timestamps": "unknown",
+          "reason": "pre_fight_reconstruction_unproven,revision_support_unproven,publication_timestamps_unproven",
           "request_cost_units": 259,
           "revision_support": "unknown",
           "status": "unknown"
@@ -1021,9 +1022,10 @@
             "reason": "full_universe_field_nulls_not_probed",
             "status": "unknown"
           },
-          "latency_ms_p50": 182.27741681039333,
+          "latency_ms_p50": null,
           "pre_fight_reconstruction": "unknown",
-          "reason": "pre_fight_reconstruction_unproven,revision_support_unproven",
+          "publication_timestamps": "unknown",
+          "reason": "pre_fight_reconstruction_unproven,revision_support_unproven,publication_timestamps_unproven",
           "request_cost_units": 23,
           "revision_support": "unknown",
           "status": "unknown"
@@ -1120,7 +1122,7 @@
           2024,
           2025
         ],
-        "auth_mode": "subscription_key_header_or_query",
+        "auth_mode": "subscription_key_header_only",
         "dwcs_event_name_filter": "strict_dana_white_contender_or_dwcs",
         "event_discovery": "Schedule_by_season_then_Event_by_id",
         "league": "UFC",

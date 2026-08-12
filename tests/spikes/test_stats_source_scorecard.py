@@ -238,11 +238,13 @@ def test_not_configured_distinct_from_absent_and_auth_failed(audit: Any) -> None
         )
         == "auth_failed"
     )
+    # Without independently established auth, entitlement must not be inferred
+    # from generic body keywords such as "access" / "tier".
     assert (
         audit.classify_provider_access(
             api_key="k", http_status=401, body={"error": "tier does not have access"}
         )
-        == "entitlement_blocked"
+        == "auth_failed"
     )
     assert (
         audit.classify_provider_access(
@@ -257,6 +259,52 @@ def test_not_configured_distinct_from_absent_and_auth_failed(audit: Any) -> None
         audit.classify_provider_access(api_key="k", http_status=429, body=None)
         == "quota_exceeded"
     )
+
+
+def test_classify_access_requires_prior_auth_for_entitlement(audit: Any) -> None:
+    """Invalid/generic first-call denial is auth_failed, never entitlement."""
+    sentinel = "SENTINEL_SDIO_KEY_DO_NOT_LEAK"
+    assert (
+        audit.classify_provider_access(
+            api_key=sentinel,
+            http_status=401,
+            body={"Message": "Access denied due to invalid subscription key"},
+            authenticated_ok_prior=False,
+        )
+        == "auth_failed"
+    )
+    assert (
+        audit.classify_provider_access(
+            api_key=sentinel,
+            http_status=403,
+            body={"error": "forbidden access"},
+            authenticated_ok_prior=False,
+        )
+        == "auth_failed"
+    )
+    # Valid auth established, then historical/feed denial => entitlement_blocked.
+    assert (
+        audit.classify_provider_access(
+            api_key=sentinel,
+            http_status=401,
+            body={
+                "Code": 401,
+                "Description": "Subscription does not include this historical feed",
+            },
+            authenticated_ok_prior=True,
+        )
+        == "entitlement_blocked"
+    )
+    # Ambiguous post-auth denial fails closed (unknown), never silent entitlement pass.
+    ambiguous = audit.classify_provider_access(
+        api_key=sentinel,
+        http_status=403,
+        body={"note": "temporary denial please retry later"},
+        authenticated_ok_prior=True,
+    )
+    assert ambiguous in {"unknown", "auth_failed"}
+    assert ambiguous != "entitlement_blocked"
+    assert ambiguous != "ok"
     assert (
         audit.classify_observation_status(
             access_status="ok", matched=False, request_failed=False
@@ -783,11 +831,14 @@ def test_pit_and_required_features_unknown_not_auto_fail(audit: Any) -> None:
             "request_count": 12,
             "pre_fight_reconstruction_status": None,
             "revision_support_status": None,
+            "publication_timestamp_status": None,
         }
     )
     assert pit["status"] == "unknown"
     assert pit["latency_ms_p50"] == 20.0
     assert pit["request_cost_units"] == 12
+    assert pit["publication_timestamps"] == "unknown"
+    assert "publication_timestamps_unproven" in str(pit.get("reason") or "")
 
     required = audit.evaluate_required_features(
         [{"id": 1, "fighter1": {}, "fighter2": {}, "status": "completed", "date": "2024-01-01"}],
@@ -795,6 +846,42 @@ def test_pit_and_required_features_unknown_not_auto_fail(audit: Any) -> None:
     )
     assert required["status"] == "unknown"
     assert required["reason"] == "stat_samples_not_probed"
+
+
+def test_pit_pass_requires_publication_timestamp_proof(audit: Any) -> None:
+    """Missing/unknown source-update timestamps can never produce PIT pass."""
+    almost = audit.evaluate_pit_fitness(
+        {
+            "pre_fight_reconstruction_status": "pass",
+            "revision_support_status": "pass",
+            "publication_timestamp_status": None,
+        }
+    )
+    assert almost["status"] == "unknown"
+    assert almost["publication_timestamps"] == "unknown"
+    assert almost["status"] != "pass"
+
+    failed_ts = audit.evaluate_pit_fitness(
+        {
+            "pre_fight_reconstruction_status": "pass",
+            "revision_support_status": "pass",
+            "publication_timestamp_status": "fail",
+        }
+    )
+    assert failed_ts["status"] == "fail"
+    assert failed_ts["publication_timestamps"] == "fail"
+
+    full = audit.evaluate_pit_fitness(
+        {
+            "pre_fight_reconstruction_status": "pass",
+            "revision_support_status": "pass",
+            "publication_timestamp_status": "pass",
+            "latencies_ms": [5.0],
+            "request_count": 1,
+        }
+    )
+    assert full["status"] == "pass"
+    assert full["publication_timestamps"] == "pass"
 
 
 def test_sampled_stats_cannot_produce_global_required_features_pass(audit: Any) -> None:
@@ -1012,6 +1099,7 @@ def test_synthetic_measured_path_metric_math(
         request_count=9,
         pre_fight_reconstruction_status="pass",
         revision_support_status="pass",
+        publication_timestamp_status="pass",
         field_null_rates={"status": "measured", "fields": {"result_time": 0.0}},
         years_with_any_provider_dwcs_named_events=2,
     )
@@ -1206,6 +1294,10 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert "revision_support_unproven" in str(
         metrics["pit_fitness"].get("reason") or ""
     )
+    assert "publication_timestamps_unproven" in str(
+        metrics["pit_fitness"].get("reason") or ""
+    )
+    assert metrics["pit_fitness"]["publication_timestamps"] == "unknown"
     identity = metrics["difficult_identity_coverage"]
     assert identity["status"] == "measured"
     assert identity["hit"] == 50
@@ -1239,6 +1331,7 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
         "2024": "entitlement_blocked",
         "2025": "ok",
     }
+    assert sdio["probe_notes"]["auth_mode"] == "subscription_key_header_only"
     diag = sdio["accessible_season_diagnostics"]
     assert diag["seasons_ok"] == [2025]
     assert diag["seasons_entitlement_blocked"] == [2023, 2024]
@@ -1250,6 +1343,10 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert sdio["metrics"]["bout_coverage"]["numerator"] is None
     assert sdio["metrics"]["required_features"]["status"] == "unknown"
     assert sdio["metrics"]["pit_fitness"]["status"] == "unknown"
+    assert sdio["metrics"]["pit_fitness"]["publication_timestamps"] == "unknown"
+    assert "publication_timestamps_unproven" in str(
+        sdio["metrics"]["pit_fitness"].get("reason") or ""
+    )
     assert sdio["metrics"]["difficult_identity_coverage"]["hit"] == 50
     assert sdio["rights"]["status"] == "unknown"
     assert sdio["documented_public"]["status"] == "quote_pending"
@@ -1360,6 +1457,38 @@ def test_sportsdataio_401_after_auth_is_entitlement_blocked(audit: Any) -> None:
         authenticated_ok_prior=True,
     )
     assert access == "entitlement_blocked"
+
+
+def test_sportsdataio_request_uses_header_auth_only(audit: Any) -> None:
+    """Official least-exposing auth: header only; never put key in URL/query."""
+    sentinel = "SENTINEL_SDIO_KEY_DO_NOT_LEAK"
+    request = audit.build_sportsdataio_get_request(
+        path="/scores/json/Leagues",
+        api_key=sentinel,
+    )
+    assert request["method"] == "GET"
+    assert request["url"] == "https://api.sportsdata.io/v3/mma/scores/json/Leagues"
+    assert "key=" not in request["url"].lower()
+    assert request.get("params") in ({}, None)
+    assert request["headers"]["Ocp-Apim-Subscription-Key"] == sentinel
+    assert sentinel not in json.dumps(
+        {k: v for k, v in request.items() if k != "headers"}
+    )
+
+    redacted = audit.redact_sportsdataio_request(request)
+    blob = json.dumps(redacted)
+    assert sentinel not in blob
+    assert "key=" not in blob.lower()
+    assert redacted["headers"]["Ocp-Apim-Subscription-Key"] == "[REDACTED]"
+    # Error/log shapes must also redact.
+    leaky = {
+        "error": f"request failed for key={sentinel}",
+        "request_url": f"{request['url']}?key={sentinel}",
+    }
+    cleaned = audit.redact_scorecard(leaky)
+    cleaned_blob = json.dumps(cleaned)
+    assert sentinel not in cleaned_blob
+    assert "key=[REDACTED]" in cleaned_blob or "[REDACTED]" in cleaned_blob
 
 
 def test_sportsdataio_partial_season_cannot_pass_global_features(audit: Any) -> None:
