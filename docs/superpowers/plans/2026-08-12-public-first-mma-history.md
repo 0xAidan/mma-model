@@ -26,10 +26,11 @@
 
 | Path | Owner ticket | Responsibility |
 |------|--------------|----------------|
-| `config/sources/source_policy_v1.json` | prerequisite (done) | Policy contract |
-| `config/sources/pit_proxy_v1.json` | DWCS-102 | Frozen publication-proxy rule |
-| `config/sources/http_politeness_v1.json` | DWCS-102 | Per-host rate/backoff/UA |
-| `src/mma_model/sources/policy.py` | prerequisite + DWCS-102 | Load/validate policy |
+| `config/sources/source_policy_v1.json` | prerequisite (already merged) | Canonical IDs + observation metadata + persistence contract |
+| `src/mma_model/sources/policy.py` | prerequisite (already merged) | Deeply immutable fail-closed loader |
+| `config/sources/pit_proxy_v1.json` | DWCS-102 Task 1 | Frozen publication-proxy rule |
+| `config/sources/http_politeness_v1.json` | DWCS-102 Task 1 | Per-host rate/backoff/UA |
+| `migrations/versions/0006_observation_pit_metadata.py` | DWCS-102 Task 2 | Persist four-clock PIT/quality/attributes |
 | `src/mma_model/sources/http/polite_client.py` | DWCS-102 | Shared polite HTTP |
 | `src/mma_model/sources/http/block_signals.py` | DWCS-102 | Detect/stop on blocks |
 | `src/mma_model/sources/ufcstats_public/client.py` | DWCS-102 | Snapshot GET + cache |
@@ -57,55 +58,78 @@
 
 ---
 
-### Task 1: Policy loader + PIT proxy + politeness contracts (DWCS-102 prelude)
+### Prerequisite already merged (do not recreate)
+
+These files are already present from the DWCS-003 policy PR and must be treated as
+given inputs for every later task:
+
+- `config/sources/source_policy_v1.json` (canonical source IDs + observation metadata + `dwcs_102_persistence`)
+- `src/mma_model/sources/policy.py` (`load_source_policy`, frozen `SourcePolicy`, fail-closed nested validation)
+- `tests/sources/test_source_policy.py`
+- Design/plan/ADR/scorecard handoff updates
+
+Canonical source IDs (exhaustive; no aliases): `ufcstats_public`, `mma_ai_bootstrap`,
+`tapology_public`, `sherdog_public`, `combat_registry`, `wikidata`,
+`bestfightodds_archive`, `the_odds_api`, `sportsdataio`, `balldontlie`,
+`explicit_missing`.
+
+---
+
+### Task 1: PIT proxy + HTTP politeness contracts (DWCS-102 prelude)
 
 **Files:**
-- Create: `src/mma_model/sources/policy.py`
+- Already present: `config/sources/source_policy_v1.json`, `src/mma_model/sources/policy.py`, `tests/sources/test_source_policy.py`
 - Create: `config/sources/pit_proxy_v1.json`
 - Create: `config/sources/http_politeness_v1.json`
-- Create: `tests/sources/test_source_policy.py`
-- Modify: `src/mma_model/sources/__init__.py` (export loader symbols only)
+- Create: `src/mma_model/sources/pit_proxy.py`
+- Create: `src/mma_model/sources/http_politeness.py`
+- Create: `tests/sources/test_pit_proxy.py`
+- Create: `tests/sources/test_http_politeness.py`
+- Modify: `src/mma_model/sources/__init__.py` (export new loaders only; do not rewrite `load_source_policy`)
 
 **Interfaces:**
+- Consumes: `load_source_policy()` already merged; `observation_metadata.quality_tier_values` / `timestamp_quality_values`
 - Produces:
-  - `load_source_policy(path: Path | None = None) -> SourcePolicy`
-  - `SourcePolicy` pydantic model with fields mirroring `source_policy_v1.json` (`policy_mode`, `gates_retained`, `deterministic_fallback_order`, `kill_criteria`, `roles`)
-  - `load_pit_proxy_rule(path: Path | None = None) -> PitProxyRule` with `rule_id`, `rule_version`, `delay_iso8601`, `applies_to`
+  - `load_pit_proxy_rule(path: Path | None = None) -> PitProxyRule`
+  - `PitProxyRule(rule_id: str, rule_version: str, delay_iso8601: str, applies_to: tuple[str, ...], forbidden_for: tuple[str, ...], max_quality_tier_when_proxy: Literal["silver"])`
   - `load_http_politeness(path: Path | None = None) -> HttpPolitenessConfig`
+  - `HttpPolitenessConfig` frozen model with per-host `min_delay_sec`, `max_concurrency`, `max_retries`, `backoff_base_sec`, `backoff_cap_sec`, `user_agent`, `contact`, `stop_status_codes`
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 from pathlib import Path
+import pytest
 from mma_model.sources.policy import load_source_policy
 
 ROOT = Path(__file__).resolve().parents[2]
 
-def test_load_source_policy_public_first_mode():
-    policy = load_source_policy(ROOT / "config/sources/source_policy_v1.json")
-    assert policy.policy_mode == "public_first_hybrid_personal_project"
-    assert policy.licensed_audit_status.decision_primary is None
-    assert policy.gates_retained.dwcs_universe_bouts == 440
-    assert policy.gates_retained.future_row_leakage_failures_max == 0
-    assert policy.identity_rules.same_name_auto_merge is False
+def test_load_pit_proxy_rule_silver_ceiling():
+    from mma_model.sources.pit_proxy import load_pit_proxy_rule
+    policy = load_source_policy()
+    rule = load_pit_proxy_rule(ROOT / "config/sources/pit_proxy_v1.json")
+    assert rule.rule_id == "event_completion_plus_delay"
+    assert rule.delay_iso8601 == "P1D"
+    assert rule.max_quality_tier_when_proxy == "silver"
+    assert rule.max_quality_tier_when_proxy in policy.observation_metadata.quality_tier_values
 
-def test_unknown_policy_mode_hard_fails(tmp_path: Path):
-    bad = tmp_path / "bad.json"
-    bad.write_text('{"schema_version":1,"policy_mode":"licensed_only","gates_retained":{}}', encoding="utf-8")
-    import pytest
-    from mma_model.sources.policy import load_source_policy, UnknownSourcePolicyError
-    with pytest.raises(UnknownSourcePolicyError):
-        load_source_policy(bad)
+def test_load_http_politeness_requires_contact_and_stop_codes():
+    from mma_model.sources.http_politeness import load_http_politeness
+    cfg = load_http_politeness(ROOT / "config/sources/http_politeness_v1.json")
+    assert cfg.hosts["ufcstats.com"].min_delay_sec >= 0.75
+    assert 403 in cfg.hosts["ufcstats.com"].stop_status_codes
+    assert cfg.user_agent
+    assert cfg.contact
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/sources/test_source_policy.py::test_load_source_policy_public_first_mode -v`  
-Expected: FAIL with `ModuleNotFoundError` or `ImportError` for `mma_model.sources.policy`
+Run: `pytest tests/sources/test_pit_proxy.py::test_load_pit_proxy_rule_silver_ceiling -v`  
+Expected: FAIL with `ModuleNotFoundError` for `mma_model.sources.pit_proxy` (policy loader already imports successfully)
 
 - [ ] **Step 3: Write minimal implementation**
 
-Implement `SourcePolicy` / `load_source_policy` with `extra="forbid"`, allowlist `policy_mode` values exactly `{"public_first_hybrid_personal_project"}` for v1, and raise `UnknownSourcePolicyError` otherwise. Add `pit_proxy_v1.json`:
+Create `pit_proxy_v1.json`:
 
 ```json
 {
@@ -118,24 +142,119 @@ Implement `SourcePolicy` / `load_source_policy` with `extra="forbid"`, allowlist
 }
 ```
 
-Add `http_politeness_v1.json` with per-host `min_delay_sec`, `max_concurrency=1`, `max_retries`, `backoff_base_sec`, `backoff_cap_sec`, `user_agent`, `contact`, `stop_status_codes=[403,429,503]`.
+Create `http_politeness_v1.json` with hosts `ufcstats.com`, `tapology.com`, `sherdog.com`, `combatreg.com`, `bestfightodds.com` each defining `min_delay_sec`, `max_concurrency=1`, `max_retries`, `backoff_base_sec`, `backoff_cap_sec`, `stop_status_codes=[403,429,503]`, plus top-level `user_agent` and `contact`. Implement frozen loaders; do not recreate `policy.py`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/sources/test_source_policy.py -q`  
+Run: `pytest tests/sources/test_pit_proxy.py tests/sources/test_http_politeness.py tests/sources/test_source_policy.py -q`  
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add config/sources/pit_proxy_v1.json config/sources/http_politeness_v1.json \
-  src/mma_model/sources/policy.py tests/sources/test_source_policy.py
-git commit -m "feat(sources): Load public-first source policy contracts"
+  src/mma_model/sources/pit_proxy.py src/mma_model/sources/http_politeness.py \
+  src/mma_model/sources/__init__.py \
+  tests/sources/test_pit_proxy.py tests/sources/test_http_politeness.py
+git commit -m "feat(sources): Add PIT proxy and HTTP politeness contracts"
 ```
 
 ---
 
-### Task 2: Polite HTTP client with block-signal stop (DWCS-102)
+### Task 2: Persist four-clock PIT + quality metadata (DWCS-102)
+
+**Files:**
+- Create: `migrations/versions/0006_observation_pit_metadata.py`
+- Modify: `src/mma_model/db/tables/provenance.py` (`RawObservation` columns)
+- Modify: `src/mma_model/sources/contracts.py` (`SourceObservationRecord` first-class PIT/quality fields)
+- Modify: `src/mma_model/ingest/repository.py` (persist attributes + new columns; round-trip)
+- Create: `tests/ingest/test_pit_metadata_roundtrip.py`
+- Modify: `tests/ingest/test_repository.py` only if existing fixtures need new required fields
+
+**Interfaces:**
+- Consumes: `load_source_policy().observation_metadata` and `.dwcs_102_persistence`
+- Produces updated `SourceObservationRecord` fields:
+  - `observed_at: datetime`
+  - `source_published_at: datetime | None`
+  - `source_updated_at: datetime | None`
+  - `effective_at: datetime`
+  - `proxy_published_at: datetime | None`
+  - `timestamp_quality: TimestampQualityId`
+  - `timestamp_quality_source: str | None`
+  - `quality_tier: QualityTierId`
+  - `attributes: Mapping[str, object]` (frozen)
+  - `payload_hash: str`, `raw_ref: str | None`, `raw_blob_absent: bool`
+- `RawObservation` gains matching nullable/typed columns plus `attributes_json: str` (JSON object)
+- `IngestRepository.commit_batch` must persist all of the above; reading back must equal written silver and gold rows
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+from datetime import datetime, timezone
+from mma_model.sources.contracts import DetailLevel, SourceObservationRecord
+from mma_model.sources.policy import load_source_policy
+
+def test_round_trip_silver_vs_gold_quality_tier(repo, raw_store):
+    policy = load_source_policy()
+    assert "round_trip_silver_vs_gold_quality_tier" in policy.dwcs_102_persistence.required_tests
+    observed = datetime(2026, 8, 12, 15, 0, tzinfo=timezone.utc)
+    gold = SourceObservationRecord(
+        source="ufcstats_public",
+        stream="fight_details",
+        external_id="fight-gold",
+        entity_kind="bout_stat",
+        observed_at=observed,
+        source_published_at=datetime(2019, 1, 2, tzinfo=timezone.utc),
+        source_updated_at=datetime(2019, 1, 2, tzinfo=timezone.utc),
+        effective_at=datetime(2019, 1, 1, tzinfo=timezone.utc),
+        proxy_published_at=None,
+        timestamp_quality="direct_source_timestamp",
+        timestamp_quality_source="ufcstats_public",
+        quality_tier="gold",
+        payload_hash="a" * 64,
+        raw_ref="a" * 64,
+        detail_level=DetailLevel.VERIFIED,
+        attributes={"significant_strikes_landed": 12},
+    )
+    silver = gold.model_copy(update={
+        "external_id": "fight-silver",
+        "source_published_at": None,
+        "proxy_published_at": datetime(2019, 1, 2, tzinfo=timezone.utc),
+        "timestamp_quality": "publication_proxy",
+        "timestamp_quality_source": "event_completion_plus_delay@1",
+        "quality_tier": "silver",
+        "payload_hash": "b" * 64,
+        "raw_ref": "b" * 64,
+    })
+    # commit both via repository; reload; assert quality_tier and proxy/publish clocks survive
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/ingest/test_pit_metadata_roundtrip.py::test_round_trip_silver_vs_gold_quality_tier -v`  
+Expected: FAIL because `SourceObservationRecord` lacks PIT/quality fields and/or repository drops attributes
+
+- [ ] **Step 3: Write minimal implementation**
+
+Add migration `0006_observation_pit_metadata` columns listed in `dwcs_102_persistence.table_columns.raw_observations`. Extend the contract and repository so commit/read round-trips preserve silver vs gold. Reject `detail_level=verified` when required metadata from `observation_metadata` is missing. Do not implement HTTP adapters in this task.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/ingest/test_pit_metadata_roundtrip.py tests/ingest/test_repository.py tests/db/test_migrations.py -q`  
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add migrations/versions/0006_observation_pit_metadata.py \
+  src/mma_model/db/tables/provenance.py src/mma_model/sources/contracts.py \
+  src/mma_model/ingest/repository.py tests/ingest/test_pit_metadata_roundtrip.py
+git commit -m "feat(ingest): Persist four-clock PIT and quality metadata"
+```
+
+---
+
+### Task 3: Polite HTTP client with block-signal stop (DWCS-102)
 
 **Files:**
 - Create: `src/mma_model/sources/http/__init__.py`
@@ -191,7 +310,7 @@ git commit -m "feat(sources): Add polite HTTP client with block stops"
 
 ---
 
-### Task 3: UFCStats public parser + mapper (DWCS-102)
+### Task 4: UFCStats public parser + mapper (DWCS-102)
 
 **Files:**
 - Create: `src/mma_model/sources/ufcstats_public/__init__.py`
@@ -257,7 +376,7 @@ git commit -m "feat(ufcstats): Add public snapshot parser and mapper"
 
 ---
 
-### Task 4: UFCStats adapter + CLI audit + repository integration (DWCS-102)
+### Task 5: UFCStats adapter + CLI audit + repository integration (DWCS-102)
 
 **Files:**
 - Create: `src/mma_model/sources/ufcstats_public/client.py`
@@ -310,7 +429,7 @@ git commit -m "feat(ufcstats): Wire public adapter and source audit CLI"
 
 ---
 
-### Task 5: mma-ai bootstrap reconciliation (DWCS-102)
+### Task 6: mma-ai bootstrap reconciliation (DWCS-102)
 
 **Files:**
 - Create: `src/mma_model/sources/mma_ai_bootstrap/__init__.py`
@@ -368,7 +487,7 @@ git commit -m "feat(sources): Gate mma-ai bootstrap behind reconciliation"
 
 ---
 
-### Task 6: DWCS manifest-first history ingest (DWCS-103)
+### Task 7: DWCS manifest-first history ingest (DWCS-103)
 
 **Files:**
 - Create: `src/mma_model/dwcs/__init__.py`
@@ -419,7 +538,7 @@ git commit -m "feat(dwcs): Ingest frozen manifest before provider facts"
 
 ---
 
-### Task 7: Deterministic identity resolution + review queue (DWCS-104)
+### Task 8: Deterministic identity resolution + review queue (DWCS-104)
 
 **Files:**
 - Create: `src/mma_model/identity/__init__.py`
@@ -427,7 +546,7 @@ git commit -m "feat(dwcs): Ingest frozen manifest before provider facts"
 - Create: `src/mma_model/identity/resolver.py`
 - Create: `src/mma_model/identity/review.py`
 - Create: `src/mma_model/db/tables/identity.py`
-- Create: `migrations/versions/0006_identity_review_queue.py`
+- Create: `migrations/versions/0007_identity_review_queue.py`
 - Create: `tests/identity/test_resolver.py`
 - Create: `tests/identity/test_review_queue.py`
 - Modify: `src/mma_model/cli.py` (`identity audit|approve|reject`)
@@ -470,13 +589,13 @@ Expected: PASS; adjudicated fixture precision/recall documented in test (≥99.5
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/mma_model/identity src/mma_model/db/tables/identity.py migrations/versions/0006_identity_review_queue.py tests/identity src/mma_model/cli.py
+git add src/mma_model/identity src/mma_model/db/tables/identity.py migrations/versions/0007_identity_review_queue.py tests/identity src/mma_model/cli.py
 git commit -m "feat(identity): Exact-ID resolver with reversible review queue"
 ```
 
 ---
 
-### Task 8: Regional enrichment chain (DWCS-105)
+### Task 9: Regional enrichment chain (DWCS-105)
 
 **Files:**
 - Create: `src/mma_model/sources/tapology_public/{client,parser,mapper,adapter,errors}.py`
@@ -539,7 +658,7 @@ git commit -m "feat(history): Add regional public enrichment and PIT reconstruct
 
 ---
 
-### Task 9: Coverage tiers + strict health + leakage gates (DWCS-106)
+### Task 10: Coverage tiers + strict health + leakage gates (DWCS-106)
 
 **Files:**
 - Create: `src/mma_model/quality/__init__.py`
@@ -599,7 +718,7 @@ git commit -m "feat(quality): Publish tiered coverage and strict health gates"
 
 ---
 
-### Task 10: Odds lane seam notes (non-feature default)
+### Task 11: Odds lane seam notes (non-feature default)
 
 **Files:**
 - Create: `docs/data/odds-lane.md`
@@ -654,7 +773,7 @@ git commit -m "docs(odds): Lock odds as separate lane under public-first policy"
 
 | Host class | min_delay_sec | max_retries | backoff | On persistent block |
 |------------|---------------|-------------|---------|---------------------|
-| ufcstats.com | 0.75 | 5 | exp base 1.0s cap 60s | kill `ufcstats_direct` |
+| ufcstats.com | 0.75 | 5 | exp base 1.0s cap 60s | kill `ufcstats_public` |
 | tapology.com | 1.5 | 4 | exp base 2.0s cap 120s | kill `tapology_public` |
 | sherdog.com | 1.5 | 4 | exp base 2.0s cap 120s | kill `sherdog_public` |
 | combatreg.com | 1.0 | 4 | exp base 1.5s cap 90s | kill `combat_registry` |
@@ -676,11 +795,11 @@ UA format: `mma-model/<version> (+https://github.com/0xAidan/mma-model; contact:
 
 ## Self-review checklist (plan author)
 
-1. Spec §2 gates each appear in Task 9 thresholds.  
+1. Spec §2 gates each appear in Task 10 thresholds.  
 2. No TBD/TODO/placeholder steps.  
 3. Interfaces named consistently (`UfcstatsPublicAdapter`, `SourceBlockedError`, `evaluate_strict_gates`).  
 4. DWCS-102–106 each have failing-test → implement → pass → commit cycles.  
-5. Odds default-off for outcome features documented in Task 10.
+5. Odds default-off for outcome features documented in Task 11.
 
 ## Execution handoff
 

@@ -19,7 +19,7 @@
 
 | Ticket | Focus under public-first policy |
 |--------|----------------------------------|
-| DWCS-102 | UFCStats public core adapter + mma-ai bootstrap reconcile; polite HTTP |
+| DWCS-102 | Persist four-clock PIT/quality metadata; UFCStats public adapter + `mma_ai_bootstrap` reconcile; polite HTTP |
 | DWCS-103 | Manifest-first DWCS history classification and sync |
 | DWCS-104 | Exact-ID / Wikidata identity + reversible review queue |
 | DWCS-105 | Tapology → Sherdog → Combat Registry/commission regional PIT enrichment |

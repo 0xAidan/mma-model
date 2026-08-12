@@ -3897,9 +3897,10 @@ def build_scorecard(
             ],
             "approved_labeled_public_roles": [
                 "ufcstats_public",
+                "mma_ai_bootstrap",
                 "tapology_public",
                 "sherdog_public",
-                "combat_registry_public",
+                "combat_registry",
                 "bestfightodds_archive",
             ],
             "rule": (

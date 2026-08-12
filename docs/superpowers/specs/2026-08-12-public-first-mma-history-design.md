@@ -147,25 +147,49 @@ Kill the source role and fall through the deterministic fallback order rather th
 
 ### 6.1 Four clocks (never conflated)
 
-| Clock | Meaning | May be backfilled as “now”? |
-|-------|---------|------------------------------|
+| Clock / field | Meaning | May be backfilled as “now”? |
+|---------------|---------|------------------------------|
 | `observed_at` | Acquisition time of **this** capture | **No** — never backdated to pretend historical acquisition |
-| `source_updated_at` | Source publication / update timestamp when known | Only when the source provides it |
+| `source_published_at` | Source publication timestamp when known (page/revision publish time) | Only when the source or archive provides it |
+| `source_updated_at` | Source update timestamp when known (distinct from publish when both exist) | Only when the source provides it |
 | `effective_at` | Fact effective time (e.g. bout end, profile as-of) | Set from fact semantics |
 | `proxy_published_at` | Documented publication proxy | Only under frozen rule; must be labeled |
 
-### 6.2 Publication proxy rule (frozen)
+Machine-readable required names live in
+`config/sources/source_policy_v1.json` → `observation_metadata`.
+
+### 6.2 Current persistence gap (must close in DWCS-102; not this PR)
+
+DWCS-101 `IngestRepository.commit_batch` writes `RawObservation` **without**
+`attributes` and without proxy/quality columns. Therefore silver vs gold
+`quality_tier`, `timestamp_quality`, and `proxy_published_at` **cannot** survive
+today’s ingest path.
+
+DWCS-102 **must** ship (tests first) before public adapters write production history:
+
+| Surface | Exact additions |
+|---------|-----------------|
+| Alembic migration | `migrations/versions/0006_observation_pit_metadata.py` |
+| Table `raw_observations` columns | `source_published_at`, `proxy_published_at`, `timestamp_quality`, `timestamp_quality_source`, `quality_tier`, `attributes_json` (retain existing `observed_at`, `effective_at`, `source_updated_at`, `payload_hash`, `raw_ref`) |
+| `SourceObservationRecord` first-class fields | `source_published_at: datetime \| None`, `proxy_published_at: datetime \| None`, `timestamp_quality: TimestampQualityId`, `timestamp_quality_source: str \| None`, `quality_tier: QualityTierId`, plus existing clocks/hash/ref |
+| `IngestRepository` | Persist every timestamp/quality/raw field and `attributes_json`; never drop attributes on commit |
+| Required tests | `round_trip_silver_vs_gold_quality_tier`; `proxy_published_at_persisted_when_timestamp_quality_publication_proxy`; `attributes_json_not_dropped_on_commit_batch`; `source_published_at_distinct_from_observed_at` |
+
+Policy field `dwcs_102_persistence.implement_in_this_pr` remains `false` for this
+policy PR. Do **not** land the migration here.
+
+### 6.3 Publication proxy rule (frozen)
 
 For **historical immutable** bout / result / stat facts lacking a true publication timestamp:
 
 1. Apply a single frozen rule versioned in config, e.g. `event_completed_at + P1D` (exact delay locked in `config/sources/pit_proxy_v1.json` during DWCS-102).
-2. Store `timestamp_quality = publication_proxy` and the rule id/version on the observation attributes.
+2. Persist `timestamp_quality = publication_proxy`, `timestamp_quality_source = <rule_id>@<rule_version>`, and `proxy_published_at` as first-class columns (not only ephemeral attributes).
 3. Report proxy rows as **silver** at best (never gold).
-4. Prefer Wayback / revision snapshots when available; preserve capture timestamp and content hash; those can upgrade toward **gold** when the snapshot time is known.
+4. Prefer Wayback / revision snapshots when available; preserve capture timestamp and content hash; those can upgrade toward **gold** when the snapshot time is known (`timestamp_quality = revision_snapshot` or `direct_source_timestamp`).
 
 **Forbidden:** using current mutable profile aggregates (career totals, current record strings, live rankings) as historical feature inputs. Reconstruct from prior bout facts at the event/card cutoff only.
 
-### 6.3 Quality tiers (strict coverage)
+### 6.4 Quality tiers (strict coverage)
 
 | Tier | Definition |
 |------|------------|
@@ -175,7 +199,7 @@ For **historical immutable** bout / result / stat facts lacking a true publicati
 | `missing` | Explicit missing category with reason code |
 | `conflict` | Disagreement preserved across sources |
 
-### 6.4 Mandatory leakage controls
+### 6.5 Mandatory leakage controls
 
 - Future-row invariance tests: mutating a later bout must not change earlier reconstructed features.
 - Event/card cutoffs: every bout on a card shares one prediction cutoff; no same-card outcome leakage into features.
@@ -191,18 +215,26 @@ For **historical immutable** bout / result / stat facts lacking a true publicati
 
 Phase 1 ingest proceeds under `policy_mode = public_first_hybrid_personal_project` in `config/sources/source_policy_v1.json`. Adopting any stack as `decision.primary` still requires a **measured** audit passing coverage, agreement, required features, and PIT fitness.
 
-## 8. Kill criteria and fallback order
+## 8. Canonical source IDs, kill criteria, and fallback order
 
-Deterministic fallback order:
+All roles, kill criteria keys, fallback entries, scorecard
+`approved_labeled_public_roles`, docs, and tests MUST use this exhaustive ID set
+(no aliases):
 
-1. UFCStats direct snapshots  
-2. mma-ai raw/normalized bootstrap after reconciliation  
-3. Tapology public regional  
-4. Sherdog selective secondary  
-5. Combat Registry / commission overrides  
-6. SportsDataIO validation only  
-7. BALLDONTLIE validation only  
-8. Explicit `missing` with quality tier  
+`ufcstats_public`, `mma_ai_bootstrap`, `tapology_public`, `sherdog_public`,
+`combat_registry`, `wikidata`, `bestfightodds_archive`, `the_odds_api`,
+`sportsdataio`, `balldontlie`, `explicit_missing`.
+
+Deterministic fallback order (canonical IDs):
+
+1. `ufcstats_public`
+2. `mma_ai_bootstrap`
+3. `tapology_public`
+4. `sherdog_public`
+5. `combat_registry`
+6. `sportsdataio`
+7. `balldontlie`
+8. `explicit_missing`
 
 Per-source kill criteria are encoded in the machine-readable policy. On kill: stop the role, record `source_killed` with reason, continue fallback, never invent coverage.
 
