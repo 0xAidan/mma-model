@@ -32,7 +32,7 @@
     "draw": 1,
     "no_contest": 8
   },
-  "db_hash": "b67814ed72903f82684d2cecd11657940c789050b49439c88e365666caae75d7",
+  "db_hash": "0efe0dabc8a9fb7733aef4b7442d9bfe6e002329e255784cdddf6c1ea4265746",
   "event_night": {
     "decisive": 438,
     "draw": 1,
@@ -162,9 +162,9 @@
     "mutable_current_leakage_status": "not_applicable",
     "mutable_current_rows_examined": 0,
     "mutable_current_synthetic_guard_checks": 1,
-    "proxy_timestamps": 880,
+    "proxy_timestamps": 873,
     "revision_snapshots": 0,
-    "unknown_timestamps": 0
+    "unknown_timestamps": 7
   },
   "raw_ref_integrity": {
     "blob_absent_explicit": 880,
@@ -177,7 +177,18 @@
     "store_provided": true,
     "unverifiable": 0
   },
-  "report_hash": "dfdaa67bb61c862ebb0c54b3e339680083b2c91fd8b28a910a5ddc04e0e2b16a",
+  "regional_live": {
+    "amateur_found": 0,
+    "amateur_missing": 2,
+    "amateur_n": 2,
+    "amateur_source_failed": 0,
+    "evidence_class": "fixture_validation",
+    "professional_found": 0,
+    "professional_missing": 9,
+    "professional_n": 9,
+    "professional_source_failed": 0
+  },
+  "report_hash": "7b18feb23aa48a53188926331244068de30fcfffd78da77ef7a5051e2d1bd8e5",
   "result_transitions": {
     "both_lanes_no_contest": 1,
     "event_night_equals_current": 433,

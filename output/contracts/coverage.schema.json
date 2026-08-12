@@ -620,11 +620,19 @@
           "type": "string",
           "enum": ["persisted", "frozen_fallback", "checkpoint", "none"]
         },
-        "professional_n": { "type": "integer", "minimum": 0 },
+        "professional_n": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fixed adjudicated professional live-sample universe; always 9, even with zero live evidence."
+        },
         "professional_found": { "type": "integer", "minimum": 0 },
         "professional_source_failed": { "type": "integer", "minimum": 0 },
         "professional_missing": { "type": "integer", "minimum": 0 },
-        "amateur_n": { "type": "integer", "minimum": 0 },
+        "amateur_n": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fixed adjudicated amateur live-sample universe; always 2, even with zero live evidence."
+        },
         "amateur_found": { "type": "integer", "minimum": 0 },
         "amateur_source_failed": { "type": "integer", "minimum": 0 },
         "amateur_missing": { "type": "integer", "minimum": 0 },

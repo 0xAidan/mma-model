@@ -154,6 +154,19 @@ def sanitized_summary(report: CoverageReport, gates: GateResult) -> dict[str, An
             "checkpoints": report.checkpoint_run_state.checkpoints,
         },
         "source_failures": list(report.source_failures),
+        "regional_live": {
+            "evidence_class": report.regional_live.get("evidence_class"),
+            "professional_n": report.regional_live.get("professional_n"),
+            "professional_found": report.regional_live.get("professional_found"),
+            "professional_source_failed": report.regional_live.get(
+                "professional_source_failed"
+            ),
+            "professional_missing": report.regional_live.get("professional_missing"),
+            "amateur_n": report.regional_live.get("amateur_n"),
+            "amateur_found": report.regional_live.get("amateur_found"),
+            "amateur_source_failed": report.regional_live.get("amateur_source_failed"),
+            "amateur_missing": report.regional_live.get("amateur_missing"),
+        },
         "gates_passed": list(gates.passed_codes),
         "gates_blocked": list(gates.blocker_codes),
         "licensed_status": report.licensed_status.model_dump(mode="json"),
@@ -240,6 +253,14 @@ def write_coverage_evidence(
             f"failed={report.checkpoint_run_state.failed_runs} "
             f"checkpoints={report.checkpoint_run_state.checkpoints}"
         ),
+        (
+            f"- Regional live sample: professional "
+            f"{int(report.regional_live.get('professional_found') or 0)}/"
+            f"{int(report.regional_live.get('professional_n') or 0)} amateur "
+            f"{int(report.regional_live.get('amateur_found') or 0)}/"
+            f"{int(report.regional_live.get('amateur_n') or 0)} "
+            f"evidence_class={report.regional_live.get('evidence_class')}"
+        ),
         f"- Passing gates: {', '.join(gates.passed_codes) or 'none'}",
         (
             "- Not-applicable gates: "
@@ -255,6 +276,10 @@ def write_coverage_evidence(
             "`decision.primary=null` and is **not** a Phase 1 blocker."
         ),
         "- Fixture identity/regional metrics are validation only and never live coverage.",
+        "- Regional live sample universe is always professional n=9 and amateur n=2; empty evidence fails 0/9 and 0/2.",
+        "- Result versions use an exact raw-observation link; unlinked rows are hidden at a PIT cutoff.",
+        "- Frozen manifest skeleton is universe metadata only and never fills a hidden result lane.",
+        "- Reversed-to-NC current corrections stay historically unknown until a real publication timestamp exists.",
         "- Public accessibility is not accuracy, PIT, or rights proof.",
         "",
         "## Sources",

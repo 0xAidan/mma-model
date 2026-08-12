@@ -199,6 +199,8 @@ def load_result_versions(session: Session) -> list[dict[str, Any]]:
             "time_str": row.time_str,
             "effective_at": row.effective_at,
             "observed_at": row.observed_at,
+            "raw_observation_id": row.raw_observation_id,
+            "provenance_status": row.provenance_status,
         }
         for row in rows
     ]
@@ -658,12 +660,8 @@ def regional_live_payload(session: Session, *, as_of: datetime | None = None) ->
 
     pro_sample = list(sample.get("professional_bouts") or [])
     am_sample = list(sample.get("amateur_regulated_us_bouts") or [])
-    if evidence_class in {"live_source_coverage", "mixed"}:
-        pro_n, pro_found, pro_failed, pro_missing = _score(pro_sample)
-        am_n, am_found, am_failed, am_missing = _score(am_sample)
-    else:
-        pro_n = pro_found = pro_failed = pro_missing = 0
-        am_n = am_found = am_failed = am_missing = 0
+    pro_n, pro_found, pro_failed, pro_missing = _score(pro_sample)
+    am_n, am_found, am_failed, am_missing = _score(am_sample)
     fixture_pro_n = len(pro_sample)
     fixture_am_n = len(am_sample)
     fixture_pro_found = sum(1 for row in pro_sample if str(row.get("bout_id")) in fixture_ids)
@@ -806,6 +804,8 @@ def influencing_db_fingerprint(
             source_updated_at=row.get("source_updated_at"),  # type: ignore[arg-type]
             proxy_published_at=row.get("proxy_published_at"),  # type: ignore[arg-type]
             observed_at=row.get("observed_at"),  # type: ignore[arg-type]
+            provenance_status=str(row.get("provenance_status") or "unknown"),
+            raw_observation_id=row.get("raw_observation_id"),
         )
     ]
     failures = [
@@ -876,6 +876,8 @@ def influencing_db_fingerprint(
                 str(row.get("result_type") or ""),
                 str(row.get("winner_fighter_id") or ""),
                 _iso(row.get("effective_at")),
+                str(row.get("provenance_status") or "unknown"),
+                str(row.get("raw_observation_id") or ""),
             )
             for row in results
         ),

@@ -126,6 +126,7 @@ def append_correction(
     effective_at: datetime,
     result_type: str = "no_contest",
     observed_at: datetime | None = None,
+    raw_observation_id: int | None = None,
 ) -> None:
     existing = list(
         session.scalars(
@@ -148,6 +149,8 @@ def append_correction(
             result_type=result_type,
             effective_at=effective_at,
             observed_at=seen_at,
+            raw_observation_id=raw_observation_id,
+            provenance_status="linked" if raw_observation_id is not None else "unknown",
         )
     )
 

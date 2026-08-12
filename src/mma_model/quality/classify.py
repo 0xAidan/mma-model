@@ -122,8 +122,10 @@ def result_version_visible(
     proxy_published_at: datetime | None = None,
     observed_at: datetime | None = None,
     adjudicated_at: datetime | None = None,
+    provenance_status: str | None = None,
+    raw_observation_id: int | str | None = None,
 ) -> bool:
-    """Result versions need effective_at and an allowed visibility clock."""
+    """Result versions need an exact provenance link plus allowed clocks."""
     if exclude_event_id is not None and event_id == exclude_event_id:
         return False
     if cutoff is None:
@@ -131,6 +133,11 @@ def result_version_visible(
     cutoff = parse_iso_datetime(cutoff)
     if cutoff is None:
         return True
+    linked_id = raw_observation_id
+    if isinstance(linked_id, str) and linked_id.strip().isdigit():
+        linked_id = int(linked_id.strip())
+    if provenance_status != "linked" or linked_id in (None, "", 0):
+        return False
     effective = parse_iso_datetime(effective_at)
     if effective is None or not (effective < cutoff):
         return False
@@ -340,46 +347,35 @@ def select_best_observation(observations: list[Mapping[str, Any]]) -> Mapping[st
     )
 
 
-def _clocks_match(left: object, right: object) -> bool:
-    parsed_left = parse_iso_datetime(left if isinstance(left, (datetime, str)) else None)
-    parsed_right = parse_iso_datetime(right if isinstance(right, (datetime, str)) else None)
-    if parsed_left is None or parsed_right is None:
-        return False
-    return parsed_left == parsed_right
-
-
 def attach_result_version_clocks(
     versions: list[Mapping[str, Any]],
     observations: list[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Correlate each result version to a matching raw observation's clocks."""
-    by_key: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    """Copy clocks only from the exact linked raw observation."""
+    by_id: dict[int, Mapping[str, Any]] = {}
     for row in observations:
-        if not _is_fact_row(row):
+        raw_id = row.get("id")
+        if raw_id in (None, ""):
             continue
-        key = (str(row.get("subject_id") or ""), str(row.get("version_kind") or ""))
-        by_key[key].append(row)
+        by_id[int(raw_id)] = row
     attached: list[dict[str, Any]] = []
     for row in versions:
         clocks = dict(row)
-        key = (str(row.get("bout_id") or ""), str(row.get("version_kind") or ""))
-        candidates = [
-            item
-            for item in by_key.get(key, [])
-            if _clocks_match(item.get("observed_at"), row.get("observed_at"))
-            or (
-                _clocks_match(item.get("effective_at"), row.get("effective_at"))
-                and str(item.get("result_type") or "") == str(row.get("result_type") or "")
-            )
-        ]
-        best = select_best_observation(candidates)
-        if best is not None:
-            clocks["timestamp_quality"] = best.get("timestamp_quality")
-            clocks["proxy_published_at"] = best.get("proxy_published_at")
-            clocks["source_published_at"] = best.get("source_published_at")
-            clocks["source_updated_at"] = best.get("source_updated_at")
+        status = str(row.get("provenance_status") or "unknown")
+        raw_id = row.get("raw_observation_id")
+        linked = None
+        if status == "linked" and raw_id not in (None, ""):
+            linked = by_id.get(int(raw_id))
+        if linked is not None:
+            clocks["timestamp_quality"] = linked.get("timestamp_quality")
+            clocks["proxy_published_at"] = linked.get("proxy_published_at")
+            clocks["source_published_at"] = linked.get("source_published_at")
+            clocks["source_updated_at"] = linked.get("source_updated_at")
         else:
             clocks["timestamp_quality"] = "unknown"
+            clocks["proxy_published_at"] = None
+            clocks["source_published_at"] = None
+            clocks["source_updated_at"] = None
         attached.append(clocks)
     return attached
 

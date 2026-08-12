@@ -8,7 +8,12 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from mma_model.db.tables.core import BoutResultVersion, CanonicalBout
+from mma_model.db.tables.core import (
+    BoutResultVersion,
+    CanonicalBout,
+    CanonicalEvent,
+    CanonicalFighter,
+)
 from mma_model.db.tables.history import HistorySourceBout, HistorySourceFailure
 from mma_model.db.tables.provenance import RawObservation
 from mma_model.dwcs.ids import canonical_bout_id
@@ -32,6 +37,29 @@ ADJUDICATED = datetime(2021, 6, 1, tzinfo=UTC)
 
 def _attrs(result_type: str = "decisive", winner: str = "aaa") -> str:
     return json.dumps({"result_type": result_type, "winner_fighter_id": winner})
+
+
+def _ensure_universe_bout(session, bout_id: str) -> tuple[str, str]:
+    fighter_a_id = str(uuid4())
+    fighter_b_id = str(uuid4())
+    event_id = str(uuid4())
+    session.add(CanonicalFighter(id=fighter_a_id, display_name="Fighter A"))
+    session.add(CanonicalFighter(id=fighter_b_id, display_name="Fighter B"))
+    session.add(
+        CanonicalEvent(id=event_id, name="Test card", series="dwcs", status="completed")
+    )
+    session.flush()
+    session.add(
+        CanonicalBout(
+            id=bout_id,
+            event_id=event_id,
+            fighter_a_id=fighter_a_id,
+            fighter_b_id=fighter_b_id,
+            status="completed",
+        )
+    )
+    session.flush()
+    return fighter_a_id, fighter_b_id
 
 
 def test_empty_db_uses_fixed_live_sample_denominator(tmp_path) -> None:
@@ -114,6 +142,7 @@ def test_result_version_uses_exact_raw_link_not_competing_source(tmp_path) -> No
     policy = load_source_policy()
     try:
         with env["Session"]() as session:
+            fighter_a_id, fighter_b_id = _ensure_universe_bout(session, bout_id)
             run = add_ingest_run(session, source="dwcs_manifest")
             linked = add_observation(
                 session,
@@ -146,8 +175,8 @@ def test_result_version_uses_exact_raw_link_not_competing_source(tmp_path) -> No
                     bout_id=bout_id,
                     version_kind="current",
                     revision=1,
-                    fighter_a_id=str(uuid4()),
-                    fighter_b_id=str(uuid4()),
+                    fighter_a_id=fighter_a_id,
+                    fighter_b_id=fighter_b_id,
                     result_type="decisive",
                     winner_fighter_id=None,
                     effective_at=PAST,
@@ -326,6 +355,7 @@ def test_unlinked_result_version_is_hidden_at_cutoff(tmp_path) -> None:
     policy = load_source_policy()
     try:
         with env["Session"]() as session:
+            fighter_a_id, fighter_b_id = _ensure_universe_bout(session, bout_id)
             run = add_ingest_run(session, source="dwcs_manifest")
             add_observation(
                 session,
@@ -344,8 +374,8 @@ def test_unlinked_result_version_is_hidden_at_cutoff(tmp_path) -> None:
             append_correction(
                 session,
                 bout_id=bout_id,
-                fighter_a_id=str(uuid4()),
-                fighter_b_id=str(uuid4()),
+                fighter_a_id=fighter_a_id,
+                fighter_b_id=fighter_b_id,
                 effective_at=PAST,
                 observed_at=NOW,
                 result_type="no_contest",

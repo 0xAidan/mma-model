@@ -17,6 +17,7 @@ from mma_model.evaluation.contract import PINNED_CONTRACT_HASH, load_evaluation_
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.quality.audits import run_leakage_audits
 from mma_model.quality.classify import (
+    RESULT_CLASSES,
     attach_result_version_clocks,
     build_bout_row,
     classify_overall_bout,
@@ -201,6 +202,8 @@ def compute_coverage_report(
             source_updated_at=row.get("source_updated_at"),  # type: ignore[arg-type]
             proxy_published_at=row.get("proxy_published_at"),  # type: ignore[arg-type]
             observed_at=row.get("observed_at"),  # type: ignore[arg-type]
+            provenance_status=str(row.get("provenance_status") or "unknown"),
+            raw_observation_id=row.get("raw_observation_id"),
         )
 
     observations_for_hash = [
@@ -270,16 +273,8 @@ def compute_coverage_report(
         versions = versions_by_bout.get(bout_id, [])
         night = _latest_result(versions, version_kind="event_night")
         current = _latest_result(versions, version_kind="current")
-        night_result = normalize_result(
-            (night or {}).get("result_type") or item["event_night_result"]
-            if overall != "missing"
-            else None
-        )
-        current_result = normalize_result(
-            (current or {}).get("result_type") or item["current_result"]
-            if overall != "missing"
-            else None
-        )
+        night_result = normalize_result((night or {}).get("result_type"))
+        current_result = normalize_result((current or {}).get("result_type"))
         if overall == "missing":
             night_result = "missing"
             current_result = "missing"
@@ -334,7 +329,7 @@ def compute_coverage_report(
         class_counts[source_class][overall] += 1
         event_night_counts[night_result] += 1
         current_counts[current_result] += 1
-        if overall != "missing":
+        if night_result in RESULT_CLASSES and current_result in RESULT_CLASSES:
             if night_result == "no_contest" and current_result == "no_contest":
                 both_lanes_nc += 1
             if night_result in {"decisive", "draw"} and current_result == "no_contest":
