@@ -54,7 +54,8 @@ def test_coverage_cli_non_strict_and_strict(populated, capsys) -> None:
     assert non_strict == 0
     payload = json.loads(out)
     assert payload["universe_bouts"] == 440
-    assert payload["core_tiers"]["bronze"] + payload["core_tiers"]["conflict"] == 440
+    assert payload["core_tiers"]["bronze"] == 440
+    assert payload["core_tiers"]["conflict"] == 0
     assert payload["core_tiers"]["silver"] == 0
     assert payload["licensed_status"]["phase1_global_blocker"] is False
     strict = main(args + ["--strict"])
@@ -168,4 +169,3 @@ def test_coverage_cli_readonly_write_fails(populated) -> None:
                 connection.commit()
     finally:
         engine.dispose()
-

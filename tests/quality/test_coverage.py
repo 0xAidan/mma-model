@@ -55,8 +55,8 @@ def test_populated_manifest_89_440_and_result_lanes(populated) -> None:
     assert report.core_tiers["missing"] == 0
     assert report.core_tiers["silver"] == 0
     assert report.core_tiers["gold"] == 0
-    assert report.core_tiers["bronze"] + report.core_tiers["conflict"] == 440
-    assert report.core_tiers["bronze"] >= 430
+    assert report.core_tiers["bronze"] == 440
+    assert report.core_tiers["conflict"] == 0
     assert report.standard.bouts == 425
     assert report.brazil.bouts == 15
     assert report.event_night.decisive == 438
@@ -68,7 +68,7 @@ def test_populated_manifest_89_440_and_result_lanes(populated) -> None:
     bouts = load_dwcs_bout_manifest()
     fighters = {p.espn_athlete_id for bout in bouts for p in bout.participants}
     assert report.counts_fighters == len(fighters)
-    assert {row.overall_tier for row in report.bouts} <= {"bronze", "conflict"}
+    assert {row.overall_tier for row in report.bouts} == {"bronze"}
     source_classes = {row.source_class for row in report.bouts}
     assert source_classes == {"internal_manifest"}
 
@@ -134,9 +134,7 @@ def test_config_hash_changes_with_as_of(populated) -> None:
     cutoff = datetime(2018, 1, 1, tzinfo=timezone.utc)
     with populated["Session"]() as session:
         current = compute_coverage_report(series="dwcs", session=session, policy=policy)
-        past = compute_coverage_report(
-            series="dwcs", session=session, policy=policy, as_of=cutoff
-        )
+        past = compute_coverage_report(series="dwcs", session=session, policy=policy, as_of=cutoff)
     assert current.config_hash != past.config_hash
     assert past.core_tiers["missing"] > 0
     assert past.core_tiers["bronze"] > 0

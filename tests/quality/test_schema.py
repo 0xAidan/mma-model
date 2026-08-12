@@ -40,6 +40,7 @@ def test_schema_file_exists_and_forbids_additional_properties() -> None:
         "publication_proxy",
         "unknown",
     ]
+    assert "not_applicable" in schema["$defs"]["gate_status"]["enum"]
 
 
 def test_schema_rejects_unknown_quality_tier_enum() -> None:

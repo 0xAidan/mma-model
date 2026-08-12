@@ -23,7 +23,11 @@ from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.quality.coverage import compute_coverage_report
 from mma_model.quality.gates import report_with_gates
 from mma_model.quality.readonly import CoverageDatabaseError, open_readonly_sqlite_engine
-from mma_model.quality.schema import CoverageSchemaError, load_coverage_schema, validate_coverage_json
+from mma_model.quality.schema import (
+    CoverageSchemaError,
+    load_coverage_schema,
+    validate_coverage_json,
+)
 from mma_model.quality.universe import UniverseContractError, load_universe_contract
 from mma_model.sources.policy import load_source_policy
 from tests.quality.helpers import add_ingest_run, add_observation, make_empty_db
@@ -155,7 +159,9 @@ def test_independent_disagreement_is_conflict(tmp_path) -> None:
         env["engine"].dispose()
 
 
-def test_licensed_source_does_not_count_as_independent_agreement(tmp_path) -> None:
+def test_licensed_source_access_status_stays_validation_only_but_facts_can_agree(
+    tmp_path,
+) -> None:
     env = make_empty_db(tmp_path)
     bout_id = _first_bout_id()
     try:
@@ -182,15 +188,14 @@ def test_licensed_source_does_not_count_as_independent_agreement(tmp_path) -> No
                 subject_id=bout_id,
                 effective_at=PAST,
                 observed_at=NOW,
-                source_published_at=PAST,
-                timestamp_quality="direct_source_timestamp",
-                quality_tier="gold",
+                proxy_published_at=PAST,
+                timestamp_quality="publication_proxy",
                 attributes_json=_attrs(),
             )
             session.flush()
             report = compute_coverage_report(series="dwcs", session=session, policy=policy)
         row = next(item for item in report.bouts if item.bout_id == bout_id)
-        assert row.overall_tier == "bronze"
+        assert row.overall_tier == "silver"
         licensed = next(item for item in report.source_rows if item.source == "sportsdataio")
         assert licensed.validation_only is True
         assert licensed.status == "validation_only"
@@ -403,9 +408,7 @@ def test_one_live_row_cannot_make_regional_one_of_one(tmp_path) -> None:
         regional = report.regional_live
         assert regional["professional_n"] == 9
         assert regional["professional_found"] == 0
-        assert not (
-            regional["professional_found"] == 1 and regional["professional_n"] == 1
-        )
+        assert not (regional["professional_found"] == 1 and regional["professional_n"] == 1)
         _, gates = report_with_gates(report, policy)
         pro = next(row for row in gates.gates if row.code == "regional_professional_sample")
         assert pro.status == "fail"
@@ -494,15 +497,11 @@ def test_universe_contracts_fail_closed(monkeypatch) -> None:
     tweaked = real.model_copy(
         update={
             "universe": real.universe.model_copy(
-                update={
-                    "all_dwcs": real.universe.all_dwcs.model_copy(update={"bouts": 439})
-                }
+                update={"all_dwcs": real.universe.all_dwcs.model_copy(update={"bouts": 439})}
             )
         }
     )
-    monkeypatch.setattr(
-        "mma_model.quality.universe.load_evaluation_contract", lambda: tweaked
-    )
+    monkeypatch.setattr("mma_model.quality.universe.load_evaluation_contract", lambda: tweaked)
     with pytest.raises(UniverseContractError):
         load_universe_contract()
 
