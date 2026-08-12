@@ -239,12 +239,14 @@ Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 | **Provider** | `the_odds_api` (CLI label `the-odds-api`) |
 | **Client** | `mma_model.odds.the_odds_api.TheOddsApiClient` |
 | **Normalize** | `mma_model.odds.normalize.normalize_odds_payload` |
-| **Storage** | `odds_events`, `odds_quotes` (append-only + dedupe), `odds_quota_observations` |
-| **Migration** | `0011_odds_quotes` |
-| **CLI** | `mma-model odds` (legacy fetch); `mma-model odds snapshot …`; `mma-model odds audit …` |
-| **Markets** | Supported provider keys: `h2h` → `moneyline`, `totals` → `totals` (DWCS-200 enums). Unsupported props are skipped, never fabricated. |
-| **Availability** | Missing requested markets → `unknown`. Never `suspended` without provider evidence. |
-| **Offline** | When `ODDS_API_KEY` is absent, snapshot/audit use deterministic fixtures under `tests/fixtures/odds/`. |
+| **Storage** | `odds_events`, `odds_quotes` (append-only + dedupe), `odds_quota_observations`, `odds_availability_observations` (append-only unknown markets) |
+| **Migrations** | `0011_odds_quotes`, `0012_odds_availability` |
+| **CLI** | `mma-model odds` (legacy live fetch); `mma-model odds snapshot …`; `mma-model odds audit …` |
+| **Markets** | Supported provider keys: `h2h` → `moneyline`, `totals` → `totals` with DWCS-200 catalog line points `(1.5, 2.5)`. Unsupported props/points are skipped, never fabricated. |
+| **Region** | Exactly one region per snapshot/storage operation; multi-region rejected. |
+| **Availability** | Missing requested markets recorded as `unknown` per provider event + bookmaker (when known). Never `suspended` without provider evidence. |
+| **Series scope** | `--series` is a requested label only (`canonical_series_verified=false`, `provider_scope=provider_unmatched`) until DWCS-203 bout matching. |
+| **Offline** | Explicit only: `--offline-fixtures --fixture-dir PATH --database-url disposable-sqlite`. No implicit tests/ fixtures; fail closed without `ODDS_API_KEY`. |
 | **Product rule** | Exact bookmaker lines remain optional enrichment. Reference quotes are never labeled Bet365. |
 
 Quota headers persisted: `x-requests-remaining`, `x-requests-used`, `x-requests-last`. Empty odds responses are recorded with `requests_last=0` when the provider does not bill.

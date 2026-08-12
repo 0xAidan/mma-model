@@ -1,7 +1,8 @@
 """The Odds API client — typed events, markets, current/historical odds (DWCS-201).
 
 Preserves ``fetch_mma_odds`` for legacy ``mma-model odds`` compatibility.
-Live HTTP requires ``ODDS_API_KEY``; tests and offline runs use fixtures/mocks.
+Live HTTP requires ``ODDS_API_KEY``. Offline fixtures require an explicit
+``fixture_dir`` supplied by the caller (never an implicit tests/ path).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import Any
 import httpx
 
 from mma_model.config import get_settings
-from mma_model.odds.normalize import parse_utc_datetime
+from mma_model.odds.normalize import OddsTimestampError, parse_utc_datetime, sanitize_secret_text
 from mma_model.odds.types import (
     DiscoveredMarket,
     EventsResponse,
@@ -58,7 +59,7 @@ class TheOddsApiClient:
 
     def list_events(self, *, sport: str = MMA_KEY) -> EventsResponse:
         """GET /sports/{sport}/events — does not consume quota credits."""
-        if self._fixture_dir is not None and not self.has_api_key:
+        if self._fixture_dir is not None:
             return self._events_from_fixture("events.json")
         payload, headers = self._get_json(f"/sports/{sport}/events", params={})
         events = tuple(self._parse_event(item) for item in _as_list(payload))
@@ -73,7 +74,7 @@ class TheOddsApiClient:
         regions: str = "us",
     ) -> MarketDiscoveryResponse:
         """GET /sports/{sport}/events/{eventId}/markets."""
-        if self._fixture_dir is not None and not self.has_api_key:
+        if self._fixture_dir is not None:
             return self._markets_from_fixture(event_id)
         path = f"/sports/{sport}/events/{event_id}/markets"
         payload, headers = self._get_json(path, params={"regions": regions})
@@ -101,7 +102,7 @@ class TheOddsApiClient:
         odds_format: str = "decimal",
     ) -> OddsResponse:
         """GET /sports/{sport}/odds — featured markets for upcoming/live events."""
-        if self._fixture_dir is not None and not self.has_api_key:
+        if self._fixture_dir is not None:
             return self._odds_from_fixture("current_odds.json", historical=False)
         params = {
             "regions": regions,
@@ -113,7 +114,6 @@ class TheOddsApiClient:
         quota = QuotaHeaders.from_headers(headers)
         empty = len(events) == 0
         if empty and quota.requests_last is None:
-            # Empty featured-odds responses do not consume quota.
             quota = QuotaHeaders(
                 requests_remaining=quota.requests_remaining,
                 requests_used=quota.requests_used,
@@ -131,7 +131,7 @@ class TheOddsApiClient:
         odds_format: str = "decimal",
     ) -> OddsResponse:
         """GET /historical/sports/{sport}/odds — snapshot at or before ``date``."""
-        if self._fixture_dir is not None and not self.has_api_key:
+        if self._fixture_dir is not None:
             return self._odds_from_fixture("historical_odds.json", historical=True)
         date_text = _format_snapshot_date(date)
         params = {
@@ -153,13 +153,23 @@ class TheOddsApiClient:
                 requests_used=quota.requests_used,
                 requests_last=0,
             )
+        try:
+            snapshot_at = parse_utc_datetime(payload.get("timestamp"), field="timestamp")
+            previous_timestamp = parse_utc_datetime(
+                payload.get("previous_timestamp"), field="previous_timestamp"
+            )
+            next_timestamp = parse_utc_datetime(
+                payload.get("next_timestamp"), field="next_timestamp"
+            )
+        except OddsTimestampError as exc:
+            raise OddsApiError(str(exc)) from None
         return OddsResponse(
             events=events,
             quota=quota,
             empty=empty,
-            snapshot_at=parse_utc_datetime(payload.get("timestamp")),
-            previous_timestamp=parse_utc_datetime(payload.get("previous_timestamp")),
-            next_timestamp=parse_utc_datetime(payload.get("next_timestamp")),
+            snapshot_at=snapshot_at,
+            previous_timestamp=previous_timestamp,
+            next_timestamp=next_timestamp,
             historical=True,
         )
 
@@ -171,23 +181,29 @@ class TheOddsApiClient:
     ) -> tuple[Any, dict[str, str]]:
         if not self._api_key:
             raise OddsApiError(
-                "Set ODDS_API_KEY in .env to fetch live odds, or pass fixture_dir "
-                "for deterministic offline snapshots."
+                "ODDS_API_KEY is required for live odds requests. "
+                "Pass an explicit fixture_dir only for offline/test mode."
             )
         query = {"apiKey": self._api_key, "dateFormat": "iso", **dict(params)}
         url = f"{self._base_url}{path}"
-        with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
-            response = client.get(url, params=query)
-            try:
+        try:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+                response = client.get(url, params=query)
                 response.raise_for_status()
-            except httpx.HTTPError as exc:
-                raise OddsApiError(_sanitize_error(str(exc), self._api_key)) from None
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise OddsApiError("Invalid JSON payload from The Odds API") from exc
-            headers = {k: v for k, v in response.headers.items()}
-            return payload, headers
+                try:
+                    payload = response.json()
+                except ValueError:
+                    raise OddsApiError("Invalid JSON payload from The Odds API") from None
+                headers = {k: v for k, v in response.headers.items()}
+                return payload, headers
+        except OddsApiError:
+            raise
+        except httpx.HTTPError as exc:
+            raise OddsApiError(sanitize_secret_text(str(exc), self._api_key)) from None
+        except Exception as exc:  # pragma: no cover - defensive
+            raise OddsApiError(
+                sanitize_secret_text(f"odds request failed: {exc}", self._api_key)
+            ) from None
 
     def _events_from_fixture(self, name: str) -> EventsResponse:
         payload = self._load_fixture(name)
@@ -197,7 +213,23 @@ class TheOddsApiClient:
 
     def _markets_from_fixture(self, event_id: str) -> MarketDiscoveryResponse:
         payload = self._load_fixture("market_discovery.json")
-        body = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+        by_event = payload.get("by_event_id")
+        if isinstance(by_event, Mapping):
+            body = by_event.get(event_id)
+            if not isinstance(body, Mapping):
+                raise OddsApiError(
+                    f"market discovery fixture has no entry for event_id={event_id!r}"
+                )
+        else:
+            body = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
+            if not isinstance(body, Mapping):
+                raise OddsApiError("market discovery fixture missing data object")
+            fixture_event_id = str(body.get("id") or "").strip()
+            if fixture_event_id and fixture_event_id != event_id:
+                raise OddsApiError(
+                    f"market discovery fixture event_id {fixture_event_id!r} "
+                    f"does not match requested {event_id!r}"
+                )
         bookmakers = tuple(
             dict(item)
             for item in (body.get("bookmakers") if isinstance(body, Mapping) else []) or []
@@ -217,18 +249,16 @@ class TheOddsApiClient:
         headers = QuotaHeaders.from_headers(payload.get("headers") or {})
         if historical:
             data = payload.get("data") if isinstance(payload.get("data"), Mapping) else payload
-            assert isinstance(data, Mapping)
+            if not isinstance(data, Mapping):
+                raise OddsApiError("historical odds fixture missing data object")
             events = tuple(
                 dict(item)
                 for item in _as_list(data.get("data") if "data" in data else data.get("events"))
                 if isinstance(item, Mapping)
             )
-            # Support both wrapped historical schema and flat test fixtures.
             if not events and isinstance(payload.get("events"), list):
                 events = tuple(
-                    dict(item)
-                    for item in payload["events"]
-                    if isinstance(item, Mapping)
+                    dict(item) for item in payload["events"] if isinstance(item, Mapping)
                 )
             empty = len(events) == 0
             if empty and headers.requests_last is None:
@@ -237,19 +267,28 @@ class TheOddsApiClient:
                     requests_used=headers.requests_used,
                     requests_last=0,
                 )
+            try:
+                snapshot_at = parse_utc_datetime(
+                    payload.get("timestamp") or data.get("timestamp"),
+                    field="timestamp",
+                )
+                previous_timestamp = parse_utc_datetime(
+                    payload.get("previous_timestamp") or data.get("previous_timestamp"),
+                    field="previous_timestamp",
+                )
+                next_timestamp = parse_utc_datetime(
+                    payload.get("next_timestamp") or data.get("next_timestamp"),
+                    field="next_timestamp",
+                )
+            except OddsTimestampError as exc:
+                raise OddsApiError(str(exc)) from None
             return OddsResponse(
                 events=events,
                 quota=headers,
                 empty=empty,
-                snapshot_at=parse_utc_datetime(
-                    payload.get("timestamp") or data.get("timestamp")
-                ),
-                previous_timestamp=parse_utc_datetime(
-                    payload.get("previous_timestamp") or data.get("previous_timestamp")
-                ),
-                next_timestamp=parse_utc_datetime(
-                    payload.get("next_timestamp") or data.get("next_timestamp")
-                ),
+                snapshot_at=snapshot_at,
+                previous_timestamp=previous_timestamp,
+                next_timestamp=next_timestamp,
                 historical=True,
             )
         events = tuple(
@@ -271,21 +310,31 @@ class TheOddsApiClient:
             raise OddsApiError("fixture_dir is required for offline odds fixtures")
         path = self._fixture_dir / name
         if not path.is_file():
-            raise OddsApiError(f"missing odds fixture: {path}")
+            raise OddsApiError(f"missing odds fixture: {path.name}")
         with path.open(encoding="utf-8") as handle:
             loaded = json.load(handle)
         if not isinstance(loaded, dict):
-            raise OddsApiError(f"odds fixture must be an object: {path}")
+            raise OddsApiError(f"odds fixture must be an object: {path.name}")
         return loaded
 
     def _parse_event(self, item: Any) -> OddsEvent:
         if not isinstance(item, Mapping):
             raise OddsApiError("Unexpected event object")
-        commence = parse_utc_datetime(item.get("commence_time"))
+        event_id = str(item.get("id") or "").strip()
+        home_team = str(item.get("home_team") or "").strip()
+        away_team = str(item.get("away_team") or "").strip()
+        if not event_id:
+            raise OddsApiError("Event missing id")
+        if not home_team or not away_team:
+            raise OddsApiError(f"Event {event_id!r} missing participant names")
+        try:
+            commence = parse_utc_datetime(item.get("commence_time"), field="commence_time")
+        except OddsTimestampError as exc:
+            raise OddsApiError(str(exc)) from None
         if commence is None:
-            raise OddsApiError("Event missing commence_time")
+            raise OddsApiError(f"Event {event_id!r} missing commence_time")
         return OddsEvent(
-            id=str(item.get("id") or "").strip(),
+            id=event_id,
             sport_key=str(item.get("sport_key") or MMA_KEY),
             sport_title=(
                 None
@@ -293,8 +342,8 @@ class TheOddsApiClient:
                 else str(item.get("sport_title"))
             ),
             commence_time=commence,
-            home_team=str(item.get("home_team") or "").strip(),
-            away_team=str(item.get("away_team") or "").strip(),
+            home_team=home_team,
+            away_team=away_team,
         )
 
 
@@ -309,11 +358,6 @@ def fetch_mma_odds(regions: str = "us", markets: str = "h2h") -> list[dict[str, 
         odds_format="american",
     )
     return [dict(event) for event in response.events]
-
-
-def default_fixture_dir() -> Path:
-    """Packaged deterministic fixtures for offline snapshot/audit runs."""
-    return Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "odds"
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -339,12 +383,18 @@ def _iter_discovered_markets(
             market_key = str(market.get("key") or "").strip()
             if not market_key:
                 continue
+            try:
+                last_update = parse_utc_datetime(
+                    market.get("last_update"), field="last_update"
+                )
+            except OddsTimestampError:
+                last_update = None
             found.append(
                 DiscoveredMarket(
                     bookmaker_key=book_key,
                     bookmaker_title=book_title,
                     market_key=market_key,
-                    last_update=parse_utc_datetime(market.get("last_update")),
+                    last_update=last_update,
                 )
             )
     return found
@@ -358,10 +408,3 @@ def _format_snapshot_date(value: datetime | str) -> str:
     if not text:
         raise OddsApiError("historical snapshot date is required")
     return text
-
-
-def _sanitize_error(message: str, api_key: str) -> str:
-    cleaned = message
-    if api_key:
-        cleaned = cleaned.replace(api_key, "***")
-    return cleaned

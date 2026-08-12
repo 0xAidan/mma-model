@@ -1,4 +1,4 @@
-"""Append-only odds event and quote tables (DWCS-201)."""
+"""Append-only odds event, quote, and availability tables (DWCS-201)."""
 
 from __future__ import annotations
 
@@ -97,4 +97,33 @@ class OddsQuote(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
     raw_ref: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+class OddsAvailabilityObservation(Base):
+    """Append-only unknown/missing market observations with event/book identity."""
+
+    __tablename__ = "odds_availability_observations"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_odds_availability_dedupe_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedupe_key: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    region: Mapped[str] = mapped_column(String(32), index=True)
+    event_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("odds_events.id"), index=True
+    )
+    external_event_id: Mapped[str] = mapped_column(String(128), index=True)
+    bookmaker_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    bookmaker_title: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_market_key: Mapped[str] = mapped_column(String(64), index=True)
+    market_family: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    availability: Mapped[str] = mapped_column(String(32), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    commence_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    snapshot_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

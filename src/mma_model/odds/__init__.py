@@ -9,6 +9,7 @@ from mma_model.odds.types import (
     NormalizedQuote,
     QuotaHeaders,
     QuoteAvailability,
+    UnknownMarketObservation,
 )
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "QuoteAvailability",
     "QuotaHeaders",
     "TheOddsApiClient",
+    "UnknownMarketObservation",
     "fetch_mma_odds",
     "normalize_odds_payload",
     "run_odds_audit",

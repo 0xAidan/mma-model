@@ -1,4 +1,4 @@
-"""SQLite guards for append-only odds quotes (DWCS-201)."""
+"""SQLite guards for append-only odds quotes and availability (DWCS-201)."""
 
 from __future__ import annotations
 
@@ -6,27 +6,52 @@ from sqlalchemy.engine import Connectable, Connection, Engine
 
 ODDS_QUOTES_NO_UPDATE_TRIGGER = "odds_quotes_no_update"
 ODDS_QUOTES_NO_DELETE_TRIGGER = "odds_quotes_no_delete"
+ODDS_AVAIL_NO_UPDATE_TRIGGER = "odds_availability_observations_no_update"
+ODDS_AVAIL_NO_DELETE_TRIGGER = "odds_availability_observations_no_delete"
 
-_TRIGGER_STATEMENTS = (
-    f"""
-    CREATE TRIGGER IF NOT EXISTS {ODDS_QUOTES_NO_UPDATE_TRIGGER}
-    BEFORE UPDATE ON odds_quotes
-    BEGIN
-      SELECT RAISE(ABORT, 'odds_quotes is append-only');
-    END
-    """,
-    f"""
-    CREATE TRIGGER IF NOT EXISTS {ODDS_QUOTES_NO_DELETE_TRIGGER}
-    BEFORE DELETE ON odds_quotes
-    BEGIN
-      SELECT RAISE(ABORT, 'odds_quotes is append-only');
-    END
-    """,
+_TRIGGER_SPECS = (
+    (ODDS_QUOTES_NO_UPDATE_TRIGGER, "odds_quotes", "UPDATE", "odds_quotes is append-only"),
+    (ODDS_QUOTES_NO_DELETE_TRIGGER, "odds_quotes", "DELETE", "odds_quotes is append-only"),
+    (
+        ODDS_AVAIL_NO_UPDATE_TRIGGER,
+        "odds_availability_observations",
+        "UPDATE",
+        "odds_availability_observations is append-only",
+    ),
+    (
+        ODDS_AVAIL_NO_DELETE_TRIGGER,
+        "odds_availability_observations",
+        "DELETE",
+        "odds_availability_observations is append-only",
+    ),
 )
-_DROP_STATEMENTS = (
-    f"DROP TRIGGER IF EXISTS {ODDS_QUOTES_NO_UPDATE_TRIGGER}",
-    f"DROP TRIGGER IF EXISTS {ODDS_QUOTES_NO_DELETE_TRIGGER}",
+
+
+def _trigger_sql(name: str, table: str, action: str, message: str) -> str:
+    return f"""
+    CREATE TRIGGER IF NOT EXISTS {name}
+    BEFORE {action} ON {table}
+    BEGIN
+      SELECT RAISE(ABORT, '{message}');
+    END
+    """
+
+
+_TRIGGER_STATEMENTS = tuple(
+    _trigger_sql(name, table, action, message)
+    for name, table, action, message in _TRIGGER_SPECS
 )
+_DROP_STATEMENTS = tuple(
+    f"DROP TRIGGER IF EXISTS {name}" for name, *_rest in _TRIGGER_SPECS
+)
+
+
+def _table_exists(connection: Connection, table: str) -> bool:
+    row = connection.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def _run_sqlite_statements(bind: Connectable | Engine, statements: tuple[str, ...]) -> None:
@@ -46,27 +71,23 @@ def _run_sqlite_statements(bind: Connectable | Engine, statements: tuple[str, ..
 
 
 def install_odds_sqlite_guards(bind: Connectable | Engine) -> None:
-    """Install UPDATE/DELETE abort triggers on odds_quotes when the table exists."""
+    """Install UPDATE/DELETE abort triggers when owned tables exist."""
     dialect = getattr(getattr(bind, "dialect", None), "name", None)
     if dialect != "sqlite":
         return
 
-    def _table_exists(connection: Connection) -> bool:
-        row = connection.exec_driver_sql(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='odds_quotes'"
-        ).fetchone()
-        return row is not None
+    def _install(connection: Connection) -> None:
+        for name, table, action, message in _TRIGGER_SPECS:
+            if _table_exists(connection, table):
+                connection.exec_driver_sql(_trigger_sql(name, table, action, message).strip())
 
     if isinstance(bind, Engine):
         with bind.begin() as conn:
-            if _table_exists(conn):
-                for statement in _TRIGGER_STATEMENTS:
-                    conn.exec_driver_sql(statement.strip())
+            _install(conn)
         return
-    if _table_exists(bind):  # type: ignore[arg-type]
-        _run_sqlite_statements(bind, _TRIGGER_STATEMENTS)
+    _install(bind)  # type: ignore[arg-type]
 
 
 def drop_odds_sqlite_guards(bind: Connectable | Engine) -> None:
-    """Drop only DWCS-201 owned odds quote triggers."""
+    """Drop only DWCS-201 owned odds quote/availability triggers."""
     _run_sqlite_statements(bind, _DROP_STATEMENTS)

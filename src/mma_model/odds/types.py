@@ -18,9 +18,12 @@ from mma_model.domain.markets import MarketFamily, OutcomeKey
 PROVIDER_THE_ODDS_API: Final[str] = "the_odds_api"
 PROVIDER_LABEL_THE_ODDS_API: Final[str] = "the-odds-api"
 
+ALLOWED_REQUESTED_SERIES: Final[frozenset[str]] = frozenset({"dwcs", "mma"})
+PROVIDER_SCOPE_UNMATCHED: Final[str] = "provider_unmatched"
+
 
 class QuoteAvailability(StrEnum):
-    """Line availability for a normalized quote."""
+    """Line availability for a normalized quote or market observation."""
 
     AVAILABLE = "available"
     UNKNOWN = "unknown"
@@ -117,6 +120,26 @@ class NormalizedQuote:
 
 
 @dataclass(frozen=True)
+class UnknownMarketObservation:
+    """Auditable missing-market observation (never fabricated as suspended)."""
+
+    provider: str
+    region: str
+    event_id: str
+    home_team: str
+    away_team: str
+    bookmaker_key: str | None
+    bookmaker_title: str | None
+    provider_market_key: str
+    market_family: MarketFamily | None
+    availability: QuoteAvailability
+    observed_at: datetime
+    commence_time: datetime
+    snapshot_at: datetime | None
+    dedupe_key: str
+
+
+@dataclass(frozen=True)
 class EventsResponse:
     events: tuple[OddsEvent, ...]
     quota: QuotaHeaders
@@ -150,9 +173,10 @@ class NormalizeReport:
     """Result of normalizing a current/historical odds payload."""
 
     quotes: tuple[NormalizedQuote, ...]
+    unknown_observations: tuple[UnknownMarketObservation, ...]
     skipped_unsupported_markets: tuple[str, ...]
     skipped_unmapped_outcomes: tuple[str, ...]
-    unknown_missing_markets: tuple[str, ...]
+    skipped_unsupported_line_points: tuple[str, ...]
 
 
 def _parse_int_header(headers: Mapping[str, str], name: str) -> int | None:

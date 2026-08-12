@@ -1,4 +1,4 @@
-"""Migration coverage for DWCS-201 odds quote tables."""
+"""Migration coverage for DWCS-201 odds quote/availability tables."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ ODDS_TABLES = {
     "odds_events",
     "odds_quotes",
     "odds_quota_observations",
+    "odds_availability_observations",
 }
 
 
@@ -39,6 +40,8 @@ def test_upgrade_head_creates_odds_tables_and_append_only_triggers(tmp_path: Pat
         }
         assert "odds_quotes_no_update" in triggers
         assert "odds_quotes_no_delete" in triggers
+        assert "odds_availability_observations_no_update" in triggers
+        assert "odds_availability_observations_no_delete" in triggers
 
         conn.execute(
             text(
@@ -74,13 +77,36 @@ def test_upgrade_head_creates_odds_tables_and_append_only_triggers(tmp_path: Pat
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                INSERT INTO odds_availability_observations (
+                  dedupe_key, provider, region, event_id, external_event_id,
+                  bookmaker_key, bookmaker_title, provider_market_key, market_family,
+                  availability, observed_at, commence_time, snapshot_at, created_at
+                ) VALUES (
+                  'unk1', 'the_odds_api', 'us', 'e1', 'ext-1',
+                  'draftkings', 'DraftKings', 'totals', 'totals',
+                  'unknown', '2026-08-11T21:00:00+00:00',
+                  '2026-08-12T00:00:00+00:00', NULL, '2026-08-11T21:00:00+00:00'
+                )
+                """
+            )
+        )
     engine.dispose()
 
 
-def test_downgrade_removes_odds_tables_only(tmp_path: Path) -> None:
+def test_downgrade_removes_availability_then_odds_tables(tmp_path: Path) -> None:
     db_path = tmp_path / "odds-down.db"
     cfg = _alembic_config(db_path)
     command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0011_odds_quotes")
+    engine = create_engine(f"sqlite:///{db_path}")
+    names = set(inspect(engine).get_table_names())
+    assert "odds_availability_observations" not in names
+    assert "odds_quotes" in names
+    engine.dispose()
+
     command.downgrade(cfg, "0010_result_version_provenance")
     engine = create_engine(f"sqlite:///{db_path}")
     names = set(inspect(engine).get_table_names())

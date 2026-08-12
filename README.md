@@ -68,17 +68,24 @@ With `ODDS_API_KEY` set:
 mma-model odds
 ```
 
-Normalize and store append-only reference quotes (uses fixtures when the key is
-absent):
+Normalize and store append-only reference quotes (live key required by default).
+Offline/test mode is explicit only:
 
 ```bash
-mma-model odds snapshot --series dwcs --provider the-odds-api --markets h2h
-mma-model odds audit --series dwcs --provider the-odds-api --markets h2h
+# Live (requires ODDS_API_KEY)
+mma-model odds snapshot --series dwcs --provider the-odds-api --markets h2h --regions us
+
+# Explicit offline fixtures (never the default live DB)
+mma-model odds snapshot --offline-fixtures --fixture-dir tests/fixtures/odds \
+  --database-url sqlite:////tmp/odds-offline.db --series dwcs --markets h2h --regions us
+mma-model odds audit --offline-fixtures --fixture-dir tests/fixtures/odds \
+  --database-url sqlite:////tmp/odds-offline.db --series dwcs --markets h2h --regions us
 ```
 
-Exact bookmaker lines are optional enrichment. Missing Bet365 does not block
-sportsbook-agnostic actionable price guidance. Reference odds are never labeled
-as Bet365.
+`--series dwcs` is a requested label only; rows stay `provider_unmatched` until
+DWCS-203 canonical bout matching. Exact bookmaker lines are optional enrichment.
+Missing Bet365 does not block sportsbook-agnostic actionable price guidance.
+Reference odds are never labeled as Bet365.
 
 ## What I need from you
 

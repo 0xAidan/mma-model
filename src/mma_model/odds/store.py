@@ -10,11 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mma_model.db.odds_guards import install_odds_sqlite_guards
-from mma_model.db.tables.odds import OddsEventRow, OddsQuotaObservation, OddsQuote
+from mma_model.db.tables.odds import (
+    OddsAvailabilityObservation,
+    OddsEventRow,
+    OddsQuotaObservation,
+    OddsQuote,
+)
 from mma_model.odds.types import (
     NormalizedQuote,
     OddsEvent,
     QuotaHeaders,
+    UnknownMarketObservation,
 )
 
 
@@ -23,10 +29,12 @@ class QuoteStoreResult:
     inserted: int
     deduped: int
     event_upserts: int
+    unknown_inserted: int = 0
+    unknown_deduped: int = 0
 
 
 class OddsQuoteStore:
-    """Persist provider events and append-only quotes with deduplication."""
+    """Persist provider events and append-only quotes/availability with dedupe."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -148,4 +156,71 @@ class OddsQuoteStore:
             inserted=inserted,
             deduped=deduped,
             event_upserts=event_upserts,
+        )
+
+    def append_unknown_observations(
+        self,
+        observations: Sequence[UnknownMarketObservation],
+        *,
+        events_by_external_id: dict[str, OddsEventRow] | None = None,
+    ) -> QuoteStoreResult:
+        """Insert unknown-market observations with append-only dedupe."""
+        event_map = dict(events_by_external_id or {})
+        inserted = 0
+        deduped = 0
+        event_upserts = 0
+
+        for obs in observations:
+            event_row = event_map.get(obs.event_id)
+            if event_row is None:
+                event_row = self.upsert_event(
+                    OddsEvent(
+                        id=obs.event_id,
+                        sport_key="mma_mixed_martial_arts",
+                        commence_time=obs.commence_time,
+                        home_team=obs.home_team,
+                        away_team=obs.away_team,
+                    ),
+                    provider=obs.provider,
+                )
+                event_map[obs.event_id] = event_row
+                event_upserts += 1
+
+            existing = self._session.scalar(
+                select(OddsAvailabilityObservation.id).where(
+                    OddsAvailabilityObservation.dedupe_key == obs.dedupe_key
+                )
+            )
+            if existing is not None:
+                deduped += 1
+                continue
+
+            self._session.add(
+                OddsAvailabilityObservation(
+                    dedupe_key=obs.dedupe_key,
+                    provider=obs.provider,
+                    region=obs.region,
+                    event_id=event_row.id,
+                    external_event_id=obs.event_id,
+                    bookmaker_key=obs.bookmaker_key,
+                    bookmaker_title=obs.bookmaker_title,
+                    provider_market_key=obs.provider_market_key,
+                    market_family=None
+                    if obs.market_family is None
+                    else obs.market_family.value,
+                    availability=obs.availability.value,
+                    observed_at=obs.observed_at,
+                    commence_time=obs.commence_time,
+                    snapshot_at=obs.snapshot_at,
+                )
+            )
+            inserted += 1
+
+        self._session.flush()
+        return QuoteStoreResult(
+            inserted=0,
+            deduped=0,
+            event_upserts=event_upserts,
+            unknown_inserted=inserted,
+            unknown_deduped=deduped,
         )

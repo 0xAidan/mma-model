@@ -4,17 +4,19 @@
     "x-requests-used": "1",
     "x-requests-last": "1"
   },
-  "data": {
-    "id": "evt-dwcs-ref-001",
-    "bookmakers": [
-      {
-        "key": "fanduel",
-        "title": "FanDuel",
-        "markets": [
-          {"key": "h2h", "last_update": "2026-08-11T21:00:00Z"},
-          {"key": "totals", "last_update": "2026-08-11T21:00:00Z"}
-        ]
-      }
-    ]
+  "by_event_id": {
+    "evt-dwcs-ref-001": {
+      "id": "evt-dwcs-ref-001",
+      "bookmakers": [
+        {
+          "key": "fanduel",
+          "title": "FanDuel",
+          "markets": [
+            {"key": "h2h", "last_update": "2026-08-11T21:00:00Z"},
+            {"key": "totals", "last_update": "2026-08-11T21:00:00Z"}
+          ]
+        }
+      ]
+    }
   }
 }

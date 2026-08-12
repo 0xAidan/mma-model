@@ -9,30 +9,52 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from mma_model.odds.normalize import normalize_odds_payload
-from mma_model.odds.store import OddsQuoteStore, QuoteStoreResult
-from mma_model.odds.the_odds_api import TheOddsApiClient, default_fixture_dir
+from mma_model.odds.normalize import ensure_utc, normalize_odds_payload, parse_single_region
+from mma_model.odds.store import OddsQuoteStore
+from mma_model.odds.the_odds_api import OddsApiError, TheOddsApiClient
 from mma_model.odds.types import (
+    ALLOWED_REQUESTED_SERIES,
     PROVIDER_LABEL_THE_ODDS_API,
+    PROVIDER_SCOPE_UNMATCHED,
     PROVIDER_THE_ODDS_API,
     NormalizeReport,
     QuotaHeaders,
 )
 
+LIVE_DEFAULT_DB_URLS = frozenset(
+    {
+        "sqlite:///data/mma.db",
+        "sqlite:///./data/mma.db",
+    }
+)
+
+
+class OddsOfflineModeError(RuntimeError):
+    """Raised when offline fixtures are requested without required safeguards."""
+
+
+class OddsConfigurationError(RuntimeError):
+    """Raised for fail-closed odds configuration errors before any DB write."""
+
 
 @dataclass(frozen=True)
 class SnapshotResult:
     provider: str
-    series: str
+    requested_series: str
+    canonical_series_verified: bool
+    provider_scope: str
     mode: str
     markets: str
-    regions: str
+    region: str
     empty: bool
     quote_count: int
     inserted: int
     deduped: int
+    unknown_observation_count: int
+    unknown_inserted: int
+    unknown_deduped: int
     skipped_unsupported_markets: tuple[str, ...]
-    unknown_missing_markets: tuple[str, ...]
+    skipped_unsupported_line_points: tuple[str, ...]
     quota: dict[str, int | None]
     snapshot_at: str | None
     observed_at: str
@@ -43,29 +65,59 @@ class SnapshotResult:
         return asdict(self)
 
 
+def validate_requested_series(series: str) -> str:
+    value = str(series).strip()
+    if value not in ALLOWED_REQUESTED_SERIES:
+        raise OddsConfigurationError(
+            f"unsupported requested series {series!r}; "
+            f"allowed: {sorted(ALLOWED_REQUESTED_SERIES)}"
+        )
+    return value
+
+
 def resolve_odds_client(
     *,
     provider: str,
     api_key: str | None = None,
     fixture_dir: Path | None = None,
-    allow_fixtures: bool = True,
+    offline_fixtures: bool = False,
 ) -> tuple[TheOddsApiClient, bool]:
-    """Build a client; fall back to fixtures when no live key is configured."""
+    """Build a live or explicitly offline client. Never invent a fixture path."""
     if provider not in {PROVIDER_THE_ODDS_API, PROVIDER_LABEL_THE_ODDS_API}:
-        raise ValueError(
+        raise OddsConfigurationError(
             f"unsupported odds provider {provider!r}; "
             f"DWCS-201 supports only {PROVIDER_LABEL_THE_ODDS_API}"
         )
+    if offline_fixtures:
+        if fixture_dir is None:
+            raise OddsOfflineModeError(
+                "--offline-fixtures requires an explicit --fixture-dir"
+            )
+        return TheOddsApiClient(api_key="", fixture_dir=Path(fixture_dir)), True
+
     client = TheOddsApiClient(api_key=api_key, fixture_dir=None)
     if client.has_api_key:
         return client, False
-    if not allow_fixtures:
-        raise RuntimeError(
-            "ODDS_API_KEY is required unless fixture mode is enabled "
-            "(default for offline snapshot)."
+    raise OddsConfigurationError(
+        "ODDS_API_KEY is required for live odds snapshot/audit. "
+        "For deterministic offline tests use --offline-fixtures with an explicit "
+        "--fixture-dir and a disposable --database-url."
+    )
+
+
+def require_disposable_database_url(database_url: str | None) -> str:
+    """Offline fixture writes must target an explicit disposable DB URL."""
+    if not database_url or not str(database_url).strip():
+        raise OddsOfflineModeError(
+            "offline fixture mode requires an explicit disposable --database-url"
         )
-    fixtures = fixture_dir or default_fixture_dir()
-    return TheOddsApiClient(api_key="", fixture_dir=fixtures), True
+    url = str(database_url).strip()
+    if url in LIVE_DEFAULT_DB_URLS:
+        raise OddsOfflineModeError(
+            "refusing default live data/mma.db for offline fixture odds writes; "
+            "pass an explicit disposable --database-url"
+        )
+    return url
 
 
 def run_odds_snapshot(
@@ -77,24 +129,25 @@ def run_odds_snapshot(
     regions: str = "us",
     historical_date: datetime | str | None = None,
     fixture_dir: Path | None = None,
+    offline_fixtures: bool = False,
     observed_at: datetime | None = None,
 ) -> SnapshotResult:
-    """Fetch (or fixture-load), normalize, and append-only store reference quotes."""
-    observed = observed_at or datetime.now(UTC)
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=UTC)
+    """Fetch (or explicit-fixture-load), normalize, and append-only store quotes."""
+    requested_series = validate_requested_series(series)
+    region = parse_single_region(regions)
+    observed = ensure_utc(observed_at or datetime.now(UTC), field="observed_at")
 
     client, used_fixtures = resolve_odds_client(
         provider=provider,
         fixture_dir=fixture_dir,
-        allow_fixtures=True,
+        offline_fixtures=offline_fixtures,
     )
     store = OddsQuoteStore(session)
 
     if historical_date is not None:
         response = client.fetch_historical_odds(
             date=historical_date,
-            regions=regions,
+            regions=region,
             markets=markets,
             odds_format="decimal",
         )
@@ -102,7 +155,7 @@ def run_odds_snapshot(
         mode = "historical"
     else:
         response = client.fetch_current_odds(
-            regions=regions,
+            regions=region,
             markets=markets,
             odds_format="decimal",
         )
@@ -120,27 +173,33 @@ def run_odds_snapshot(
     report = normalize_odds_payload(
         response.events,
         observed_at=observed,
-        region=regions.split(",")[0].strip() or "us",
+        region=region,
         odds_format="decimal",
         requested_markets=[m.strip() for m in markets.split(",") if m.strip()],
         snapshot_at=response.snapshot_at,
         provider=PROVIDER_THE_ODDS_API,
     )
-    store_result = _persist_report(store, report)
+    quote_result = store.append_quotes(report.quotes)
+    unknown_result = store.append_unknown_observations(report.unknown_observations)
     session.flush()
 
     return SnapshotResult(
         provider=PROVIDER_THE_ODDS_API,
-        series=series,
+        requested_series=requested_series,
+        canonical_series_verified=False,
+        provider_scope=PROVIDER_SCOPE_UNMATCHED,
         mode=mode,
         markets=markets,
-        regions=regions,
+        region=region,
         empty=response.empty,
         quote_count=len(report.quotes),
-        inserted=store_result.inserted,
-        deduped=store_result.deduped,
+        inserted=quote_result.inserted,
+        deduped=quote_result.deduped,
+        unknown_observation_count=len(report.unknown_observations),
+        unknown_inserted=unknown_result.unknown_inserted,
+        unknown_deduped=unknown_result.unknown_deduped,
         skipped_unsupported_markets=report.skipped_unsupported_markets,
-        unknown_missing_markets=report.unknown_missing_markets,
+        skipped_unsupported_line_points=report.skipped_unsupported_line_points,
         quota=response.quota.as_dict(),
         snapshot_at=None
         if response.snapshot_at is None
@@ -159,13 +218,16 @@ def run_odds_audit(
     markets: str = "h2h",
     regions: str = "us",
     fixture_dir: Path | None = None,
+    offline_fixtures: bool = False,
 ) -> dict[str, Any]:
     """Sanitized audit summary: events, market discovery sample, quota, no prices."""
+    requested_series = validate_requested_series(series)
+    region = parse_single_region(regions)
     observed = datetime.now(UTC)
     client, used_fixtures = resolve_odds_client(
         provider=provider,
         fixture_dir=fixture_dir,
-        allow_fixtures=True,
+        offline_fixtures=offline_fixtures,
     )
     store = OddsQuoteStore(session)
 
@@ -181,7 +243,7 @@ def run_odds_audit(
     discovery: dict[str, Any] | None = None
     if events_response.events:
         sample = events_response.events[0]
-        market_response = client.discover_markets(sample.id, regions=regions)
+        market_response = client.discover_markets(sample.id, regions=region)
         store.record_quota(
             provider=PROVIDER_THE_ODDS_API,
             endpoint="market_discovery",
@@ -198,7 +260,7 @@ def run_odds_audit(
         }
 
     odds_response = client.fetch_current_odds(
-        regions=regions,
+        regions=region,
         markets=markets,
         odds_format="decimal",
     )
@@ -212,7 +274,7 @@ def run_odds_audit(
     report = normalize_odds_payload(
         odds_response.events,
         observed_at=observed,
-        region=regions.split(",")[0].strip() or "us",
+        region=region,
         odds_format="decimal",
         requested_markets=[m.strip() for m in markets.split(",") if m.strip()],
         provider=PROVIDER_THE_ODDS_API,
@@ -220,9 +282,12 @@ def run_odds_audit(
 
     return {
         "provider": PROVIDER_THE_ODDS_API,
-        "series": series,
+        "requested_series": requested_series,
+        "canonical_series_verified": False,
+        "provider_scope": PROVIDER_SCOPE_UNMATCHED,
         "used_fixtures": used_fixtures,
         "claims_bet365": False,
+        "region": region,
         "events": {
             "count": len(events_response.events),
             "empty": events_response.empty,
@@ -234,15 +299,18 @@ def run_odds_audit(
             "empty": odds_response.empty,
             "event_count": len(odds_response.events),
             "normalized_quote_count": len(report.quotes),
+            "unknown_observation_count": len(report.unknown_observations),
             "skipped_unsupported_markets": list(report.skipped_unsupported_markets),
-            "unknown_missing_markets": list(report.unknown_missing_markets),
+            "skipped_unsupported_line_points": list(
+                report.skipped_unsupported_line_points
+            ),
             "quota": odds_response.quota.as_dict(),
-            # Prices intentionally omitted from audit output.
         },
         "product_note": (
             "Exact bookmaker lines are optional enrichment. Sportsbook-agnostic "
             "actionable price guidance remains the required fallback. Reference "
-            "odds are never labeled as Bet365."
+            "odds are never labeled as Bet365. Provider rows are unmatched until "
+            "DWCS-203 canonical bout matching."
         ),
     }
 
@@ -256,5 +324,22 @@ def empty_quota_report(quota: QuotaHeaders, *, empty: bool) -> dict[str, Any]:
     }
 
 
-def _persist_report(store: OddsQuoteStore, report: NormalizeReport) -> QuoteStoreResult:
-    return store.append_quotes(report.quotes)
+def _persist_report(store: OddsQuoteStore, report: NormalizeReport) -> None:
+    store.append_quotes(report.quotes)
+    store.append_unknown_observations(report.unknown_observations)
+
+
+# Re-export for tests that patch configuration failures.
+__all__ = [
+    "LIVE_DEFAULT_DB_URLS",
+    "OddsApiError",
+    "OddsConfigurationError",
+    "OddsOfflineModeError",
+    "SnapshotResult",
+    "empty_quota_report",
+    "require_disposable_database_url",
+    "resolve_odds_client",
+    "run_odds_audit",
+    "run_odds_snapshot",
+    "validate_requested_series",
+]

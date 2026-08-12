@@ -59,6 +59,7 @@ ODDS_TABLES = {
     "odds_events",
     "odds_quotes",
     "odds_quota_observations",
+    "odds_availability_observations",
 }
 
 
