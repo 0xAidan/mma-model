@@ -1,9 +1,10 @@
-"""CLI: init-db, sync, odds, train, predict."""
+"""CLI: init-db, sync, odds, train, predict, source audit."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 
 from mma_model.config import get_settings
@@ -11,8 +12,23 @@ from mma_model.db.session import init_db, session_scope
 from mma_model.odds.the_odds_api import fetch_mma_odds
 from mma_model.predict.backtest import walk_forward_backtest
 from mma_model.predict.train import predict_fight_a_win_prob, train_and_save
+from mma_model.sources.http.block_signals import SourceBlockedError
+from mma_model.sources.ufcstats_public.adapter import UfcstatsPublicAdapter
+from mma_model.sources.ufcstats_public.client import UfcstatsPublicClient
 from mma_model.ufcstats.client import UFCStatsClient
 from mma_model.ufcstats.ingest import sync_pipeline
+
+
+def _parse_years(spec: str) -> range:
+    if ":" not in spec:
+        year = int(spec)
+        return range(year, year + 1)
+    start_s, stop_s = spec.split(":", 1)
+    start = int(start_s)
+    stop = int(stop_s)
+    if stop < start:
+        raise ValueError(f"invalid years range: {spec!r}")
+    return range(start, stop + 1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,6 +87,46 @@ def main(argv: list[str] | None = None) -> int:
         "--omit-predictions",
         action="store_true",
         help="Omit per-fight rows from JSON (metrics only)",
+    )
+
+    p_source = sub.add_parser("source", help="Source adapter utilities")
+    source_sub = p_source.add_subparsers(dest="source_cmd", required=True)
+    p_audit = source_sub.add_parser("audit", help="Audit a public source against manifests")
+    audit_sub = p_audit.add_subparsers(dest="audit_source", required=True)
+    p_ufc = audit_sub.add_parser(
+        "ufcstats-public",
+        help="Audit UFCStats public coverage for DWCS universe",
+    )
+    p_ufc.add_argument("--series", default="dwcs", choices=["dwcs"])
+    p_ufc.add_argument("--years", default="2017:2025", help="Inclusive year range start:stop")
+    p_ufc.add_argument("--json", action="store_true", help="Print JSON report")
+    p_ufc.add_argument(
+        "--fixture-root",
+        type=Path,
+        default=None,
+        help="Optional fixture root (no network)",
+    )
+    p_ufc.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Temporary/ignored HTTP cache directory for live probes",
+    )
+    p_ufc.add_argument(
+        "--live",
+        action="store_true",
+        help="Allow live network probe (operator-only; never used in CI)",
+    )
+    p_ufc.add_argument(
+        "--robots-disallow",
+        action="store_true",
+        help="Force robots_disallow stop (kill-switch / test aid)",
+    )
+    p_ufc.add_argument(
+        "--summary-out",
+        type=Path,
+        default=None,
+        help="Optional path for sanitized aggregate audit summary JSON",
     )
 
     args = p.parse_args(argv)
@@ -132,6 +188,76 @@ def main(argv: list[str] | None = None) -> int:
             out = {k: v for k, v in out.items() if k != "predictions"}
         print(json.dumps(out, indent=2))
         return 0
+
+    if args.cmd == "source" and args.source_cmd == "audit":
+        if args.audit_source != "ufcstats-public":
+            print(f"unsupported audit source: {args.audit_source}")
+            return 1
+        years = _parse_years(args.years)
+        client: UfcstatsPublicClient | None = None
+        tmp_ctx: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            if args.fixture_root is not None:
+                adapter = UfcstatsPublicAdapter.for_fixtures(
+                    fixture_root=args.fixture_root
+                )
+            else:
+                if not args.live:
+                    print(
+                        "refusing live audit without --live; "
+                        "pass --fixture-root for offline fixture mode"
+                    )
+                    return 2
+                cache_dir = args.cache_dir
+                if cache_dir is None:
+                    tmp_ctx = tempfile.TemporaryDirectory(prefix="ufcstats-audit-cache-")
+                    cache_dir = Path(tmp_ctx.name)
+                client = UfcstatsPublicClient(
+                    cache_dir=cache_dir,
+                    robots_disallow=args.robots_disallow,
+                )
+                adapter = UfcstatsPublicAdapter(client=client)
+            report = adapter.audit_manifest_scope(years=years)
+            summary = {
+                "source": report["source"],
+                "years": report["years"],
+                "events_total": report["events_total"],
+                "bouts_total": report["bouts_total"],
+                "events": report["events"],
+                "bouts": report["bouts"],
+                "blocked": report["blocked"],
+                "block_reason": report["block_reason"],
+                "status": "BLOCKED" if report["blocked"] else "COMPLETED",
+            }
+            if args.summary_out is not None:
+                args.summary_out.parent.mkdir(parents=True, exist_ok=True)
+                args.summary_out.write_text(
+                    json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            if args.json:
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(json.dumps(summary, indent=2, sort_keys=True))
+            return 2 if report["blocked"] else 0
+        except SourceBlockedError as exc:
+            print(
+                json.dumps(
+                    {
+                        "source": "ufcstats_public",
+                        "blocked": True,
+                        "block_reason": exc.reason,
+                        "status": "BLOCKED",
+                    },
+                    indent=2,
+                )
+            )
+            return 2
+        finally:
+            if client is not None:
+                client.close()
+            if tmp_ctx is not None:
+                tmp_ctx.cleanup()
 
     return 1
 
