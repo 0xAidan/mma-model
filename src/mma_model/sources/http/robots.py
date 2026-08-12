@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
+
+MAX_ROBOTS_REDIRECTS = 5
+
+
+class RobotsRedirectError(ValueError):
+    """Fail-closed robots redirect policy violation with a typed reason."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        self.reason = reason
+        super().__init__(detail or reason)
 
 
 @dataclass(frozen=True)
@@ -47,6 +57,102 @@ def _path_of(target_url: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
     return path
+
+
+def allowed_robots_hosts(configured_host: str) -> frozenset[str]:
+    """Hosts permitted for robots redirects (configured host + www variant)."""
+    host = configured_host.strip().lower()
+    if host.startswith("www."):
+        bare = host[4:]
+        return frozenset({bare, host})
+    return frozenset({host, f"www.{host}"})
+
+
+def normalize_robots_url(url: str) -> str:
+    """Normalize a robots URL for loop detection (no fragment; lower host)."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    netloc = host
+    if parsed.port:
+        netloc = f"{host}:{parsed.port}"
+    path = parsed.path or "/"
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+
+
+def resolve_robots_redirect_url(
+    *,
+    current_url: str,
+    location: str | None,
+    configured_host: str,
+    visited: set[str],
+    redirect_count: int,
+) -> str:
+    """Resolve one robots redirect hop under the bounded same-host policy.
+
+    Allows at most ``MAX_ROBOTS_REDIRECTS`` hops, only to the configured host
+    (including ``www.``) over http/https, including canonical http↔https
+    same-host transitions. Relative ``Location`` values are resolved against
+    ``current_url``.
+    """
+    if redirect_count >= MAX_ROBOTS_REDIRECTS:
+        raise RobotsRedirectError(
+            "robots_redirect_hop_limit",
+            f"robots redirect exceeded {MAX_ROBOTS_REDIRECTS} hops",
+        )
+    if location is None or not str(location).strip():
+        raise RobotsRedirectError(
+            "robots_redirect_missing_location",
+            "robots redirect missing Location header",
+        )
+
+    raw_location = str(location).strip()
+    try:
+        joined = urljoin(current_url, raw_location)
+        parsed = urlparse(joined)
+    except ValueError as exc:
+        raise RobotsRedirectError(
+            "robots_redirect_malformed_location",
+            f"robots redirect malformed Location: {raw_location!r}",
+        ) from exc
+
+    # urlparse tolerates some broken values; require a usable http(s) host.
+    if parsed.scheme not in {"http", "https"}:
+        raise RobotsRedirectError(
+            "robots_redirect_non_http",
+            f"robots redirect scheme not http(s): {parsed.scheme!r}",
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise RobotsRedirectError(
+            "robots_redirect_userinfo",
+            "robots redirect must not include userinfo",
+        )
+    # Reject userinfo that urlparse left in netloc for odd inputs.
+    netloc = parsed.netloc or ""
+    if "@" in netloc:
+        raise RobotsRedirectError(
+            "robots_redirect_userinfo",
+            "robots redirect must not include userinfo",
+        )
+
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise RobotsRedirectError(
+            "robots_redirect_malformed_location",
+            f"robots redirect malformed Location: {raw_location!r}",
+        )
+    if hostname not in allowed_robots_hosts(configured_host):
+        raise RobotsRedirectError(
+            "robots_redirect_off_host",
+            f"robots redirect host not allowed: {hostname!r}",
+        )
+
+    normalized = normalize_robots_url(joined)
+    if normalized in visited:
+        raise RobotsRedirectError(
+            "robots_redirect_loop",
+            f"robots redirect loop detected at {normalized!r}",
+        )
+    return normalized
 
 
 def _product_token(user_agent: str) -> str:
@@ -184,21 +290,33 @@ def evaluate_robots_access(
     user_agent: str,
     target_url: str,
     network_error: str | None = None,
+    redirect_error: str | None = None,
 ) -> RobotsAccessDecision:
     """Evaluate robots access using RFC 9309 status semantics + focused parsing.
 
-    Status handling (RFC 9309 §2.3.1):
+    Status handling (RFC 9309 §2.3.1) applies to the **final** response after
+    bounded same-host redirect retrieval:
     - 2xx: parse directives for the configured UA (with ``*`` fallback)
     - 401/403: complete disallow
     - 404/410: treat as no robots file → allow all
     - other 4xx (unavailable file): allow all
     - 5xx / network unreachable: temporary complete disallow (fail closed)
+    - redirect policy violations: fail closed with typed ``robots_redirect_*``
 
     Parsing: merge all groups matching the most-specific configured UA token
     (``*`` only if none match); do not union unrelated agents; longest-path
     match with Allow-on-ties across the merged rule set.
     """
     path = _path_of(target_url)
+
+    if redirect_error:
+        return RobotsAccessDecision(
+            allowed=False,
+            policy_decision=redirect_error,
+            robots_status_code=status_code,
+            detail=f"robots redirect policy fail-closed: {redirect_error}",
+            target_path=path,
+        )
 
     if network_error:
         return RobotsAccessDecision(

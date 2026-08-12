@@ -15,6 +15,10 @@ from urllib.parse import urlparse
 import httpx
 
 from mma_model.sources.http.block_signals import SourceBlockedError, detect_block_signal
+from mma_model.sources.http.robots import (
+    normalize_robots_url,
+    resolve_robots_redirect_url,
+)
 from mma_model.sources.http_politeness import HttpPolitenessConfig, HostPoliteness
 
 FORBIDDEN_REQUEST_HEADERS = frozenset(
@@ -115,20 +119,41 @@ class PoliteHttpClient:
         return len(self._client.cookies) == 0
 
     def fetch_robots_txt(self) -> tuple[int, str, str]:
-        """Fetch ``/robots.txt`` with cookie-free hygiene (path allowlist exception).
+        """Fetch ``/robots.txt`` with cookie-free hygiene and bounded redirects.
 
-        Returns ``(status_code, body_text, sha256_hex)``. Does not treat non-200
-        as permission; callers must apply fail-closed policy.
+        Follows at most five redirects, only to the configured host (or ``www``)
+        over http/https (including canonical http↔https same-host transitions).
+        Off-host, userinfo, non-http(s), loops, missing/malformed Location, and
+        hop-limit violations raise ``RobotsRedirectError`` with typed reasons.
+
+        Returns ``(final_status_code, body_text, sha256_hex)``. Callers apply
+        RFC 9309 status semantics to the final response; non-200 is not
+        treated as permission here.
         """
-        url = f"http://www.{self.host}/robots.txt"
-        self._wait_delay()
-        self._client.cookies.clear()
-        response = self._client.get(url)
-        self._client.cookies.clear()
-        body = response.content
-        digest = hashlib.sha256(body).hexdigest()
-        text = body.decode("utf-8", errors="replace")
-        return response.status_code, text, digest
+        url = normalize_robots_url(f"http://www.{self.host}/robots.txt")
+        visited: set[str] = set()
+        redirect_count = 0
+        while True:
+            normalized_current = normalize_robots_url(url)
+            visited.add(normalized_current)
+            self._wait_delay()
+            self._client.cookies.clear()
+            response = self._client.get(url)
+            self._client.cookies.clear()
+            if 300 <= response.status_code <= 399:
+                url = resolve_robots_redirect_url(
+                    current_url=str(response.url) if response.url else url,
+                    location=response.headers.get("location"),
+                    configured_host=self.host,
+                    visited=visited,
+                    redirect_count=redirect_count,
+                )
+                redirect_count += 1
+                continue
+            body = response.content
+            digest = hashlib.sha256(body).hexdigest()
+            text = body.decode("utf-8", errors="replace")
+            return response.status_code, text, digest
 
     def get_text(self, url: str) -> tuple[str, str]:
         """Return ``(text, sha256_hex)`` with politeness, cache, and block stops."""

@@ -8,7 +8,11 @@ from typing import Any, Mapping
 from mma_model import __version__ as CLIENT_VERSION
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.http.polite_client import PoliteHttpClient
-from mma_model.sources.http.robots import RobotsAccessDecision, evaluate_robots_access
+from mma_model.sources.http.robots import (
+    RobotsAccessDecision,
+    RobotsRedirectError,
+    evaluate_robots_access,
+)
 from mma_model.sources.http_politeness import load_http_politeness
 from mma_model.sources.ufcstats_public.parser import SOURCE_UFCSTATS_PUBLIC
 
@@ -22,11 +26,13 @@ def evaluate_robots_policy(
     target_path: str,
     user_agent: str | None = None,
     network_error: str | None = None,
+    redirect_error: str | None = None,
     host: str = "www.ufcstats.com",
 ) -> dict[str, Any]:
     """RFC 9309 robots policy for the configured identifiable UA.
 
-    Redirect policy for fetches remains same-host/bounded in PoliteHttpClient.
+    Robots retrieval follows at most five same-host http(s) redirects; page
+    fetches still reject redirects without following them.
     """
     ua = user_agent or load_http_politeness().user_agent
     path = target_path if target_path.startswith("/") else f"/{target_path}"
@@ -37,6 +43,7 @@ def evaluate_robots_policy(
         user_agent=ua,
         target_url=target_url,
         network_error=network_error,
+        redirect_error=redirect_error,
     )
     return decision.as_dict()
 
@@ -95,6 +102,30 @@ def run_bounded_live_probe(
     try:
         robots_status, robots_body, robots_hash = client.fetch_robots_txt()
         network_error = None
+        redirect_error = None
+    except RobotsRedirectError as exc:
+        robots_decision = evaluate_robots_policy(
+            robots_status_code=None,
+            robots_body_text="",
+            target_path=path_category,
+            user_agent=ua,
+            redirect_error=exc.reason,
+            host=f"www.{host}",
+        )
+        robots_decision = {
+            **robots_decision,
+            "robots_url": robots_url,
+            "response_content_hash": None,
+        }
+        return build_sanitized_probe_evidence(
+            host=host,
+            path_category=path_category,
+            http_status=None,
+            block_reason=str(robots_decision["policy_decision"]),
+            response_content_hash=None,
+            observed_at=observed,
+            robots=robots_decision,
+        )
     except Exception as exc:  # noqa: BLE001 - fail closed per RFC 9309
         robots_decision = evaluate_robots_policy(
             robots_status_code=None,
@@ -125,6 +156,7 @@ def run_bounded_live_probe(
         target_path=path_category,
         user_agent=ua,
         network_error=network_error,
+        redirect_error=redirect_error,
         host=f"www.{host}",
     )
     robots_decision = {
