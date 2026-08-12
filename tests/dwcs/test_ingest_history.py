@@ -22,7 +22,7 @@ from mma_model.db.tables.core import (
     EventSourceId,
     FighterSourceId,
 )
-from mma_model.db.tables.provenance import RawObservation
+from mma_model.db.tables.provenance import RawObservation, SourceCheckpoint
 from mma_model.dwcs.classification import (
     BoutCategory,
     ClassificationError,
@@ -40,8 +40,9 @@ from mma_model.dwcs.manifest import (
     load_dwcs_mismatch_ledger,
     validate_expected_universe,
 )
+from mma_model.dwcs.winners import WinnerValidationError, resolve_version_winner
 from mma_model.ingest.raw_store import ContentAddressedRawStore
-from mma_model.ingest.repository import IngestRepository
+from mma_model.ingest.repository import IngestRepository, NestedBatchTransactionError
 from mma_model.sources.policy import SourceId, load_source_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -160,14 +161,31 @@ def test_every_bout_row_ends_in_exactly_one_category() -> None:
 
 def test_cancelled_replacement_classification() -> None:
     assert (
+        classify_event_cancellation({"kind": "cancellation"}) is BoutCategory.CANCELLED
+    )
+    assert (
         classify_event_cancellation({"kind": "cancelled"}) is BoutCategory.CANCELLED
+    )
+    assert (
+        classify_event_cancellation({"kind": "canceled"}) is BoutCategory.CANCELLED
     )
     assert (
         classify_event_cancellation({"kind": "replacement"})
         is BoutCategory.REPLACEMENT
     )
-    with pytest.raises(ClassificationError):
+    with pytest.raises(ClassificationError, match="unknown cancellation kind"):
         classify_event_cancellation({"kind": "mystery"})
+    # Builder mismatch-ledger shape may carry kind=cancellation.
+    assert (
+        classify_mismatch_gap({"kind": "cancellation", "espn_event_id": "x"})
+        is BoutCategory.CANCELLED
+    )
+    assert (
+        classify_mismatch_gap(
+            {"path": "full_cancellation_replacement_ledger", "severity": "incomplete_not_done"}
+        )
+        is BoutCategory.MISMATCH_LEDGER_GAP
+    )
 
 
 def test_malformed_unknown_enum_fail_closed() -> None:
@@ -447,6 +465,191 @@ def test_transaction_failure_after_earlier_batch_preserves_prior(env) -> None:
     with env["Session"]() as session:
         assert len(list(session.scalars(select(CanonicalEvent)))) == 2
         assert len(list(session.scalars(select(CanonicalBout)))) >= 1
+
+
+def _batch_event_ids_2017() -> list[str]:
+    events = sorted(
+        [e for e in load_dwcs_event_manifest(EVENTS_PATH) if e.calendar_year == 2017],
+        key=lambda e: e.espn_event_id,
+    )
+    return [e.espn_event_id for e in events]
+
+
+def _counts(session_factory) -> dict[str, int]:
+    with session_factory() as session:
+        return {
+            "events": len(list(session.scalars(select(CanonicalEvent)))),
+            "bouts": len(list(session.scalars(select(CanonicalBout)))),
+            "results": len(list(session.scalars(select(BoutResultVersion)))),
+            "raw": len(list(session.scalars(select(RawObservation)))),
+            "checkpoints": len(list(session.scalars(select(SourceCheckpoint)))),
+        }
+
+
+@pytest.mark.parametrize(
+    "fail_at",
+    ["after_canonical", "after_raw_observations", "during_result_versions"],
+)
+def test_batch_atomicity_failure_rolls_back_only_failed_batch(env, fail_at: str) -> None:
+    event_ids = _batch_event_ids_2017()
+    assert len(event_ids) >= 2
+    # Succeed batch 1, fail batch 2 at the requested phase.
+    report = sync_dwcs_history(
+        through_year=2017,
+        repo=env["repo"],
+        session_factory=env["Session"],
+        dry_run=False,
+        observed_at=FIXED_OBSERVED,
+        fail_on_batch=2,
+        fail_at=fail_at,
+    )
+    assert report.batches_committed == 1
+    assert report.batches_failed == 1
+    counts = _counts(env["Session"])
+    # Prior batch preserved: first 2017 event only.
+    first_id = event_ids[0]
+    second_id = event_ids[1]
+    with env["Session"]() as session:
+        first_uuid = canonical_event_id(first_id)
+        second_uuid = canonical_event_id(second_id)
+        assert session.get(CanonicalEvent, first_uuid) is not None
+        assert session.get(CanonicalEvent, second_uuid) is None
+        first_bouts = [
+            b
+            for b in session.scalars(select(CanonicalBout)).all()
+            if b.event_id == first_uuid
+        ]
+        assert len(first_bouts) >= 1
+        assert counts["events"] == 1
+        # Failed batch left zero partial rows / checkpoint token for event 2.
+        tokens = [
+            c.cursor_token for c in session.scalars(select(SourceCheckpoint)).all()
+        ]
+        assert f"event:{second_id}" not in tokens
+        assert f"event:{first_id}" in tokens
+        second_bout_ids = {
+            canonical_bout_id(b.espn_competition_id)
+            for b in load_dwcs_bout_manifest(BOUTS_PATH)
+            if b.espn_event_id == second_id
+        }
+        for bout_id in second_bout_ids:
+            assert session.get(CanonicalBout, bout_id) is None
+            assert (
+                list(
+                    session.scalars(
+                        select(BoutResultVersion).where(
+                            BoutResultVersion.bout_id == bout_id
+                        )
+                    )
+                )
+                == []
+            )
+
+
+def test_nested_commit_batch_prohibited_during_owned_session(env) -> None:
+    repo: IngestRepository = env["repo"]
+    with env["Session"]() as session:
+        repo.begin_owned_batch(session)
+        with pytest.raises(NestedBatchTransactionError):
+            repo.commit_batch(
+                run_id="missing",
+                observations=[],
+                checkpoint_token="x",
+                checkpoint_version="v1",
+            )
+        repo.end_owned_batch(session)
+
+
+def test_winner_validation_event_night_and_current_rules() -> None:
+    participants = [
+        {"espn_athlete_id": "1", "current_winner_flag": True},
+        {"espn_athlete_id": "2", "current_winner_flag": False},
+    ]
+    ids = {"1": "f1", "2": "f2"}
+    ok_night = resolve_version_winner(
+        version_kind="event_night",
+        result_class="decisive",
+        winner_espn_athlete_id="1",
+        participants=participants,
+        fighter_id_by_espn=ids,
+    )
+    assert ok_night.winner_fighter_id == "f1"
+    ok_current = resolve_version_winner(
+        version_kind="current",
+        result_class="decisive",
+        winner_espn_athlete_id=None,
+        participants=participants,
+        fighter_id_by_espn=ids,
+    )
+    assert ok_current.source == "current_winner_flag"
+    assert ok_current.winner_fighter_id == "f1"
+
+    with pytest.raises(WinnerValidationError) as nonpart:
+        resolve_version_winner(
+            version_kind="event_night",
+            result_class="decisive",
+            winner_espn_athlete_id="9",
+            participants=participants,
+            fighter_id_by_espn=ids,
+        )
+    assert nonpart.value.evidence["reason"] == "nonparticipant_winner"
+
+    with pytest.raises(WinnerValidationError) as missing:
+        resolve_version_winner(
+            version_kind="event_night",
+            result_class="decisive",
+            winner_espn_athlete_id=None,
+            participants=participants,
+            fighter_id_by_espn=ids,
+        )
+    assert missing.value.evidence["reason"] == "missing_decisive_winner"
+
+    with pytest.raises(WinnerValidationError) as dup:
+        resolve_version_winner(
+            version_kind="current",
+            result_class="decisive",
+            winner_espn_athlete_id="1",
+            participants=[
+                {"espn_athlete_id": "1", "current_winner_flag": True},
+                {"espn_athlete_id": "2", "current_winner_flag": True},
+            ],
+            fighter_id_by_espn=ids,
+        )
+    assert dup.value.evidence["reason"] == "duplicate_winner_flag"
+
+    with pytest.raises(WinnerValidationError) as contrad:
+        resolve_version_winner(
+            version_kind="current",
+            result_class="decisive",
+            winner_espn_athlete_id="1",
+            participants=[
+                {"espn_athlete_id": "1", "current_winner_flag": False},
+                {"espn_athlete_id": "2", "current_winner_flag": True},
+            ],
+            fighter_id_by_espn=ids,
+        )
+    assert contrad.value.evidence["reason"] == "flag_winner_contradiction"
+
+    nc = resolve_version_winner(
+        version_kind="current",
+        result_class="no_contest",
+        winner_espn_athlete_id=None,
+        participants=[
+            {"espn_athlete_id": "1", "current_winner_flag": False},
+            {"espn_athlete_id": "2", "current_winner_flag": False},
+        ],
+        fighter_id_by_espn=ids,
+    )
+    assert nc.winner_fighter_id is None
+    with pytest.raises(WinnerValidationError) as nc_bad:
+        resolve_version_winner(
+            version_kind="current",
+            result_class="draw",
+            winner_espn_athlete_id="1",
+            participants=participants,
+            fighter_id_by_espn=ids,
+        )
+    assert nc_bad.value.evidence["reason"] == "non_decisive_has_winner"
 
 
 def test_dry_run_nonmutation(env) -> None:

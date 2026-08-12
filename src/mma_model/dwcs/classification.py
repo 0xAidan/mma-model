@@ -12,7 +12,10 @@ RESULT_CLASSES = frozenset({"decisive", "draw", "no_contest"})
 VERSION_STATES = frozenset(
     {"assumed_equal_to_current", "reversed_to_no_contest", "unchanged"}
 )
-CANCELLATION_KINDS = frozenset({"cancelled", "canceled", "replacement"})
+# Documented ledger kinds from the manifest builder + spelling variants.
+CANCELLATION_KINDS = frozenset(
+    {"cancellation", "cancelled", "canceled", "replacement"}
+)
 
 
 class BoutCategory(StrEnum):
@@ -155,21 +158,30 @@ def classify_bout(
 
 
 def classify_event_cancellation(entry: Mapping[str, Any]) -> BoutCategory:
-    """Classify a cancellation/replacement ledger entry into one category."""
+    """Classify a cancellation/replacement ledger entry into one category.
+
+    Supports the builder shape ``kind='cancellation'`` plus cancelled/canceled
+    spellings and ``replacement``. Unknown kinds fail closed.
+    """
     kind = str(entry.get("kind") or entry.get("status") or "").strip().lower()
-    if kind in {"cancelled", "canceled"}:
-        return BoutCategory.CANCELLED
+    if kind not in CANCELLATION_KINDS:
+        raise ClassificationError(f"unknown cancellation kind: {kind!r}")
     if kind == "replacement":
         return BoutCategory.REPLACEMENT
-    raise ClassificationError(f"unknown cancellation kind: {kind!r}")
+    return BoutCategory.CANCELLED
 
 
 def classify_mismatch_gap(gap: Mapping[str, Any]) -> BoutCategory:
     """Every open mismatch gap is categorized (never silently dropped)."""
+    # Builder may emit gap rows with kind='cancellation' inside mismatch ledgers.
+    kind = str(gap.get("kind") or "").strip().lower()
+    if kind in CANCELLATION_KINDS:
+        return classify_event_cancellation(gap)
+
     severity = str(gap.get("severity") or "").strip().lower()
     path = str(gap.get("path") or "").strip().lower()
-    if not path:
-        raise ClassificationError("mismatch gap missing path")
-    if severity in {"incomplete_not_done", "mismatch", "open"} or path:
+    if not path and not severity:
+        raise ClassificationError("mismatch gap missing path/severity/kind")
+    if path or severity in {"incomplete_not_done", "mismatch", "open", ""}:
         return BoutCategory.MISMATCH_LEDGER_GAP
     raise ClassificationError(f"uncategorized mismatch gap: {gap!r}")

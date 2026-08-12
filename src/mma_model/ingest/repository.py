@@ -27,6 +27,10 @@ class ReservedAttributeKeyError(ValueError):
     """Raised when attributes contain reserved contract keys."""
 
 
+class NestedBatchTransactionError(RuntimeError):
+    """Raised when a batch write would open a nested independent commit."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -61,6 +65,7 @@ class IngestRepository:
         self._reserved_attribute_keys = frozenset(
             load_source_policy().observation_metadata.reserved_attribute_keys
         )
+        self._active_owned_session: Session | None = None
 
     def start_run(self, *, source: str, stream: str, scope: str) -> IngestRun:
         with self._session_factory() as session:
@@ -109,87 +114,106 @@ class IngestRepository:
             run.error_message = error_message
             session.commit()
 
-    def commit_batch(
+    def apply_batch(
         self,
+        session: Session,
         *,
         run_id: str,
         observations: Sequence[SourceObservationRecord],
         checkpoint_token: str,
         checkpoint_version: str,
+        on_after_raw_observation: Callable[[SourceObservationRecord], None] | None = None,
+        on_before_result_version: Callable[[SourceObservationRecord], None] | None = None,
     ) -> BatchCommitResult:
+        """Write observations/checkpoint into a caller-owned session (no commit).
+
+        Used by DWCS-103 so canonical entity writes and provenance land in one
+        SQL transaction. Does not call ``session.commit()`` or ``rollback()``.
+        """
+        if self._active_owned_session is not None and self._active_owned_session is not session:
+            raise NestedBatchTransactionError(
+                "nested independent batch session is prohibited"
+            )
+
         inserted = 0
         skipped_identical = 0
         skipped_downgrade = 0
         skipped_preserve_version = 0
 
-        with self._session_factory() as session:
-            run = session.get(IngestRun, run_id)
-            if run is None:
-                raise KeyError(f"unknown ingest run {run_id}")
+        run = session.get(IngestRun, run_id)
+        if run is None:
+            raise KeyError(f"unknown ingest run {run_id}")
 
-            for obs in observations:
-                self._validate_observation(obs)
-                raw_ref = self._resolve_raw_ref(obs)
+        pending_apply: list[SourceObservationRecord] = []
+        for obs in observations:
+            self._validate_observation(obs)
+            raw_ref = self._resolve_raw_ref(obs)
 
-                existing = session.scalars(
-                    select(RawObservation).where(
-                        RawObservation.source == obs.source,
-                        RawObservation.stream == obs.stream,
-                        RawObservation.scope == run.scope,
-                        RawObservation.checkpoint_version == checkpoint_version,
-                        RawObservation.external_id == obs.external_id,
-                        RawObservation.payload_hash == obs.payload_hash,
-                    )
-                ).first()
-                if existing is not None:
-                    skipped_identical += 1
-                    continue
-
-                session.add(
-                    RawObservation(
-                        ingest_run_id=run.id,
-                        source=obs.source,
-                        stream=obs.stream,
-                        scope=run.scope,
-                        checkpoint_version=checkpoint_version,
-                        external_id=obs.external_id,
-                        entity_kind=obs.entity_kind,
-                        observed_at=obs.observed_at,
-                        effective_at=obs.effective_at,
-                        source_published_at=obs.source_published_at,
-                        source_updated_at=obs.source_updated_at,
-                        proxy_published_at=obs.proxy_published_at,
-                        timestamp_quality=obs.timestamp_quality,
-                        timestamp_quality_source=obs.timestamp_quality_source,
-                        quality_tier=obs.quality_tier,
-                        attributes_json=_canonical_attributes_json(dict(obs.attributes)),
-                        payload_hash=obs.payload_hash,
-                        raw_ref=raw_ref,
-                        detail_level=str(obs.detail_level),
-                        version_kind=obs.version_kind,
-                        schema_version=obs.schema_version,
-                        subject_id=obs.subject_id,
-                    )
+            existing = session.scalars(
+                select(RawObservation).where(
+                    RawObservation.source == obs.source,
+                    RawObservation.stream == obs.stream,
+                    RawObservation.scope == run.scope,
+                    RawObservation.checkpoint_version == checkpoint_version,
+                    RawObservation.external_id == obs.external_id,
+                    RawObservation.payload_hash == obs.payload_hash,
                 )
-                inserted += 1
+            ).first()
+            if existing is not None:
+                skipped_identical += 1
+                continue
 
-                apply_result = self._apply_observation(session, obs)
-                if apply_result == "downgrade":
-                    skipped_downgrade += 1
-                elif apply_result == "preserve_version":
-                    skipped_preserve_version += 1
-
-            self._upsert_checkpoint(
-                session,
-                source=run.source,
-                stream=run.stream,
-                scope=run.scope,
-                version=checkpoint_version,
-                cursor_token=checkpoint_token,
-                run_id=run.id,
+            session.add(
+                RawObservation(
+                    ingest_run_id=run.id,
+                    source=obs.source,
+                    stream=obs.stream,
+                    scope=run.scope,
+                    checkpoint_version=checkpoint_version,
+                    external_id=obs.external_id,
+                    entity_kind=obs.entity_kind,
+                    observed_at=obs.observed_at,
+                    effective_at=obs.effective_at,
+                    source_published_at=obs.source_published_at,
+                    source_updated_at=obs.source_updated_at,
+                    proxy_published_at=obs.proxy_published_at,
+                    timestamp_quality=obs.timestamp_quality,
+                    timestamp_quality_source=obs.timestamp_quality_source,
+                    quality_tier=obs.quality_tier,
+                    attributes_json=_canonical_attributes_json(dict(obs.attributes)),
+                    payload_hash=obs.payload_hash,
+                    raw_ref=raw_ref,
+                    detail_level=str(obs.detail_level),
+                    version_kind=obs.version_kind,
+                    schema_version=obs.schema_version,
+                    subject_id=obs.subject_id,
+                )
             )
-            run.observation_count = int(run.observation_count or 0) + inserted
-            session.commit()
+            inserted += 1
+            pending_apply.append(obs)
+
+        if on_after_raw_observation is not None and pending_apply:
+            on_after_raw_observation(pending_apply[-1])
+
+        for obs in pending_apply:
+            if on_before_result_version is not None and obs.entity_kind == "bout_result":
+                on_before_result_version(obs)
+            apply_result = self._apply_observation(session, obs)
+            if apply_result == "downgrade":
+                skipped_downgrade += 1
+            elif apply_result == "preserve_version":
+                skipped_preserve_version += 1
+
+        self._upsert_checkpoint(
+            session,
+            source=run.source,
+            stream=run.stream,
+            scope=run.scope,
+            version=checkpoint_version,
+            cursor_token=checkpoint_token,
+            run_id=run.id,
+        )
+        run.observation_count = int(run.observation_count or 0) + inserted
 
         return BatchCommitResult(
             inserted=inserted,
@@ -197,6 +221,66 @@ class IngestRepository:
             skipped_downgrade=skipped_downgrade,
             skipped_preserve_version=skipped_preserve_version,
         )
+
+    def commit_batch(
+        self,
+        *,
+        run_id: str,
+        observations: Sequence[SourceObservationRecord],
+        checkpoint_token: str,
+        checkpoint_version: str,
+        session: Session | None = None,
+    ) -> BatchCommitResult:
+        """Apply a batch and commit.
+
+        When ``session`` is omitted, opens a repository-owned session (DWCS-101).
+        When ``session`` is provided, applies into that session and commits it —
+        callers that need a wider atomic unit should use ``apply_batch`` instead
+        and commit once themselves.
+        """
+        if session is not None:
+            if self._active_owned_session is not None:
+                raise NestedBatchTransactionError(
+                    "commit_batch cannot nest inside another owned batch transaction"
+                )
+            result = self.apply_batch(
+                session,
+                run_id=run_id,
+                observations=observations,
+                checkpoint_token=checkpoint_token,
+                checkpoint_version=checkpoint_version,
+            )
+            session.commit()
+            return result
+
+        if self._active_owned_session is not None:
+            raise NestedBatchTransactionError(
+                "commit_batch cannot open a nested independent commit while a "
+                "caller-owned batch session is active"
+            )
+
+        with self._session_factory() as owned:
+            result = self.apply_batch(
+                owned,
+                run_id=run_id,
+                observations=observations,
+                checkpoint_token=checkpoint_token,
+                checkpoint_version=checkpoint_version,
+            )
+            owned.commit()
+            return result
+
+    def begin_owned_batch(self, session: Session) -> None:
+        """Mark ``session`` as the active caller-owned batch transaction."""
+        if self._active_owned_session is not None:
+            raise NestedBatchTransactionError(
+                "caller-owned batch session already active"
+            )
+        self._active_owned_session = session
+
+    def end_owned_batch(self, session: Session) -> None:
+        if self._active_owned_session is session:
+            self._active_owned_session = None
 
     def _validate_observation(self, obs: SourceObservationRecord) -> None:
         collisions = sorted(

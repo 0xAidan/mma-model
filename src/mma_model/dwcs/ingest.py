@@ -45,10 +45,13 @@ from mma_model.dwcs.manifest import (
     load_dwcs_mismatch_ledger,
     validate_expected_universe,
 )
+from mma_model.dwcs.winners import WinnerValidationError, resolve_version_winner
 from mma_model.ingest.repository import IngestRepository
 from mma_model.sources.contracts import DetailLevel, SourceObservationRecord
 from mma_model.sources.policy import SourceId
 from mma_model.sources.ufcstats_public.adapter import UfcstatsPublicAdapter
+
+FailAt = str | None  # after_canonical | after_raw_observations | during_result_versions
 
 SessionFactory = Callable[[], Session]
 SOURCE_DWCS_MANIFEST = SourceId.DWCS_MANIFEST.value
@@ -156,26 +159,15 @@ def _ordered_participants(
     return parts[0], parts[1]
 
 
-def _winner_id(
-    *,
-    result_class: str,
-    winner_espn_id: str | None,
-    fighter_a_id: str,
-    fighter_b_id: str,
-    fighter_a_espn: str,
-    fighter_b_espn: str,
-) -> str | None:
-    if result_class in {"draw", "no_contest"}:
-        return None
-    if not winner_espn_id:
-        return None
-    if winner_espn_id == fighter_a_espn:
-        return fighter_a_id
-    if winner_espn_id == fighter_b_espn:
-        return fighter_b_id
-    raise ManifestValidationError(
-        f"winner espn id {winner_espn_id!r} not in participants"
-    )
+def _participant_maps(row: DwcsBoutManifestRow) -> list[dict[str, Any]]:
+    return [
+        {
+            "espn_athlete_id": p.espn_athlete_id,
+            "current_winner_flag": p.current_winner_flag,
+            "display_name": p.display_name,
+        }
+        for p in row.participants
+    ]
 
 
 def _ensure_fighter(
@@ -472,6 +464,8 @@ def sync_dwcs_history(
     provider_blocked: bool = True,
     provider_overlays: Mapping[str, Mapping[str, Any]] | None = None,
     fail_after_batches: int | None = None,
+    fail_at: FailAt = None,
+    fail_on_batch: int | None = None,
 ) -> SyncHistoryReport:
     """Ingest frozen DWCS manifests before any provider facts.
 
@@ -575,147 +569,189 @@ def sync_dwcs_history(
 
             event_bouts = bouts_by_event.get(event.espn_event_id, [])
             observations: list[SourceObservationRecord] = []
+            inject_here = fail_on_batch is not None and batch_idx == fail_on_batch
 
             with session_factory() as session:
-                event_uuid = _ensure_event(session, event)
-                for bout in event_bouts:
-                    classification = _classify_bout_row(bout)
-                    duration = derive_elapsed_seconds(
-                        ending_round=None,
-                        time_str=None,
-                        scheduled_rounds=DEFAULT_SCHEDULED_ROUNDS,
-                    )
-                    if duration.status is not DurationStatus.MISSING:
-                        raise ManifestValidationError(
-                            "manifest rows must not invent duration detail"
+                repo.begin_owned_batch(session)
+                try:
+                    event_uuid = _ensure_event(session, event)
+                    for bout in event_bouts:
+                        classification = _classify_bout_row(bout)
+                        duration = derive_elapsed_seconds(
+                            ending_round=None,
+                            time_str=None,
+                            scheduled_rounds=DEFAULT_SCHEDULED_ROUNDS,
                         )
-
-                    part_a, part_b = _ordered_participants(bout)
-                    fighter_a_id = _ensure_fighter(
-                        session,
-                        espn_athlete_id=part_a.espn_athlete_id,
-                        display_name=part_a.display_name,
-                    )
-                    fighter_b_id = _ensure_fighter(
-                        session,
-                        espn_athlete_id=part_b.espn_athlete_id,
-                        display_name=part_b.display_name,
-                    )
-                    session.flush()
-                    bout_uuid = _ensure_bout(
-                        session,
-                        row=bout,
-                        event_uuid=event_uuid,
-                        fighter_a_id=fighter_a_id,
-                        fighter_b_id=fighter_b_id,
-                    )
-
-                    effective_night = _parse_ts(bout.occurrence_timestamp)
-                    if effective_night is None:
-                        raise ManifestValidationError(
-                            f"missing occurrence_timestamp for {bout.bout_id}"
-                        )
-                    # Never backdate acquisition observed_at; proxy is separate.
-                    proxy_published_at = effective_night + timedelta(days=1)
-
-                    en_winner = _winner_id(
-                        result_class=bout.event_night_result.class_,
-                        winner_espn_id=bout.event_night_result.winner_espn_athlete_id,
-                        fighter_a_id=fighter_a_id,
-                        fighter_b_id=fighter_b_id,
-                        fighter_a_espn=part_a.espn_athlete_id,
-                        fighter_b_espn=part_b.espn_athlete_id,
-                    )
-                    if bout.current_result.class_ == "decisive":
-                        winners = [
-                            p for p in bout.participants if p.current_winner_flag
-                        ]
-                        if len(winners) != 1:
+                        if duration.status is not DurationStatus.MISSING:
                             raise ManifestValidationError(
-                                f"decisive bout {bout.bout_id} needs one current winner"
+                                "manifest rows must not invent duration detail"
                             )
-                        cur_winner = (
-                            fighter_a_id
-                            if winners[0].espn_athlete_id == part_a.espn_athlete_id
-                            else fighter_b_id
-                        )
-                    else:
-                        cur_winner = None
 
-                    current_effective = effective_night
-                    if bout.version_state == "reversed_to_no_contest":
-                        current_effective = (
-                            _parse_ts(bout.occurrence_end_timestamp) or effective_night
+                        part_a, part_b = _ordered_participants(bout)
+                        fighter_a_id = _ensure_fighter(
+                            session,
+                            espn_athlete_id=part_a.espn_athlete_id,
+                            display_name=part_a.display_name,
                         )
-
-                    observations.append(
-                        _build_result_observation(
+                        fighter_b_id = _ensure_fighter(
+                            session,
+                            espn_athlete_id=part_b.espn_athlete_id,
+                            display_name=part_b.display_name,
+                        )
+                        session.flush()
+                        bout_uuid = _ensure_bout(
+                            session,
                             row=bout,
-                            bout_uuid=bout_uuid,
-                            version_kind="event_night",
+                            event_uuid=event_uuid,
                             fighter_a_id=fighter_a_id,
                             fighter_b_id=fighter_b_id,
-                            winner_fighter_id=en_winner,
-                            result_type=bout.event_night_result.class_,
-                            effective_at=effective_night,
-                            observed_at=observed,
-                            proxy_published_at=proxy_published_at,
-                            classification=classification,
-                            duration_status=duration.status.value,
                         )
-                    )
-                    observations.append(
-                        _build_result_observation(
-                            row=bout,
-                            bout_uuid=bout_uuid,
-                            version_kind="current",
-                            fighter_a_id=fighter_a_id,
-                            fighter_b_id=fighter_b_id,
-                            winner_fighter_id=cur_winner,
-                            result_type=bout.current_result.class_,
-                            effective_at=current_effective,
-                            observed_at=observed,
-                            proxy_published_at=proxy_published_at,
-                            classification=classification,
-                            duration_status=duration.status.value,
-                        )
-                    )
 
-                    overlay = (provider_overlays or {}).get(bout.espn_competition_id)
-                    if overlay:
-                        evidence = detect_provider_disagreement(
-                            row=bout,
-                            provider_participant_espn_ids=overlay.get(
-                                "participant_espn_ids"
-                            ),
-                            provider_result_class=overlay.get("result_class"),
-                        )
-                        if evidence:
+                        effective_night = _parse_ts(bout.occurrence_timestamp)
+                        if effective_night is None:
+                            raise ManifestValidationError(
+                                f"missing occurrence_timestamp for {bout.bout_id}"
+                            )
+                        proxy_published_at = effective_night + timedelta(days=1)
+                        fighter_by_espn = {
+                            part_a.espn_athlete_id: fighter_a_id,
+                            part_b.espn_athlete_id: fighter_b_id,
+                        }
+                        participant_maps = _participant_maps(bout)
+
+                        en_winner_id: str | None = None
+                        cur_winner_id: str | None = None
+                        try:
+                            en_res = resolve_version_winner(
+                                version_kind="event_night",
+                                result_class=bout.event_night_result.class_,
+                                winner_espn_athlete_id=(
+                                    bout.event_night_result.winner_espn_athlete_id
+                                ),
+                                participants=participant_maps,
+                                fighter_id_by_espn=fighter_by_espn,
+                            )
+                            en_winner_id = en_res.winner_fighter_id
+                            cur_res = resolve_version_winner(
+                                version_kind="current",
+                                result_class=bout.current_result.class_,
+                                winner_espn_athlete_id=(
+                                    bout.current_result.winner_espn_athlete_id
+                                ),
+                                participants=participant_maps,
+                                fighter_id_by_espn=fighter_by_espn,
+                            )
+                            cur_winner_id = cur_res.winner_fighter_id
+                        except WinnerValidationError as winner_exc:
                             state.conflicts += 1
                             state.category_counts[BoutCategory.CONFLICT.value] += 1
                             observations.append(
                                 _conflict_observation(
                                     bout_uuid=bout_uuid,
                                     espn_competition_id=bout.espn_competition_id,
-                                    evidence=evidence,
+                                    evidence=winner_exc.evidence,
                                     observed_at=observed,
                                     effective_at=effective_night,
                                 )
                             )
+                            continue
 
-                session.commit()
+                        current_effective = effective_night
+                        if bout.version_state == "reversed_to_no_contest":
+                            current_effective = (
+                                _parse_ts(bout.occurrence_end_timestamp)
+                                or effective_night
+                            )
 
-            # Manifest observations first; adapter overlays are never required.
-            if observations:
-                result = repo.commit_batch(
-                    run_id=run.id,
-                    observations=observations,
-                    checkpoint_token=f"event:{event.espn_event_id}",
-                    checkpoint_version=CHECKPOINT_VERSION,
-                )
-                state.inserted += result.inserted
-                state.skipped += result.skipped_identical
-            state.batches_committed += 1
+                        observations.append(
+                            _build_result_observation(
+                                row=bout,
+                                bout_uuid=bout_uuid,
+                                version_kind="event_night",
+                                fighter_a_id=fighter_a_id,
+                                fighter_b_id=fighter_b_id,
+                                winner_fighter_id=en_winner_id,
+                                result_type=bout.event_night_result.class_,
+                                effective_at=effective_night,
+                                observed_at=observed,
+                                proxy_published_at=proxy_published_at,
+                                classification=classification,
+                                duration_status=duration.status.value,
+                            )
+                        )
+                        observations.append(
+                            _build_result_observation(
+                                row=bout,
+                                bout_uuid=bout_uuid,
+                                version_kind="current",
+                                fighter_a_id=fighter_a_id,
+                                fighter_b_id=fighter_b_id,
+                                winner_fighter_id=cur_winner_id,
+                                result_type=bout.current_result.class_,
+                                effective_at=current_effective,
+                                observed_at=observed,
+                                proxy_published_at=proxy_published_at,
+                                classification=classification,
+                                duration_status=duration.status.value,
+                            )
+                        )
+
+                        overlay = (provider_overlays or {}).get(bout.espn_competition_id)
+                        if overlay:
+                            evidence = detect_provider_disagreement(
+                                row=bout,
+                                provider_participant_espn_ids=overlay.get(
+                                    "participant_espn_ids"
+                                ),
+                                provider_result_class=overlay.get("result_class"),
+                            )
+                            if evidence:
+                                state.conflicts += 1
+                                state.category_counts[BoutCategory.CONFLICT.value] += 1
+                                observations.append(
+                                    _conflict_observation(
+                                        bout_uuid=bout_uuid,
+                                        espn_competition_id=bout.espn_competition_id,
+                                        evidence=evidence,
+                                        observed_at=observed,
+                                        effective_at=effective_night,
+                                    )
+                                )
+
+                    if inject_here and fail_at == "after_canonical":
+                        raise RuntimeError("injected_failure_after_canonical")
+
+                    def _after_raw(obs: SourceObservationRecord) -> None:
+                        if inject_here and fail_at == "after_raw_observations":
+                            raise RuntimeError("injected_failure_after_raw_observations")
+
+                    def _before_result(obs: SourceObservationRecord) -> None:
+                        if inject_here and fail_at == "during_result_versions":
+                            raise RuntimeError("injected_failure_during_result_versions")
+
+                    # Single transaction: canonical entities + observations +
+                    # result versions + checkpoint. No nested independent commits.
+                    result = repo.apply_batch(
+                        session,
+                        run_id=run.id,
+                        observations=observations,
+                        checkpoint_token=f"event:{event.espn_event_id}",
+                        checkpoint_version=CHECKPOINT_VERSION,
+                        on_after_raw_observation=_after_raw if inject_here else None,
+                        on_before_result_version=_before_result if inject_here else None,
+                    )
+                    session.commit()
+                    state.inserted += result.inserted
+                    state.skipped += result.skipped_identical
+                    state.batches_committed += 1
+                except Exception:
+                    session.rollback()
+                    if inject_here and fail_at is not None:
+                        state.batches_failed += 1
+                        raise
+                    raise
+                finally:
+                    repo.end_owned_batch(session)
 
         if adapter is not None:
             state.notes.append(
@@ -731,7 +767,7 @@ def sync_dwcs_history(
             error_class=type(exc).__name__,
             error_message=str(exc)[:500],
         )
-        if fail_after_batches is None:
+        if fail_after_batches is None and fail_at is None:
             raise
         state.notes.append(f"partial_failure_preserved_prior_batches:{exc}")
 
