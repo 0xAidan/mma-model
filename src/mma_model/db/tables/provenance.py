@@ -70,9 +70,21 @@ class RawObservation(Base):
     entity_kind: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_published_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     source_updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    proxy_published_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    timestamp_quality: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    timestamp_quality_source: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    quality_tier: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    attributes_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     payload_hash: Mapped[str] = mapped_column(String(64), index=True)
     # NULL means explicit blob absence; when set must equal a verified payload_hash.
     raw_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

@@ -74,6 +74,22 @@ def _obs(
     subject_id: str | None = None,
     attributes: dict | None = None,
 ) -> SourceObservationRecord:
+    updated = source_updated_at or _ts(11)
+    quality_kwargs: dict = {
+        "timestamp_quality": "unknown",
+        "timestamp_quality_source": None,
+        "quality_tier": "bronze",
+        "source_published_at": None,
+        "proxy_published_at": None,
+    }
+    if detail_level == DetailLevel.VERIFIED:
+        quality_kwargs = {
+            "timestamp_quality": "direct_source_timestamp",
+            "timestamp_quality_source": source,
+            "quality_tier": "gold",
+            "source_published_at": updated,
+            "proxy_published_at": None,
+        }
     return SourceObservationRecord(
         source=source,
         stream=stream,
@@ -81,7 +97,7 @@ def _obs(
         entity_kind=entity_kind,
         observed_at=observed_at or _ts(12),
         effective_at=effective_at or _ts(10),
-        source_updated_at=source_updated_at or _ts(11),
+        source_updated_at=updated,
         payload_hash=payload_hash,
         raw_ref=raw_ref or payload_hash,
         detail_level=detail_level,
@@ -89,6 +105,7 @@ def _obs(
         schema_version="1",
         subject_id=subject_id,
         attributes=attributes or {},
+        **quality_kwargs,
     )
 
 
