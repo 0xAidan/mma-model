@@ -989,6 +989,12 @@ def test_match_bout_to_event_by_participants_and_date(audit: Any) -> None:
 
 
 def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
+    """Lock the exact DWCS-003 refresh evidence snapshot committed in this PR.
+
+    Adoption-path decision logic is covered separately by
+    ``test_decision_thresholds_balldontlie_boundary`` (synthetic gates), not by
+    relaxing this artifact regression.
+    """
     path = ROOT / "output" / "research" / "stats-source-scorecard.json"
     if not path.is_file():
         pytest.skip("committed scorecard not generated yet")
@@ -1004,33 +1010,48 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
         assert f"https://{host}" not in blob
         assert f"http://{host}" not in blob
     assert payload["decision"]["prohibited_scraping_selected"] is False
-    assert payload["capture_mode"] in {"fixtures", "live", "mixed"}
+    assert payload["capture_mode"] == "live"
+    assert payload["live_measurements_claimed"] is False
     assert payload["budget_context"]["recurring_monthly"]["usd_cents"] == 6999
-    event_metric = payload["providers"]["balldontlie"]["metrics"]["event_coverage"]
+
+    # Exact hard-blocker evidence for this PR (not an adopted-or-blocked union).
+    assert payload["decision"]["primary"] is None
+    assert payload["decision"]["hard_blocker"] is True
+    assert payload["decision"]["path"] == "hard_blocker"
+
+    balldontlie = payload["providers"]["balldontlie"]
+    assert balldontlie["access_status"] == "entitlement_blocked"
+    assert balldontlie["metrics_status"] == "blocked"
+    assert balldontlie["error"] == "fights_endpoint_entitlement_blocked"
+
+    metrics = balldontlie["metrics"]
+    event_metric = metrics["event_coverage"]
+    bout_metric = metrics["bout_coverage"]
+    outcome_metric = metrics["outcome_agreement"]
     assert event_metric["denominator"] == 30
-    primary = payload["decision"]["primary"]
-    if primary is None:
-        assert payload["decision"]["hard_blocker"] is True
-        assert payload["live_measurements_claimed"] is False
-        access = payload["providers"]["balldontlie"]["access_status"]
-        assert access in {
-            "not_configured",
-            "auth_failed",
-            "entitlement_blocked",
-            "quota_exceeded",
-            "request_failed",
-            "ok",
-        }
-        if access != "ok":
-            assert event_metric["numerator"] is None
-    else:
-        assert primary == "balldontlie"
-        assert payload["decision"]["hard_blocker"] is False
-        assert payload["live_measurements_claimed"] is True
-        assert payload["providers"]["balldontlie"]["metrics_status"] == "measured"
-        assert event_metric["numerator"] is not None
-        assert event_metric["rate"] is not None
-        assert event_metric["rate"] >= audit.EVENT_COVERAGE_MIN
+    assert event_metric["numerator"] is None
+    assert event_metric["rate"] is None
+    assert event_metric["status"] == "unknown"
+    assert event_metric["reason"] == "entitlement_blocked"
+    assert bout_metric["denominator"] == 149
+    assert bout_metric["numerator"] is None
+    assert bout_metric["rate"] is None
+    assert bout_metric["status"] == "unknown"
+    assert bout_metric["reason"] == "entitlement_blocked"
+    assert outcome_metric["numerator"] is None
+    assert outcome_metric["rate"] is None
+    assert outcome_metric["status"] == "unknown"
+    assert outcome_metric["reason"] == "entitlement_blocked"
+    assert metrics["required_features"]["status"] == "unknown"
+    assert metrics["pit_fitness"]["status"] == "unknown"
+    assert metrics["stat_coverage"]["numerator"] is None
+    assert metrics["stat_coverage"]["status"] == "unknown"
+
+    gates = payload["decision"]["gates"]["balldontlie"]
+    assert gates["technical_pass"] is False
+    assert gates["rights_status"] == "pass"
+    assert gates["budget_status"] == "pass"
+    assert gates["adopt"] is False
 
 
 def test_decision_doc_exists_with_citations() -> None:
