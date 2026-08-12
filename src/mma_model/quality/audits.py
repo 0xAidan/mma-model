@@ -14,6 +14,7 @@ from mma_model.db.tables.history import HistorySourceBout
 from mma_model.quality.classify import (
     classify_overall_bout,
     classify_source_bout,
+    fingerprint_in_scope,
     observation_visible,
     parse_iso_datetime,
     result_version_visible,
@@ -76,6 +77,7 @@ def run_leakage_audits(
 ) -> dict[str, Any]:
     """Pure/read-only audits. Never writes to the coverage database."""
     audit_cutoff = cutoff or default_leakage_cutoff()
+    mutable_scope_cutoff = cutoff
     baseline = _tier_snapshot(
         skeleton=list(skeleton),
         observations=list(observations),
@@ -148,6 +150,11 @@ def run_leakage_audits(
             effective_at=row.get("effective_at"),  # type: ignore[arg-type]
             cutoff=audit_cutoff,
             event_id=event_id_by_bout.get(bout_id),
+            timestamp_quality=row.get("timestamp_quality"),  # type: ignore[arg-type]
+            source_published_at=row.get("source_published_at"),  # type: ignore[arg-type]
+            source_updated_at=row.get("source_updated_at"),  # type: ignore[arg-type]
+            proxy_published_at=row.get("proxy_published_at"),  # type: ignore[arg-type]
+            observed_at=row.get("observed_at"),  # type: ignore[arg-type]
         ):
             failures += 1
 
@@ -181,47 +188,81 @@ def run_leakage_audits(
             failures += 1
 
     mutable_failures = 0
-    mutable_checked = 0
     profiles = list(session.scalars(select(FighterProfileObservation)).all())
+    history_rows = list(session.scalars(select(HistorySourceBout)).all())
+    rows_examined = 0
+    applicable_rows = 0
     for row in profiles:
-        if row.source not in {"mutable_current", "current_mutable_profile"}:
-            continue
-        effective = parse_iso_datetime(row.effective_at)
-        if audit_cutoff is not None and (effective is None or not (effective < audit_cutoff)):
-            continue
-        mutable_checked += 1
-        if observation_visible(
+        in_scope = fingerprint_in_scope(
+            cutoff=mutable_scope_cutoff,
+            effective_at=row.effective_at,
+            observed_at=row.observed_at,
+        )
+        is_mutable = row.source in {"mutable_current", "current_mutable_profile"}
+        leaked = observation_visible(
             effective_at=row.effective_at,
             observed_at=row.observed_at,
             proxy_published_at=None,
             timestamp_quality="unknown",
             version_kind=None,
-            is_mutable_current=row.source in {"mutable_current", "current_mutable_profile"},
-            cutoff=audit_cutoff,
+            is_mutable_current=is_mutable,
+            cutoff=mutable_scope_cutoff,
             source=row.source,
-        ):
+        )
+        if is_mutable and leaked:
             mutable_failures += 1
-    history_rows = list(session.scalars(select(HistorySourceBout)).all())
+        if not in_scope:
+            continue
+        rows_examined += 1
+        if is_mutable:
+            applicable_rows += 1
     for row in history_rows:
-        if int(row.is_current_record or 0) != 1:
-            continue
-        effective = parse_iso_datetime(row.effective_at)
-        if audit_cutoff is not None and (effective is None or not (effective < audit_cutoff)):
-            continue
-        mutable_checked += 1
-        if observation_visible(
+        in_scope = fingerprint_in_scope(
+            cutoff=mutable_scope_cutoff,
+            effective_at=row.effective_at,
+            observed_at=row.observed_at,
+        )
+        is_mutable = int(row.is_current_record or 0) == 1
+        leaked = observation_visible(
             effective_at=row.effective_at,
             observed_at=row.observed_at,
             proxy_published_at=row.proxy_published_at,
             timestamp_quality=row.timestamp_quality,
             version_kind=row.version_kind,
-            is_mutable_current=True,
-            cutoff=audit_cutoff,
+            is_mutable_current=is_mutable,
+            cutoff=mutable_scope_cutoff,
             source=row.source,
-        ):
+        )
+        if is_mutable and leaked:
             mutable_failures += 1
-    if mutable_checked == 0:
-        mutable_checked = 1
+        if not in_scope:
+            continue
+        rows_examined += 1
+        if is_mutable:
+            applicable_rows += 1
+
+    guard_cutoff = audit_cutoff or default_leakage_cutoff()
+    fabricated_effective = guard_cutoff - timedelta(days=400)
+    synthetic_guard_checks = 1
+    synthetic_leaked = observation_visible(
+        effective_at=fabricated_effective,
+        observed_at=fabricated_effective,
+        proxy_published_at=None,
+        timestamp_quality="unknown",
+        version_kind=None,
+        is_mutable_current=True,
+        cutoff=guard_cutoff,
+        source="mutable_current",
+    )
+    if synthetic_leaked:
+        mutable_failures += 1
+    if mutable_failures > 0:
+        mutable_status = "fail"
+    elif applicable_rows == 0:
+        mutable_status = "not_applicable"
+    else:
+        mutable_status = "pass"
+    checks_executed = synthetic_guard_checks + applicable_rows
 
     future_hash = sha256_canonical(
         {
@@ -234,17 +275,25 @@ def run_leakage_audits(
     )
     mutable_hash = sha256_canonical(
         {
-            "mutable_checked": mutable_checked,
-            "mutable_failures": mutable_failures,
-            "cutoff": audit_cutoff.isoformat(),
+            "rows_examined": rows_examined,
+            "applicable_rows": applicable_rows,
+            "synthetic_guard_checks": synthetic_guard_checks,
+            "violations": mutable_failures,
+            "status": mutable_status,
+            "cutoff": None if mutable_scope_cutoff is None else mutable_scope_cutoff.isoformat(),
+            "future_row_audit_cutoff": audit_cutoff.isoformat(),
         }
     )
     return {
         "future_row_leakage_checks_executed": max(checks, 1),
         "future_row_leakage_failures": failures,
         "future_row_leakage_evidence_hash": future_hash,
-        "mutable_current_leakage_checks_executed": mutable_checked,
+        "mutable_current_leakage_checks_executed": checks_executed,
         "mutable_current_leakage_failures": mutable_failures,
         "mutable_current_leakage_evidence_hash": mutable_hash,
+        "mutable_current_rows_examined": rows_examined,
+        "mutable_current_applicable_rows": applicable_rows,
+        "mutable_current_synthetic_guard_checks": synthetic_guard_checks,
+        "mutable_current_leakage_status": mutable_status,
         "visible_baseline_bouts": visible_n,
     }

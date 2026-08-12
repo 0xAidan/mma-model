@@ -17,6 +17,7 @@ from mma_model.evaluation.contract import PINNED_CONTRACT_HASH, load_evaluation_
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.quality.audits import run_leakage_audits
 from mma_model.quality.classify import (
+    attach_result_version_clocks,
     build_bout_row,
     classify_overall_bout,
     classify_source_bout,
@@ -46,6 +47,7 @@ from mma_model.quality.inventory import (
     regional_live_payload,
     source_coverage_rows,
     source_failures,
+    visible_fighter_count,
 )
 from mma_model.quality.universe import load_universe_contract
 from mma_model.quality.models import (
@@ -54,6 +56,7 @@ from mma_model.quality.models import (
     LaneCounts,
     LicensedStatus,
     ResultLaneCounts,
+    ResultTransitionCounts,
     empty_tier_counts,
     mapping_to_dimension,
 )
@@ -111,9 +114,7 @@ def _db_hash(
     ).hexdigest()
 
 
-def _latest_result(
-    versions: list[dict[str, Any]], *, version_kind: str
-) -> dict[str, Any] | None:
+def _latest_result(versions: list[dict[str, Any]], *, version_kind: str) -> dict[str, Any] | None:
     matched = [row for row in versions if row.get("version_kind") == version_kind]
     if not matched:
         return None
@@ -167,7 +168,7 @@ def compute_coverage_report(
     universe_bout_ids.sort()
     frozen_ids = set(universe_bout_ids)
     observations = load_raw_observations(session)
-    result_versions = load_result_versions(session)
+    result_versions = attach_result_version_clocks(load_result_versions(session), observations)
     failures = source_failures(session)
     checkpoints = load_checkpoints(session)
 
@@ -195,6 +196,11 @@ def compute_coverage_report(
             cutoff=as_of,
             event_id=event_id_by_bout.get(str(row.get("bout_id") or "")),
             exclude_event_id=exclude_event_id,
+            timestamp_quality=row.get("timestamp_quality"),  # type: ignore[arg-type]
+            source_published_at=row.get("source_published_at"),  # type: ignore[arg-type]
+            source_updated_at=row.get("source_updated_at"),  # type: ignore[arg-type]
+            proxy_published_at=row.get("proxy_published_at"),  # type: ignore[arg-type]
+            observed_at=row.get("observed_at"),  # type: ignore[arg-type]
         )
 
     observations_for_hash = [
@@ -227,9 +233,7 @@ def compute_coverage_report(
     for row in versions_for_class:
         versions_by_bout[str(row["bout_id"])].append(row)
 
-    source_bout_tiers: dict[str, dict[str, str]] = {
-        source: {} for source in PHASE1_BOUT_SOURCES
-    }
+    source_bout_tiers: dict[str, dict[str, str]] = {source: {} for source in PHASE1_BOUT_SOURCES}
     bout_rows = []
     core_tier_counts = empty_tier_counts()
     season_counts: dict[str, dict[str, int]] = defaultdict(empty_tier_counts)
@@ -239,6 +243,9 @@ def compute_coverage_report(
     field_unknown: Counter[str] = Counter()
     event_night_counts = Counter()
     current_counts = Counter()
+    reversed_to_nc = 0
+    both_lanes_nc = 0
+    lanes_equal = 0
     conflicting = 0
     missing_details = 0
 
@@ -291,9 +298,7 @@ def compute_coverage_report(
             value = detail_row.get(field)
             if field in {"quality_tier", "timestamp_quality", "payload_hash"}:
                 if best is not None:
-                    value = best.get(field) or (
-                        overall if field == "quality_tier" else value
-                    )
+                    value = best.get(field) or (overall if field == "quality_tier" else value)
                     if field == "quality_tier":
                         value = overall
                     if field == "timestamp_quality":
@@ -329,6 +334,13 @@ def compute_coverage_report(
         class_counts[source_class][overall] += 1
         event_night_counts[night_result] += 1
         current_counts[current_result] += 1
+        if overall != "missing":
+            if night_result == "no_contest" and current_result == "no_contest":
+                both_lanes_nc += 1
+            if night_result in {"decisive", "draw"} and current_result == "no_contest":
+                reversed_to_nc += 1
+            if night_result == current_result:
+                lanes_equal += 1
 
     if sum(core_tier_counts.values()) != universe.bouts:
         raise RuntimeError("core coverage denominator drifted from universe contract")
@@ -385,16 +397,20 @@ def compute_coverage_report(
         missing_required_details=missing_details,
         conflicting_outcomes=conflicting,
         future_row_leakage_failures=int(leakage["future_row_leakage_failures"]),
-        future_row_leakage_checks_executed=int(
-            leakage["future_row_leakage_checks_executed"]
-        ),
+        future_row_leakage_checks_executed=int(leakage["future_row_leakage_checks_executed"]),
         future_row_leakage_evidence_hash=str(leakage["future_row_leakage_evidence_hash"]),
         mutable_current_leakage_failures=int(leakage["mutable_current_leakage_failures"]),
         mutable_current_leakage_checks_executed=int(
             leakage["mutable_current_leakage_checks_executed"]
         ),
-        mutable_current_leakage_evidence_hash=str(
-            leakage["mutable_current_leakage_evidence_hash"]
+        mutable_current_leakage_evidence_hash=str(leakage["mutable_current_leakage_evidence_hash"]),
+        mutable_current_rows_examined=int(leakage.get("mutable_current_rows_examined") or 0),
+        mutable_current_applicable_rows=int(leakage.get("mutable_current_applicable_rows") or 0),
+        mutable_current_synthetic_guard_checks=int(
+            leakage.get("mutable_current_synthetic_guard_checks") or 0
+        ),
+        mutable_current_leakage_status=str(
+            leakage.get("mutable_current_leakage_status") or "not_applicable"
         ),
     )
     source_rows = source_coverage_rows(
@@ -406,10 +422,11 @@ def compute_coverage_report(
     if as_of is None:
         inventory = db_inv
     else:
+        visible_ids = [row.bout_id for row in bout_rows if row.overall_tier != "missing"]
         inventory = {
             "events": len({row.event_id for row in bout_rows if row.overall_tier != "missing"}),
             "bouts": sum(1 for row in bout_rows if row.overall_tier != "missing"),
-            "fighters": 0,
+            "fighters": visible_fighter_count(session, visible_ids),
             "result_versions": len(result_versions_for_hash),
             "provenance": len(observations_for_hash),
         }
@@ -430,17 +447,13 @@ def compute_coverage_report(
     }
     licensed = LicensedStatus(
         decision_primary=None,
-        licensed_primary_unselected=source_policy.licensed_audit_status.decision_primary
-        is None,
+        licensed_primary_unselected=source_policy.licensed_audit_status.decision_primary is None,
         licensed_adoption_not_selected=True,
-        licensed_hard_blocker=bool(
-            source_policy.licensed_audit_status.licensed_hard_blocker
-        ),
+        licensed_hard_blocker=bool(source_policy.licensed_audit_status.licensed_hard_blocker),
         phase1_global_blocker=False,
     )
     quality_dims = tuple(
-        mapping_to_dimension(tier, {tier: core_tier_counts[tier]})
-        for tier in QUALITY_TIERS
+        mapping_to_dimension(tier, {tier: core_tier_counts[tier]}) for tier in QUALITY_TIERS
     )
     report_body = {
         "schema_version": 1,
@@ -480,6 +493,11 @@ def compute_coverage_report(
             "draw": int(current_counts.get("draw") or 0),
             "no_contest": int(current_counts.get("no_contest") or 0),
         },
+        "result_transitions": {
+            "reversed_to_no_contest": reversed_to_nc,
+            "both_lanes_no_contest": both_lanes_nc,
+            "event_night_equals_current": lanes_equal,
+        },
         "counts_events": inventory["events"],
         "counts_bouts": inventory["bouts"],
         "counts_fighters": inventory["fighters"],
@@ -511,6 +529,9 @@ def compute_coverage_report(
             "public accessibility is not accuracy, PIT, or rights proof",
             "fixture metrics are validation only and never live coverage",
             "licensed_primary_unselected is not a Phase 1 global blocker",
+            "event_night vs current is a same-source revision ledger, not independent conflict",
+            "global db_hash includes mutable_current and other influencing rows; coverage features exclude mutable_current; cutoff fingerprints drop future-clock rows",
+            "mma_ai_bootstrap is derived from ufcstats_public and is not an independent source family",
         ],
         "gates": [],
     }
@@ -538,6 +559,11 @@ def compute_coverage_report(
             decisive=int(current_counts.get("decisive") or 0),
             draw=int(current_counts.get("draw") or 0),
             no_contest=int(current_counts.get("no_contest") or 0),
+        ),
+        result_transitions=ResultTransitionCounts(
+            reversed_to_no_contest=reversed_to_nc,
+            both_lanes_no_contest=both_lanes_nc,
+            event_night_equals_current=lanes_equal,
         ),
         counts_events=inventory["events"],
         counts_bouts=inventory["bouts"],

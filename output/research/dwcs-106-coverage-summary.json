@@ -14,8 +14,8 @@
   "config_hash": "497eb548fca8ad1e550dc5a6f712c4227f03b5a4fedbd185a4bbb0066d6a467e",
   "core_tier_sum": 440,
   "core_tiers": {
-    "bronze": 433,
-    "conflict": 7,
+    "bronze": 440,
+    "conflict": 0,
     "gold": 0,
     "missing": 0,
     "silver": 0
@@ -120,7 +120,6 @@
     "core_denominator",
     "identity_conflict",
     "manifest_representation",
-    "mutable_current_leakage",
     "future_row_leakage",
     "raw_ref_integrity"
   ],
@@ -143,19 +142,26 @@
   "notes": [
     "public accessibility is not accuracy, PIT, or rights proof",
     "fixture metrics are validation only and never live coverage",
-    "licensed_primary_unselected is not a Phase 1 global blocker"
+    "licensed_primary_unselected is not a Phase 1 global blocker",
+    "event_night vs current is a same-source revision ledger, not independent conflict",
+    "global db_hash includes mutable_current and other influencing rows; coverage features exclude mutable_current; cutoff fingerprints drop future-clock rows",
+    "mma_ai_bootstrap is derived from ufcstats_public and is not an independent source family"
   ],
   "pit": {
-    "conflicting_outcomes": 7,
+    "conflicting_outcomes": 0,
     "direct_timestamps": 0,
     "future_row_leakage_checks_executed": 4,
-    "future_row_leakage_evidence_hash": "1719b460f1f890df8fedb0fd57fdd71cd8654b26bfc9815950869294a37f0b15",
+    "future_row_leakage_evidence_hash": "807f360a42d81009cf0673889b5e60efc4e245b4e2b72f41268b106c612ecaf8",
     "future_row_leakage_failures": 0,
     "left_truncated_histories": 0,
     "missing_required_details": 440,
+    "mutable_current_applicable_rows": 0,
     "mutable_current_leakage_checks_executed": 1,
-    "mutable_current_leakage_evidence_hash": "3ad8fd2484d8203b91386690a2f27e95522f3b70c4c600c5d86546894371c82a",
+    "mutable_current_leakage_evidence_hash": "f3fc8831c3e804c81a95030f57d3c9c553d331545fc495f634394aec7462c66a",
     "mutable_current_leakage_failures": 0,
+    "mutable_current_leakage_status": "not_applicable",
+    "mutable_current_rows_examined": 0,
+    "mutable_current_synthetic_guard_checks": 1,
     "proxy_timestamps": 880,
     "revision_snapshots": 0,
     "unknown_timestamps": 0
@@ -168,10 +174,15 @@
     "malformed": 0,
     "missing_blobs": 0,
     "ok": true,
-    "store_provided": false,
+    "store_provided": true,
     "unverifiable": 0
   },
-  "report_hash": "5305f02d0e6672b5559ee8bbba7337e4be194833483d39afc9aea3b1aefebc23",
+  "report_hash": "dfdaa67bb61c862ebb0c54b3e339680083b2c91fd8b28a910a5ddc04e0e2b16a",
+  "result_transitions": {
+    "both_lanes_no_contest": 1,
+    "event_night_equals_current": 433,
+    "reversed_to_no_contest": 7
+  },
   "series": "dwcs",
   "source_failures": [],
   "sources": [

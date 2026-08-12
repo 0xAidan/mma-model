@@ -58,6 +58,11 @@ def human_report(report: CoverageReport, gates: GateResult, *, strict: bool) -> 
                 f"draw={report.current.draw} nc={report.current.no_contest}"
             ),
             (
+                f"transitions reversed_to_nc={report.result_transitions.reversed_to_no_contest} "
+                f"both_lanes_nc={report.result_transitions.both_lanes_no_contest} "
+                f"lanes_equal={report.result_transitions.event_night_equals_current}"
+            ),
+            (
                 f"identity scoped_pending={report.identity.scoped_pending} "
                 f"unscoped_pending={report.identity.unscoped_pending} "
                 f"upcoming_blocks={report.identity.upcoming_blocks} "
@@ -70,7 +75,11 @@ def human_report(report: CoverageReport, gates: GateResult, *, strict: bool) -> 
                 f"left_truncated={report.pit.left_truncated_histories} "
                 f"leakage_future_checks={report.pit.future_row_leakage_checks_executed} "
                 f"leakage_future_fail={report.pit.future_row_leakage_failures} "
-                f"leakage_mutable_checks={report.pit.mutable_current_leakage_checks_executed}"
+                f"leakage_mutable_checks={report.pit.mutable_current_leakage_checks_executed} "
+                f"leakage_mutable_status={report.pit.mutable_current_leakage_status} "
+                f"leakage_mutable_examined={report.pit.mutable_current_rows_examined} "
+                f"leakage_mutable_applicable={report.pit.mutable_current_applicable_rows} "
+                f"leakage_mutable_guard={report.pit.mutable_current_synthetic_guard_checks}"
             ),
             (
                 f"raw_ref ok={str(report.raw_ref_integrity.ok).lower()} "
@@ -80,10 +89,7 @@ def human_report(report: CoverageReport, gates: GateResult, *, strict: bool) -> 
             *source_lines,
             f"gates_pass={passed}",
             f"gates_block={blockers}",
-            (
-                "licensed_status=licensed_primary_unselected "
-                "(not a Phase 1 blocker)"
-            ),
+            ("licensed_status=licensed_primary_unselected (not a Phase 1 blocker)"),
             f"report_hash={report.report_hash}",
             f"config_hash={report.config_hash}",
             f"db_hash={report.db_hash}",
@@ -102,6 +108,7 @@ def sanitized_summary(report: CoverageReport, gates: GateResult) -> dict[str, An
         "brazil": report.brazil.model_dump(mode="json"),
         "event_night": report.event_night.model_dump(mode="json"),
         "current": report.current.model_dump(mode="json"),
+        "result_transitions": report.result_transitions.model_dump(mode="json"),
         "core_tiers": dict(report.core_tiers),
         "core_tier_sum": report.core_tier_sum,
         "counts": {
@@ -167,9 +174,7 @@ def write_coverage_evidence(
 ) -> None:
     summary = sanitized_summary(report, gates)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    json_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     lines = [
         "# DWCS coverage and data-health gates",
         "",
@@ -192,6 +197,12 @@ def write_coverage_evidence(
             f"draw={report.current.draw} nc={report.current.no_contest}"
         ),
         (
+            f"- Result transitions: reversed_to_nc="
+            f"{report.result_transitions.reversed_to_no_contest} "
+            f"both_lanes_nc={report.result_transitions.both_lanes_no_contest} "
+            f"lanes_equal={report.result_transitions.event_night_equals_current}"
+        ),
+        (
             f"- Core tiers: gold={report.core_tiers.get('gold', 0)} "
             f"silver={report.core_tiers.get('silver', 0)} "
             f"bronze={report.core_tiers.get('bronze', 0)} "
@@ -210,7 +221,11 @@ def write_coverage_evidence(
             f"direct={report.pit.direct_timestamps} "
             f"left_truncated={report.pit.left_truncated_histories} "
             f"conflicting_outcomes={report.pit.conflicting_outcomes} "
-            f"missing_required_details={report.pit.missing_required_details}"
+            f"missing_required_details={report.pit.missing_required_details} "
+            f"mutable_status={report.pit.mutable_current_leakage_status} "
+            f"mutable_examined={report.pit.mutable_current_rows_examined} "
+            f"mutable_applicable={report.pit.mutable_current_applicable_rows} "
+            f"mutable_guard={report.pit.mutable_current_synthetic_guard_checks}"
         ),
         (
             f"- Raw-ref: ok={str(report.raw_ref_integrity.ok).lower()} "
@@ -226,6 +241,13 @@ def write_coverage_evidence(
             f"checkpoints={report.checkpoint_run_state.checkpoints}"
         ),
         f"- Passing gates: {', '.join(gates.passed_codes) or 'none'}",
+        (
+            "- Not-applicable gates: "
+            + (
+                ", ".join(row.code for row in gates.gates if row.status == "not_applicable")
+                or "none"
+            )
+        ),
         f"- Blocking gates: {', '.join(gates.blocker_codes) or 'none'}",
         f"- Non-strict CLI exit: 0; strict CLI exit: {gates.exit_code}",
         (

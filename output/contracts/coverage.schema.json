@@ -24,6 +24,7 @@
     "brazil",
     "event_night",
     "current",
+    "result_transitions",
     "counts_events",
     "counts_bouts",
     "counts_fighters",
@@ -67,6 +68,7 @@
     "brazil": { "$ref": "#/$defs/lane_counts" },
     "event_night": { "$ref": "#/$defs/result_lane_counts" },
     "current": { "$ref": "#/$defs/result_lane_counts" },
+    "result_transitions": { "$ref": "#/$defs/result_transitions" },
     "counts_events": { "type": "integer", "minimum": 0 },
     "counts_bouts": { "type": "integer", "minimum": 0 },
     "counts_fighters": { "type": "integer", "minimum": 0 },
@@ -161,7 +163,7 @@
     },
     "gate_status": {
       "type": "string",
-      "enum": ["pass", "fail", "insufficient_sample", "unmeasured", "informational"]
+      "enum": ["pass", "fail", "insufficient_sample", "unmeasured", "informational", "not_applicable"]
     },
     "series_variant": { "type": "string", "enum": ["standard", "brazil"] },
     "result_class": {
@@ -185,6 +187,20 @@
         "decisive": { "type": "integer", "minimum": 0 },
         "draw": { "type": "integer", "minimum": 0 },
         "no_contest": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "result_transitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reversed_to_no_contest",
+        "both_lanes_no_contest",
+        "event_night_equals_current"
+      ],
+      "properties": {
+        "reversed_to_no_contest": { "type": "integer", "minimum": 0 },
+        "both_lanes_no_contest": { "type": "integer", "minimum": 0 },
+        "event_night_equals_current": { "type": "integer", "minimum": 0 }
       }
     },
     "tier_counts": {
@@ -358,6 +374,10 @@
         "mutable_current_leakage_failures",
         "mutable_current_leakage_checks_executed",
         "mutable_current_leakage_evidence_hash",
+        "mutable_current_rows_examined",
+        "mutable_current_applicable_rows",
+        "mutable_current_synthetic_guard_checks",
+        "mutable_current_leakage_status",
         "conflicting_outcomes",
         "missing_required_details"
       ],
@@ -373,6 +393,10 @@
         "mutable_current_leakage_failures": { "type": "integer", "minimum": 0 },
         "mutable_current_leakage_checks_executed": { "type": "integer", "minimum": 0 },
         "mutable_current_leakage_evidence_hash": { "type": "string" },
+        "mutable_current_rows_examined": { "type": "integer", "minimum": 0 },
+        "mutable_current_applicable_rows": { "type": "integer", "minimum": 0 },
+        "mutable_current_synthetic_guard_checks": { "type": "integer", "minimum": 0 },
+        "mutable_current_leakage_status": { "$ref": "#/$defs/gate_status" },
         "conflicting_outcomes": { "type": "integer", "minimum": 0 },
         "missing_required_details": { "type": "integer", "minimum": 0 }
       }
@@ -568,9 +592,11 @@
         "professional_n",
         "professional_found",
         "professional_source_failed",
+        "professional_missing",
         "amateur_n",
         "amateur_found",
         "amateur_source_failed",
+        "amateur_missing",
         "pre_fight_agreement_n",
         "pre_fight_agreement_d",
         "pre_fight_agreement_rate",
@@ -597,9 +623,11 @@
         "professional_n": { "type": "integer", "minimum": 0 },
         "professional_found": { "type": "integer", "minimum": 0 },
         "professional_source_failed": { "type": "integer", "minimum": 0 },
+        "professional_missing": { "type": "integer", "minimum": 0 },
         "amateur_n": { "type": "integer", "minimum": 0 },
         "amateur_found": { "type": "integer", "minimum": 0 },
         "amateur_source_failed": { "type": "integer", "minimum": 0 },
+        "amateur_missing": { "type": "integer", "minimum": 0 },
         "pre_fight_agreement_n": { "type": "integer", "minimum": 0 },
         "pre_fight_agreement_d": { "type": "integer", "minimum": 0 },
         "pre_fight_agreement_rate": { "type": ["number", "null"] },

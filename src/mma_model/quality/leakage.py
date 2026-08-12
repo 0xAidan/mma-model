@@ -66,9 +66,7 @@ def assert_future_row_invariance(
 def coverage_hash_at(
     session: Session, cutoff: datetime, *, exclude_event_id: str | None = None
 ) -> str:
-    snap = snapshot_for_cutoff(
-        session, cutoff=cutoff, exclude_event_id=exclude_event_id
-    )
+    snap = snapshot_for_cutoff(session, cutoff=cutoff, exclude_event_id=exclude_event_id)
     return sha256_canonical(snap)
 
 
@@ -127,6 +125,7 @@ def append_correction(
     fighter_b_id: str,
     effective_at: datetime,
     result_type: str = "no_contest",
+    observed_at: datetime | None = None,
 ) -> None:
     existing = list(
         session.scalars(
@@ -137,6 +136,7 @@ def append_correction(
         ).all()
     )
     revision = max((row.revision for row in existing), default=0) + 1
+    seen_at = observed_at if observed_at is not None else effective_at
     session.add(
         BoutResultVersion(
             bout_id=bout_id,
@@ -147,7 +147,7 @@ def append_correction(
             winner_fighter_id=None,
             result_type=result_type,
             effective_at=effective_at,
-            observed_at=effective_at,
+            observed_at=seen_at,
         )
     )
 
@@ -229,9 +229,7 @@ def append_future_observation(
             raw_ref=None,
             subject_id=bout_id,
             version_kind="event_night",
-            attributes_json=(
-                '{"result_type":"%s","winner_fighter_id":null}' % result_type
-            ),
+            attributes_json=('{"result_type":"%s","winner_fighter_id":null}' % result_type),
         )
     )
 
@@ -274,12 +272,8 @@ def card_cutoff(scheduled_start: datetime, *, minutes_before: int = 60) -> datet
     return scheduled_start - timedelta(minutes=minutes_before)
 
 
-def same_card_feature_fn(
-    session: Session, *, event_id: str
-) -> FeatureFn:
+def same_card_feature_fn(session: Session, *, event_id: str) -> FeatureFn:
     def _fn(cutoff: datetime) -> dict[str, Any]:
-        return snapshot_for_cutoff(
-            session, cutoff=cutoff, exclude_event_id=event_id
-        )
+        return snapshot_for_cutoff(session, cutoff=cutoff, exclude_event_id=event_id)
 
     return _fn

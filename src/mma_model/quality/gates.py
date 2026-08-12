@@ -113,9 +113,10 @@ def evaluate_strict_gates(
         + int(report.core_tiers.get("bronze") or 0)
         + int(report.core_tiers.get("conflict") or 0)
     )
-    categorized = report.core_tier_sum == universe_bouts and represented + int(
-        report.core_tiers.get("missing") or 0
-    ) == universe_bouts
+    categorized = (
+        report.core_tier_sum == universe_bouts
+        and represented + int(report.core_tiers.get("missing") or 0) == universe_bouts
+    )
     assessments.append(
         _pass_fail(
             code=GATE_CORE_DENOMINATOR,
@@ -141,9 +142,7 @@ def evaluate_strict_gates(
 
     comparable = 0
     agreed = 0
-    ufcstats = next(
-        (row for row in report.source_rows if row.source == "ufcstats_public"), None
-    )
+    ufcstats = next((row for row in report.source_rows if row.source == "ufcstats_public"), None)
     if ufcstats is not None and ufcstats.mapped_bouts > 0:
         comparable = ufcstats.mapped_bouts
         agreed = ufcstats.mapped_bouts - ufcstats.conflict_bouts
@@ -200,18 +199,19 @@ def evaluate_strict_gates(
         )
     )
     assessments.append(
-        _pass_fail(
+        GateAssessment(
             code=GATE_MUTABLE_CURRENT_LEAKAGE,
             segment="mutable_current_profile",
-            ok=(
-                report.pit.mutable_current_leakage_checks_executed > 0
-                and report.pit.mutable_current_leakage_failures
-                <= gates_retained.mutable_current_as_historical_feature_failures_max
-            ),
-            blocking=True,
+            status=report.pit.mutable_current_leakage_status,
+            blocking=report.pit.mutable_current_leakage_status == "fail",
             numerator=report.pit.mutable_current_leakage_failures,
             denominator=report.pit.mutable_current_leakage_checks_executed,
-            reason="mutable_current_leakage",
+            threshold=float(gates_retained.mutable_current_as_historical_feature_failures_max),
+            reason=(
+                None
+                if report.pit.mutable_current_leakage_status != "fail"
+                else "mutable_current_leakage"
+            ),
         )
     )
 
@@ -284,9 +284,7 @@ def evaluate_strict_gates(
 
     method_row = next((row for row in report.field_rows if row.field == "method"), None)
     details_ok = (
-        method_row is not None
-        and method_row.missing == 0
-        and method_row.present == universe_bouts
+        method_row is not None and method_row.missing == 0 and method_row.present == universe_bouts
     )
     assessments.append(
         _pass_fail(
@@ -331,11 +329,14 @@ def evaluate_strict_gates(
     blockers = tuple(
         row.code
         for row in ordered
-        if row.blocking and row.status in {"fail", "insufficient_sample"}
+        if row.blocking
+        and row.status in {"fail", "insufficient_sample"}
         and row.code not in LICENSED_NON_BLOCKER_CODES
     )
     passed = tuple(row.code for row in ordered if row.status == "pass")
-    informational = tuple(row.code for row in ordered if row.status == "informational")
+    informational = tuple(
+        row.code for row in ordered if row.status in {"informational", "not_applicable"}
+    )
     ok = len(blockers) == 0
     return GateResult(
         ok=ok,

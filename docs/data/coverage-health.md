@@ -2,19 +2,21 @@
 
 Sanitized DWCS-106 evidence. No database files, raw HTML, or secrets.
 
-- Report hash: `5305f02d0e6672b5559ee8bbba7337e4be194833483d39afc9aea3b1aefebc23`
+- Report hash: `dfdaa67bb61c862ebb0c54b3e339680083b2c91fd8b28a910a5ddc04e0e2b16a`
 - Config hash: `497eb548fca8ad1e550dc5a6f712c4227f03b5a4fedbd185a4bbb0066d6a467e`
 - DB hash: `b67814ed72903f82684d2cecd11657940c789050b49439c88e365666caae75d7`
 - Universe: 89 cards / 440 bouts
 - Standard: 86/425; Brazil: 3/15
 - Event-night results: decisive=438 draw=1 nc=1
 - Current results: decisive=431 draw=1 nc=8
-- Core tiers: gold=0 silver=0 bronze=433 missing=0 conflict=7
+- Result transitions: reversed_to_nc=7 both_lanes_nc=1 lanes_equal=433
+- Core tiers: gold=0 silver=0 bronze=440 missing=0 conflict=0
 - DB counts: events=89 bouts=440 fighters=796 result_versions=880 provenance=880
-- PIT: proxy=880 unknown=0 direct=0 left_truncated=0 conflicting_outcomes=7 missing_required_details=440
+- PIT: proxy=880 unknown=0 direct=0 left_truncated=0 conflicting_outcomes=0 missing_required_details=440 mutable_status=not_applicable mutable_examined=0 mutable_applicable=0 mutable_guard=1
 - Raw-ref: ok=true absent_explicit=880 dangling=0 present=0
 - Checkpoint/run: ingest_runs=1 succeeded=1 completed=0 failed=0 checkpoints=1
-- Passing gates: core_denominator, identity_conflict, manifest_representation, mutable_current_leakage, future_row_leakage, raw_ref_integrity
+- Passing gates: core_denominator, identity_conflict, manifest_representation, future_row_leakage, raw_ref_integrity
+- Not-applicable gates: mutable_current_leakage
 - Blocking gates: pre_fight_agreement, live_source_killed:combat_registry, regional_amateur_sample, regional_professional_sample, live_accessibility_only:sherdog_public, live_source_killed:tapology_public, missing_required_details, result_agreement, ufcstats_public_live, cross_source_reconciliation
 - Non-strict CLI exit: 0; strict CLI exit: 2
 - Licensed status is `licensed_primary_unselected` / `decision.primary=null` and is **not** a Phase 1 blocker.

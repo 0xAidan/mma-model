@@ -101,9 +101,7 @@ class LicensedStatus(BaseModel):
     licensed_adoption_not_selected: bool = True
     licensed_hard_blocker: bool = True
     phase1_global_blocker: bool = False
-    note: str = (
-        "historical Phase 0 evidence only; never a Phase 1 pipeline stop"
-    )
+    note: str = "historical Phase 0 evidence only; never a Phase 1 pipeline stop"
 
 
 class IdentityCoverage(BaseModel):
@@ -135,6 +133,10 @@ class PitCoverage(BaseModel):
     mutable_current_leakage_failures: int = 0
     mutable_current_leakage_checks_executed: int = 0
     mutable_current_leakage_evidence_hash: str = ""
+    mutable_current_rows_examined: int = 0
+    mutable_current_applicable_rows: int = 0
+    mutable_current_synthetic_guard_checks: int = 0
+    mutable_current_leakage_status: GateStatus = "not_applicable"
     conflicting_outcomes: int = 0
     missing_required_details: int = 0
 
@@ -181,6 +183,14 @@ class ResultLaneCounts(BaseModel):
     no_contest: int
 
 
+class ResultTransitionCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reversed_to_no_contest: int = 0
+    both_lanes_no_contest: int = 0
+    event_night_equals_current: int = 0
+
+
 class CoverageReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -203,6 +213,7 @@ class CoverageReport(BaseModel):
     brazil: LaneCounts
     event_night: ResultLaneCounts
     current: ResultLaneCounts
+    result_transitions: ResultTransitionCounts
     counts_events: int
     counts_bouts: int
     counts_fighters: int

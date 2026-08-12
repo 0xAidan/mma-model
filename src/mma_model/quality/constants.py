@@ -31,7 +31,9 @@ SourceStatus = Literal[
     "unmeasured",
     "validation_only",
 ]
-GateStatus = Literal["pass", "fail", "insufficient_sample", "unmeasured", "informational"]
+GateStatus = Literal[
+    "pass", "fail", "insufficient_sample", "unmeasured", "informational", "not_applicable"
+]
 SeriesVariant = Literal["standard", "brazil"]
 ResultClassName = Literal["decisive", "draw", "no_contest", "missing"]
 
@@ -62,9 +64,7 @@ TIMESTAMP_QUALITY_RANK: dict[str, int] = {
     "revision_snapshot": 2,
     "direct_source_timestamp": 3,
 }
-DIRECT_TIMESTAMP_QUALITIES = frozenset(
-    {"direct_source_timestamp", "revision_snapshot"}
-)
+DIRECT_TIMESTAMP_QUALITIES = frozenset({"direct_source_timestamp", "revision_snapshot"})
 TIMESTAMP_QUALITIES: tuple[TimestampQuality, ...] = (
     "direct_source_timestamp",
     "revision_snapshot",
@@ -130,19 +130,20 @@ VALIDATION_ONLY_SOURCES = frozenset(
         SourceId.BALLDONTLIE.value,
     }
 )
-ODDS_LANE_SOURCES = frozenset(
-    {
-        SourceId.BESTFIGHTODDS_ARCHIVE.value,
-        SourceId.THE_ODDS_API.value,
-    }
-)
-CORE_OVERALL_SOURCES = frozenset(
-    {
-        SourceId.DWCS_MANIFEST.value,
-        SourceId.UFCSTATS_PUBLIC.value,
-        SourceId.EXPLICIT_MISSING.value,
-    }
-)
+SOURCE_FAMILY_BY_ID: dict[str, str] = {
+    SourceId.DWCS_MANIFEST.value: "dwcs_manifest",
+    SourceId.UFCSTATS_PUBLIC.value: "ufcstats",
+    SourceId.MMA_AI_BOOTSTRAP.value: "ufcstats",
+    SourceId.TAPOLOGY_PUBLIC.value: "tapology",
+    SourceId.SHERDOG_PUBLIC.value: "sherdog",
+    SourceId.COMBAT_REGISTRY.value: "combat_registry",
+    SourceId.SPORTSDATAIO.value: "sportsdataio",
+    SourceId.BALLDONTLIE.value: "balldontlie",
+    SourceId.EXPLICIT_MISSING.value: "explicit_missing",
+}
+DERIVED_SOURCE_DEPENDENCY: dict[str, str] = {
+    SourceId.MMA_AI_BOOTSTRAP.value: SourceId.UFCSTATS_PUBLIC.value,
+}
 INDEPENDENT_AGREEMENT_SOURCES = frozenset(
     {
         SourceId.DWCS_MANIFEST.value,
@@ -151,6 +152,8 @@ INDEPENDENT_AGREEMENT_SOURCES = frozenset(
         SourceId.TAPOLOGY_PUBLIC.value,
         SourceId.SHERDOG_PUBLIC.value,
         SourceId.COMBAT_REGISTRY.value,
+        SourceId.SPORTSDATAIO.value,
+        SourceId.BALLDONTLIE.value,
     }
 )
 GATE_RAW_UNVERIFIABLE = "raw_ref_unverifiable"
@@ -210,11 +213,7 @@ UFCSTATS_FROZEN_AUDIT_PATH = (
     REPO_ROOT / "output" / "research" / "ufcstats-public-audit-summary.json"
 )
 REGIONAL_LIVE_PROBE_PATH = REPO_ROOT / "config" / "history" / "live_probe_evidence_v1.json"
-REGIONAL_SAMPLE_PATH = (
-    REPO_ROOT / "config" / "history" / "adjudicated_regional_sample_v1.json"
-)
+REGIONAL_SAMPLE_PATH = REPO_ROOT / "config" / "history" / "adjudicated_regional_sample_v1.json"
 DEFAULT_LEAKAGE_CUTOFF = "2024-01-01T00:00:00+00:00"
 DEFAULT_COVERAGE_DOC = REPO_ROOT / "docs" / "data" / "coverage-health.md"
-DEFAULT_COVERAGE_SUMMARY = (
-    REPO_ROOT / "output" / "research" / "dwcs-106-coverage-summary.json"
-)
+DEFAULT_COVERAGE_SUMMARY = REPO_ROOT / "output" / "research" / "dwcs-106-coverage-summary.json"
