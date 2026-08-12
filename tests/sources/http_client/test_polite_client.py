@@ -311,6 +311,24 @@ def test_robots_disallow_stops_before_network(tmp_path: Path) -> None:
         client.get_text("http://www.ufcstats.com/event-details/abc")
 
 
+def _zero_delay_politeness():
+    politeness = load_http_politeness(POLITE_PATH)
+    host = politeness.hosts["ufcstats.com"]
+    object.__setattr__(
+        politeness,
+        "hosts",
+        type(politeness.hosts)(
+            {
+                **dict(politeness.hosts),
+                "ufcstats.com": host.model_copy(
+                    update={"min_delay_sec": 0.0, "max_retries": 0}
+                ),
+            }
+        ),
+    )
+    return politeness
+
+
 def test_no_cookies_or_auth_headers(tmp_path: Path) -> None:
     from mma_model.sources.http.polite_client import PoliteHttpClient
 
@@ -323,21 +341,9 @@ def test_no_cookies_or_auth_headers(tmp_path: Path) -> None:
         seen["authorization"] = request.headers.get("authorization")
         return httpx.Response(200, content=html, request=request)
 
-    politeness = load_http_politeness(POLITE_PATH)
-    host = politeness.hosts["ufcstats.com"]
-    object.__setattr__(
-        politeness,
-        "hosts",
-        type(politeness.hosts)(
-            {
-                **dict(politeness.hosts),
-                "ufcstats.com": host.model_copy(update={"min_delay_sec": 0.0}),
-            }
-        ),
-    )
     client = PoliteHttpClient(
         host="ufcstats.com",
-        politeness=politeness,
+        politeness=_zero_delay_politeness(),
         cache_dir=tmp_path / "cache",
         transport=httpx.MockTransport(fake_send),
         robots_disallow=False,
@@ -348,3 +354,69 @@ def test_no_cookies_or_auth_headers(tmp_path: Path) -> None:
     assert "User-Agent" in {k.title() for k in seen["headers"]} or "user-agent" in seen[
         "headers"
     ]
+
+
+def test_set_cookie_never_resent_on_second_request(tmp_path: Path) -> None:
+    """Critical: client must be cookie-free across sequential responses."""
+    from mma_model.sources.http.polite_client import PoliteHttpClient
+
+    calls: list[dict[str, str | None]] = []
+    bodies = [
+        b"<html>first</html>",
+        b"<html>second</html>",
+    ]
+
+    def fake_send(request: httpx.Request) -> httpx.Response:
+        calls.append(
+            {
+                "cookie": request.headers.get("cookie"),
+                "authorization": request.headers.get("authorization"),
+                "path": request.url.path,
+            }
+        )
+        idx = len(calls) - 1
+        headers = {}
+        if idx == 0:
+            headers["set-cookie"] = "session=evil; Path=/"
+        return httpx.Response(200, content=bodies[idx], headers=headers, request=request)
+
+    client = PoliteHttpClient(
+        host="ufcstats.com",
+        politeness=_zero_delay_politeness(),
+        cache_dir=tmp_path / "cache",
+        transport=httpx.MockTransport(fake_send),
+        robots_disallow=False,
+    )
+    client.get_text("http://www.ufcstats.com/event-details/one")
+    client.get_text("http://www.ufcstats.com/event-details/two")
+    assert len(calls) == 2
+    assert calls[0]["cookie"] is None
+    assert calls[1]["cookie"] is None
+    assert calls[0]["authorization"] is None
+    assert calls[1]["authorization"] is None
+    assert client.cookie_jar_empty()
+
+
+def test_rejects_configured_cookie_or_authorization_headers(tmp_path: Path) -> None:
+    from mma_model.sources.http.polite_client import (
+        ForbiddenHeaderError,
+        PoliteHttpClient,
+    )
+
+    politeness = _zero_delay_politeness()
+    with pytest.raises(ForbiddenHeaderError, match="Cookie|Authorization"):
+        PoliteHttpClient(
+            host="ufcstats.com",
+            politeness=politeness,
+            cache_dir=tmp_path / "cache",
+            robots_disallow=False,
+            extra_headers={"Cookie": "a=1"},
+        )
+    with pytest.raises(ForbiddenHeaderError, match="Cookie|Authorization"):
+        PoliteHttpClient(
+            host="ufcstats.com",
+            politeness=politeness,
+            cache_dir=tmp_path / "cache",
+            robots_disallow=False,
+            extra_headers={"Authorization": "Bearer x"},
+        )

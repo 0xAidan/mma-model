@@ -64,6 +64,7 @@ def test_audit_manifest_scope_classifies_every_entity(
         {
             "event_id": "dwcs:event:2",
             "calendar_year": 2019,
+            "status": "completed",
             "ufcstats_event_id": "evt1",
             "source_ids": {"ufcstats_event_id": "evt1"},
         },
@@ -105,6 +106,141 @@ def test_audit_manifest_scope_classifies_every_entity(
     }
     assert bout_statuses["dwcs:bout:1"] == "unresolved"
     assert bout_statuses["dwcs:bout:2"] == "present"
+
+
+def test_adapter_does_not_patch_missing_fight_id(tmp_path: Path) -> None:
+    root = _stage_fixtures(tmp_path)
+    fight_path = root / "fights" / "fight001abc.html"
+    text = fight_path.read_text(encoding="utf-8")
+    fight_path.write_text(
+        text.replace(
+            '<a id="fight-url" href="http://www.ufcstats.com/fight-details/fight001abc">fight</a>',
+            "",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    adapter = UfcstatsPublicAdapter.for_fixtures(fixture_root=root)
+    with pytest.raises(Exception, match="external_fight_id|schema"):
+        list(
+            adapter.iter_observations(
+                event_external_ids=["evt1"],
+                observed_at=datetime(2026, 8, 12, tzinfo=UTC),
+            )
+        )
+
+
+def test_audit_empty_fights_on_completed_is_not_present(tmp_path: Path) -> None:
+    events_path = tmp_path / "events.jsonl"
+    bouts_path = tmp_path / "bouts.jsonl"
+    events_path.write_text(
+        json.dumps(
+            {
+                "event_id": "dwcs:event:empty",
+                "calendar_year": 2019,
+                "status": "completed",
+                "ufcstats_event_id": "empty1",
+                "source_ids": {"ufcstats_event_id": "empty1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bouts_path.write_text("", encoding="utf-8")
+    root = tmp_path / "fixtures"
+    (root / "events").mkdir(parents=True)
+    (root / "events" / "empty1.html").write_text(
+        """
+        <html><body>
+        <span class="b-content__title-highlight">Empty Card</span>
+        <li class="b-list__box-list-item"><i class="b-list__box-item-title">Date:</i> January 1, 2019</li>
+        <table class="b-fight-details__table"><tbody></tbody></table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+    adapter = UfcstatsPublicAdapter.for_fixtures(fixture_root=root)
+    adapter.events_manifest = events_path
+    adapter.bouts_manifest = bouts_path
+    report = adapter.audit_manifest_scope(years=range(2019, 2020))
+    statuses = {r["entity_id"]: r for r in report["event_classifications"]}
+    assert statuses["dwcs:event:empty"]["status"] in {"unresolved", "schema_drift"}
+    assert statuses["dwcs:event:empty"]["status"] != "present"
+    assert "schema" in (statuses["dwcs:event:empty"]["detail"] or "").lower() or statuses[
+        "dwcs:event:empty"
+    ]["status"] == "schema_drift"
+
+
+def test_audit_cancelled_zero_bout_allowed_when_manifest_and_evidence_agree(
+    tmp_path: Path,
+) -> None:
+    events_path = tmp_path / "events.jsonl"
+    bouts_path = tmp_path / "bouts.jsonl"
+    events_path.write_text(
+        json.dumps(
+            {
+                "event_id": "dwcs:event:cancelled",
+                "calendar_year": 2019,
+                "status": "cancelled",
+                "ufcstats_event_id": "canc1",
+                "source_ids": {"ufcstats_event_id": "canc1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bouts_path.write_text("", encoding="utf-8")
+    root = tmp_path / "fixtures"
+    (root / "events").mkdir(parents=True)
+    (root / "events" / "canc1.html").write_text(
+        """
+        <html><body>
+        <span class="b-content__title-highlight">Cancelled Card</span>
+        <li class="b-list__box-list-item"><i class="b-list__box-item-title">Date:</i> January 1, 2019</li>
+        <div class="b-statistics__table-preview">Event cancelled</div>
+        <table class="b-fight-details__table"><tbody></tbody></table>
+        </body></html>
+        """,
+        encoding="utf-8",
+    )
+    adapter = UfcstatsPublicAdapter.for_fixtures(fixture_root=root)
+    adapter.events_manifest = events_path
+    adapter.bouts_manifest = bouts_path
+    report = adapter.audit_manifest_scope(years=range(2019, 2020))
+    row = report["event_classifications"][0]
+    assert row["status"] == "present"
+    assert "cancelled" in (row["detail"] or "").lower() or row["detail"] == "canc1"
+
+
+def test_audit_skeletal_event_page_is_schema_drift(tmp_path: Path) -> None:
+    events_path = tmp_path / "events.jsonl"
+    bouts_path = tmp_path / "bouts.jsonl"
+    events_path.write_text(
+        json.dumps(
+            {
+                "event_id": "dwcs:event:skel",
+                "calendar_year": 2019,
+                "status": "completed",
+                "ufcstats_event_id": "skel1",
+                "source_ids": {"ufcstats_event_id": "skel1"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bouts_path.write_text("", encoding="utf-8")
+    root = tmp_path / "fixtures"
+    (root / "events").mkdir(parents=True)
+    (root / "events" / "skel1.html").write_text(
+        "<html><body><p>oops</p></body></html>", encoding="utf-8"
+    )
+    adapter = UfcstatsPublicAdapter.for_fixtures(fixture_root=root)
+    adapter.events_manifest = events_path
+    adapter.bouts_manifest = bouts_path
+    report = adapter.audit_manifest_scope(years=range(2019, 2020))
+    row = report["event_classifications"][0]
+    assert row["status"] in {"unresolved", "schema_drift"}
+    assert row["status"] != "present"
 
 
 def test_audit_deterministic_output_order(tmp_path: Path) -> None:

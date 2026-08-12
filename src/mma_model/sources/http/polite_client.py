@@ -9,13 +9,23 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 from urllib.parse import urlparse
 
 import httpx
 
 from mma_model.sources.http.block_signals import SourceBlockedError, detect_block_signal
 from mma_model.sources.http_politeness import HttpPolitenessConfig, HostPoliteness
+
+FORBIDDEN_REQUEST_HEADERS = frozenset(
+    {
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+    }
+)
 
 
 class UrlNotAllowedError(ValueError):
@@ -26,11 +36,38 @@ class CacheCorruptionError(RuntimeError):
     """Raised when on-disk HTTP cache bytes do not match the expected hash."""
 
 
+class ForbiddenHeaderError(ValueError):
+    """Raised when Cookie/Authorization/API-key headers are configured."""
+
+
 SleepFn = Callable[[float], None]
 
 
+def _validate_header_map(headers: Mapping[str, str]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in FORBIDDEN_REQUEST_HEADERS:
+            raise ForbiddenHeaderError(
+                f"forbidden request header {key!r}; "
+                "Cookie/Authorization/API keys are not permitted"
+            )
+        cleaned[key] = value
+    return cleaned
+
+
+def _strip_auth_cookie_headers(request: httpx.Request) -> None:
+    """Hard guarantee: never send Cookie/Authorization on the wire."""
+    for name in list(request.headers.keys()):
+        if name.lower() in FORBIDDEN_REQUEST_HEADERS:
+            del request.headers[name]
+
+
 class PoliteHttpClient:
-    """Single-host polite GET client: delay, UA, cache, block-signal stop."""
+    """Single-host polite GET client: delay, UA, cache, block-signal stop.
+
+    Requests are intentionally cookie-free and auth-free: response Set-Cookie
+    values are never retained or resent.
+    """
 
     def __init__(
         self,
@@ -42,6 +79,7 @@ class PoliteHttpClient:
         robots_disallow: bool = False,
         sleep_fn: SleepFn | None = None,
         timeout_sec: float = 60.0,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> None:
         if host not in politeness.hosts:
             raise UrlNotAllowedError(f"host {host!r} not in politeness config")
@@ -53,19 +91,44 @@ class PoliteHttpClient:
         self.robots_disallow = robots_disallow
         self._sleep = sleep_fn or time.sleep
         self._last_request_at = 0.0
+        headers = {
+            "User-Agent": politeness.user_agent,
+            "From": politeness.contact,
+        }
+        if extra_headers:
+            headers.update(_validate_header_map(extra_headers))
+        _validate_header_map(headers)
         self._client = httpx.Client(
             transport=transport,
             timeout=timeout_sec,
-            headers={
-                "User-Agent": politeness.user_agent,
-                "From": politeness.contact,
-            },
+            headers=headers,
             follow_redirects=False,
+            # Empty jar only; cleared after every response so Set-Cookie never sticks.
             cookies=httpx.Cookies(),
+            event_hooks={"request": [_strip_auth_cookie_headers]},
         )
 
     def close(self) -> None:
         self._client.close()
+
+    def cookie_jar_empty(self) -> bool:
+        return len(self._client.cookies) == 0
+
+    def fetch_robots_txt(self) -> tuple[int, str, str]:
+        """Fetch ``/robots.txt`` with cookie-free hygiene (path allowlist exception).
+
+        Returns ``(status_code, body_text, sha256_hex)``. Does not treat non-200
+        as permission; callers must apply fail-closed policy.
+        """
+        url = f"http://www.{self.host}/robots.txt"
+        self._wait_delay()
+        self._client.cookies.clear()
+        response = self._client.get(url)
+        self._client.cookies.clear()
+        body = response.content
+        digest = hashlib.sha256(body).hexdigest()
+        text = body.decode("utf-8", errors="replace")
+        return response.status_code, text, digest
 
     def get_text(self, url: str) -> tuple[str, str]:
         """Return ``(text, sha256_hex)`` with politeness, cache, and block stops."""
@@ -84,12 +147,15 @@ class PoliteHttpClient:
         last_body = ""
         for attempt in range(attempts):
             self._wait_delay()
+            # Drop any residual cookies before each request (defense in depth).
+            self._client.cookies.clear()
             response = self._client.get(url)
+            # Never retain Set-Cookie across requests.
+            self._client.cookies.clear()
             last_status = response.status_code
             if response.is_redirect:
                 location = response.headers.get("location") or ""
                 self._assert_redirect_allowed(location)
-                # Same-host redirects are not followed automatically in this client.
                 raise UrlNotAllowedError(
                     f"refusing to follow redirect for {url!r} -> {location!r}"
                 )
@@ -150,7 +216,6 @@ class PoliteHttpClient:
         parsed = urlparse(url)
         netloc = (parsed.hostname or "").lower()
         if netloc != self.host and not netloc.endswith("." + self.host):
-            # Allow www.<host> only when configured host is bare domain.
             if not (netloc == f"www.{self.host}"):
                 raise UrlNotAllowedError(f"url host not allowed: {netloc!r}")
         path = parsed.path or "/"
@@ -163,7 +228,6 @@ class PoliteHttpClient:
             raise UrlNotAllowedError("redirect missing location")
         parsed = urlparse(location)
         if not parsed.scheme:
-            # Relative redirect — same host.
             return
         netloc = (parsed.hostname or "").lower()
         if netloc != self.host and netloc != f"www.{self.host}":

@@ -7,12 +7,16 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from mma_model.sources.contracts import SourceObservationRecord
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.pit_proxy import PitProxyRule, load_pit_proxy_rule
 from mma_model.sources.ufcstats_public.client import UfcstatsPublicClient
+from mma_model.sources.ufcstats_public.errors import (
+    ParserSchemaDriftError,
+    ParticipantError,
+)
 from mma_model.sources.ufcstats_public.mapper import map_fight_to_observations
 from mma_model.sources.ufcstats_public.parser import (
     SOURCE_UFCSTATS_PUBLIC,
@@ -27,13 +31,55 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_EVENTS_MANIFEST = REPO_ROOT / "data" / "manifests" / "dwcs_events_v1.jsonl"
 DEFAULT_BOUTS_MANIFEST = REPO_ROOT / "data" / "manifests" / "dwcs_bouts_v1.jsonl"
 
+COMPLETED_STATUSES = frozenset({"completed", "occurred"})
+CANCELLED_STATUSES = frozenset({"cancelled", "canceled"})
+
 
 @dataclass(frozen=True)
 class AuditRow:
     kind: str  # event | bout
     entity_id: str
-    status: str  # present | missing | blocked | unresolved
+    status: str  # present | missing | blocked | unresolved | schema_drift
     detail: str | None = None
+
+
+def classify_event_page(
+    *,
+    parsed: dict[str, Any],
+    manifest_status: str | None,
+) -> tuple[str, str]:
+    """Classify a parsed event page against manifest expectations (fail closed)."""
+    status = (manifest_status or "completed").strip().lower()
+    event_name = str(parsed.get("event_name") or "").strip()
+    date_text = str(parsed.get("date_text") or "").strip()
+    fights = list(parsed.get("fights") or [])
+    cancelled_evidence = bool(parsed.get("cancelled_evidence"))
+
+    if not event_name or not date_text:
+        return "schema_drift", "missing_event_card_structure"
+
+    if status in CANCELLED_STATUSES:
+        if len(fights) == 0 and cancelled_evidence:
+            return "present", "cancelled_zero_bout"
+        if len(fights) == 0 and not cancelled_evidence:
+            return "schema_drift", "cancelled_without_parser_evidence"
+        return "present", "cancelled_with_fights"
+
+    if status in COMPLETED_STATUSES:
+        if len(fights) == 0:
+            return "schema_drift", "completed_event_empty_fights"
+        for fight in fights:
+            if not fight.get("external_fight_id"):
+                return "schema_drift", "fight_row_missing_external_id"
+            if not fight.get("fighter_a", {}).get("id") or not fight.get(
+                "fighter_b", {}
+            ).get("id"):
+                return "schema_drift", "fight_row_missing_participant_ids"
+        return "present", "completed_with_fights"
+
+    if len(fights) == 0:
+        return "unresolved", f"unknown_manifest_status:{status}"
+    return "present", f"status:{status}"
 
 
 class UfcstatsPublicAdapter:
@@ -75,7 +121,7 @@ class UfcstatsPublicAdapter:
         if observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware UTC")
         for event_id in event_external_ids:
-            event_html, event_hash = self._load_event_html(event_id)
+            event_html, _event_hash = self._load_event_html(event_id)
             if self.raw_store is not None:
                 self.raw_store.put(event_html.encode("utf-8"))
             event = parse_event_details(event_html)
@@ -85,9 +131,11 @@ class UfcstatsPublicAdapter:
                 if self.raw_store is not None:
                     self.raw_store.put(fight_html.encode("utf-8"))
                 parsed = parse_fight_details(fight_html)
-                # Prefer explicit fight id from listing when fixture omits it.
-                if not parsed.get("external_fight_id") or parsed["external_fight_id"] == "unknown":
-                    parsed["external_fight_id"] = fight_id
+                parsed_id = str(parsed.get("external_fight_id") or "")
+                if parsed_id != fight_id:
+                    raise ParserSchemaDriftError(
+                        f"fight id mismatch listing={fight_id!r} details={parsed_id!r}"
+                    )
                 effective_at = observed_at
                 if effective_at.year >= 2020:
                     effective_at = datetime(2019, 1, 1, tzinfo=timezone.utc)
@@ -134,21 +182,33 @@ class UfcstatsPublicAdapter:
             try:
                 html, _digest = self._load_event_html(str(ufcstats_id))
                 parsed = parse_event_details(html)
-                status = "present" if parsed.get("fights") is not None else "missing"
-                event_rows.append(AuditRow("event", event_id, status, str(ufcstats_id)))
+                status, detail = classify_event_page(
+                    parsed=parsed,
+                    manifest_status=str(event.get("status") or "completed"),
+                )
+                event_rows.append(
+                    AuditRow("event", event_id, status, f"{ufcstats_id}:{detail}")
+                )
             except SourceBlockedError as exc:
                 blocked = True
                 block_reason = exc.reason
-                event_rows.append(
-                    AuditRow("event", event_id, "blocked", exc.reason)
-                )
+                event_rows.append(AuditRow("event", event_id, "blocked", exc.reason))
             except FileNotFoundError:
                 event_rows.append(
                     AuditRow("event", event_id, "missing", str(ufcstats_id))
                 )
-            except Exception as exc:  # noqa: BLE001 - classify remainder as missing
+            except (ParserSchemaDriftError, ParticipantError) as exc:
                 event_rows.append(
-                    AuditRow("event", event_id, "missing", f"{type(exc).__name__}:{exc}")
+                    AuditRow("event", event_id, "schema_drift", str(exc))
+                )
+            except Exception as exc:  # noqa: BLE001 - classify remainder as unresolved
+                event_rows.append(
+                    AuditRow(
+                        "event",
+                        event_id,
+                        "unresolved",
+                        f"{type(exc).__name__}:{exc}",
+                    )
                 )
 
         for bout in sorted(scoped_bouts, key=lambda r: str(r["bout_id"])):
@@ -157,9 +217,7 @@ class UfcstatsPublicAdapter:
                 (bout.get("source_ids") or {}).get("ufcstats_bout_id")
             )
             if blocked:
-                bout_rows.append(
-                    AuditRow("bout", bout_id, "blocked", block_reason)
-                )
+                bout_rows.append(AuditRow("bout", bout_id, "blocked", block_reason))
                 continue
             if not ufcstats_bout:
                 bout_rows.append(
@@ -169,8 +227,20 @@ class UfcstatsPublicAdapter:
             try:
                 html, _digest = self._load_fight_html(str(ufcstats_bout))
                 parsed = parse_fight_details(html)
-                status = "present" if parsed.get("external_fight_id") else "missing"
-                bout_rows.append(AuditRow("bout", bout_id, status, str(ufcstats_bout)))
+                parsed_id = str(parsed.get("external_fight_id") or "")
+                if parsed_id != str(ufcstats_bout):
+                    bout_rows.append(
+                        AuditRow(
+                            "bout",
+                            bout_id,
+                            "schema_drift",
+                            f"id_mismatch expected={ufcstats_bout} got={parsed_id}",
+                        )
+                    )
+                else:
+                    bout_rows.append(
+                        AuditRow("bout", bout_id, "present", str(ufcstats_bout))
+                    )
             except SourceBlockedError as exc:
                 blocked = True
                 block_reason = exc.reason
@@ -179,13 +249,26 @@ class UfcstatsPublicAdapter:
                 bout_rows.append(
                     AuditRow("bout", bout_id, "missing", str(ufcstats_bout))
                 )
+            except (ParserSchemaDriftError, ParticipantError) as exc:
+                bout_rows.append(AuditRow("bout", bout_id, "schema_drift", str(exc)))
             except Exception as exc:  # noqa: BLE001
                 bout_rows.append(
-                    AuditRow("bout", bout_id, "missing", f"{type(exc).__name__}:{exc}")
+                    AuditRow(
+                        "bout",
+                        bout_id,
+                        "unresolved",
+                        f"{type(exc).__name__}:{exc}",
+                    )
                 )
 
         def _counts(rows: list[AuditRow]) -> dict[str, int]:
-            out = {"present": 0, "missing": 0, "blocked": 0, "unresolved": 0}
+            out = {
+                "present": 0,
+                "missing": 0,
+                "blocked": 0,
+                "unresolved": 0,
+                "schema_drift": 0,
+            }
             for row in rows:
                 out[row.status] = out.get(row.status, 0) + 1
             return out
@@ -216,7 +299,6 @@ class UfcstatsPublicAdapter:
                 for r in bout_rows
             ],
         }
-        # Fail closed: every scoped entity must appear exactly once.
         assert len(report["event_classifications"]) == len(scoped_events)
         assert len(report["bout_classifications"]) == len(scoped_bouts)
         return report
@@ -225,7 +307,6 @@ class UfcstatsPublicAdapter:
         if self.fixture_root is not None:
             path = self.fixture_root / "events" / f"{event_external_id}.html"
             if not path.is_file():
-                # Flat layout fallback used by tests.
                 path = self.fixture_root / f"event_{event_external_id}.html"
             if not path.is_file():
                 raise FileNotFoundError(path)

@@ -75,3 +75,58 @@ def test_malformed_round_time_raises() -> None:
     html = html.replace("Time:</i> 1:30", "Time:</i> first-roundish", 1)
     with pytest.raises(ParserSchemaDriftError, match="time"):
         parse_fight_details(html)
+
+
+def test_missing_external_fight_id_fails_closed() -> None:
+    html = (FIXTURES / "fight_details_sample.html").read_text(encoding="utf-8")
+    html = html.replace(
+        '<a id="fight-url" href="http://www.ufcstats.com/fight-details/fight001abc">fight</a>',
+        "",
+        1,
+    )
+    with pytest.raises(ParserSchemaDriftError, match="external_fight_id"):
+        parse_fight_details(html)
+
+
+def test_blank_external_fight_id_fails_closed() -> None:
+    html = (FIXTURES / "fight_details_sample.html").read_text(encoding="utf-8")
+    html = html.replace(
+        "http://www.ufcstats.com/fight-details/fight001abc",
+        "http://www.ufcstats.com/fight-details/",
+        1,
+    )
+    with pytest.raises(ParserSchemaDriftError, match="external_fight_id"):
+        parse_fight_details(html)
+
+
+def test_event_fight_missing_external_id_fails_closed() -> None:
+    html = (FIXTURES / "event_details_sample.html").read_text(encoding="utf-8")
+    html = html.replace(
+        'data-link="http://www.ufcstats.com/fight-details/fight001abc"',
+        'data-link="http://www.ufcstats.com/fight-details/"',
+        1,
+    )
+    with pytest.raises(ParserSchemaDriftError, match="external_fight_id"):
+        parse_event_details(html)
+
+
+def test_event_duplicate_fight_ids_fail_closed() -> None:
+    html = (FIXTURES / "event_details_sample.html").read_text(encoding="utf-8")
+    # Duplicate the fight row with the same fight id.
+    row = """
+    <tr class="b-fight-details__table-row b-fight-details__table-row__hover" data-link="http://www.ufcstats.com/fight-details/fight001abc">
+      <td>
+        <p class="b-fight-details__table-text"><a href="http://www.ufcstats.com/fighter-details/fighterC001">Cara</a></p>
+        <p class="b-fight-details__table-text"><a href="http://www.ufcstats.com/fighter-details/fighterD001">Dana</a></p>
+      </td>
+      <td class="l-page_align_left">
+        <p class="b-fight-details__table-text">Lightweight</p>
+        <p class="b-fight-details__table-text">DEC</p>
+      </td>
+      <td class="b-fight-details__table-col">3</td>
+      <td class="b-fight-details__table-col">5:00</td>
+    </tr>
+"""
+    html = html.replace("</tbody>", row + "</tbody>", 1)
+    with pytest.raises(ParserSchemaDriftError, match="duplicate"):
+        parse_event_details(html)

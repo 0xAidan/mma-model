@@ -15,6 +15,10 @@ from mma_model.predict.train import predict_fight_a_win_prob, train_and_save
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.ufcstats_public.adapter import UfcstatsPublicAdapter
 from mma_model.sources.ufcstats_public.client import UfcstatsPublicClient
+from mma_model.sources.ufcstats_public.probe import (
+    not_run_live_probe_evidence,
+    run_bounded_live_probe,
+)
 from mma_model.ufcstats.client import UFCStatsClient
 from mma_model.ufcstats.ingest import sync_pipeline
 
@@ -196,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         years = _parse_years(args.years)
         client: UfcstatsPublicClient | None = None
         tmp_ctx: tempfile.TemporaryDirectory[str] | None = None
+        live_probe = not_run_live_probe_evidence()
         try:
             if args.fixture_root is not None:
                 adapter = UfcstatsPublicAdapter.for_fixtures(
@@ -216,8 +221,17 @@ def main(argv: list[str] | None = None) -> int:
                     cache_dir=cache_dir,
                     robots_disallow=args.robots_disallow,
                 )
+                # Exactly one bounded probe before manifest audit; raw pages stay in cache_dir.
+                live_probe = run_bounded_live_probe(client=client.polite_http)
                 adapter = UfcstatsPublicAdapter(client=client)
             report = adapter.audit_manifest_scope(years=years)
+            probe_blocked = bool(live_probe.get("block_reason")) and live_probe.get(
+                "result"
+            ) == "BLOCKED"
+            blocked = bool(report["blocked"]) or probe_blocked
+            block_reason = report["block_reason"] or (
+                live_probe.get("block_reason") if probe_blocked else None
+            )
             summary = {
                 "source": report["source"],
                 "years": report["years"],
@@ -225,10 +239,12 @@ def main(argv: list[str] | None = None) -> int:
                 "bouts_total": report["bouts_total"],
                 "events": report["events"],
                 "bouts": report["bouts"],
-                "blocked": report["blocked"],
-                "block_reason": report["block_reason"],
-                "status": "BLOCKED" if report["blocked"] else "COMPLETED",
+                "blocked": blocked,
+                "block_reason": block_reason,
+                "status": "BLOCKED" if blocked else "COMPLETED",
+                "live_probe": live_probe,
             }
+            report = {**report, "live_probe": live_probe, "blocked": blocked, "block_reason": block_reason}
             if args.summary_out is not None:
                 args.summary_out.parent.mkdir(parents=True, exist_ok=True)
                 args.summary_out.write_text(
@@ -239,19 +255,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(report, indent=2, sort_keys=True))
             else:
                 print(json.dumps(summary, indent=2, sort_keys=True))
-            return 2 if report["blocked"] else 0
+            return 2 if blocked else 0
         except SourceBlockedError as exc:
-            print(
-                json.dumps(
-                    {
-                        "source": "ufcstats_public",
-                        "blocked": True,
-                        "block_reason": exc.reason,
-                        "status": "BLOCKED",
-                    },
-                    indent=2,
-                )
-            )
+            payload = {
+                "source": "ufcstats_public",
+                "blocked": True,
+                "block_reason": exc.reason,
+                "status": "BLOCKED",
+                "live_probe": live_probe,
+            }
+            print(json.dumps(payload, indent=2, sort_keys=True))
             return 2
         finally:
             if client is not None:

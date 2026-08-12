@@ -31,6 +31,10 @@ class UfcstatsPublicClient:
             transport=transport,
         )
 
+    @property
+    def polite_http(self) -> PoliteHttpClient:
+        return self._http
+
     def close(self) -> None:
         self._http.close()
 

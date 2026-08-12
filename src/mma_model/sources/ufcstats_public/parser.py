@@ -39,8 +39,15 @@ REQUIRED_TOTALS_HEADERS = (
 
 def _id_from_url(url: str) -> str:
     path = urlparse(url).path.strip("/")
-    parts = path.split("/")
-    return parts[-1] if parts else ""
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return ""
+    kind, entity_id = parts[-2], parts[-1]
+    if kind not in {"fight-details", "event-details", "fighter-details"}:
+        return ""
+    if entity_id in {"fight-details", "event-details", "fighter-details"}:
+        return ""
+    return entity_id
 
 
 def _parse_of_pattern(value: str) -> tuple[int, int]:
@@ -99,7 +106,14 @@ def parse_event_details(html: str) -> dict[str, Any]:
         elif key == "location":
             location = value
 
+    page_text = soup.get_text(" ", strip=True).lower()
+    cancelled_evidence = any(
+        marker in page_text
+        for marker in ("event cancelled", "card cancelled", "cancelled event")
+    )
+
     fights: list[dict[str, Any]] = []
+    seen_fight_ids: set[str] = set()
     for tr in soup.select(
         "tr.b-fight-details__table-row.b-fight-details__table-row__hover"
     ):
@@ -107,21 +121,40 @@ def parse_event_details(html: str) -> dict[str, Any]:
         if "fight-details" not in link:
             continue
         fight_id = _id_from_url(link)
+        if not fight_id:
+            raise ParserSchemaDriftError(
+                "event fight missing external_fight_id in data-link"
+            )
+        if fight_id in seen_fight_ids:
+            raise ParserSchemaDriftError(
+                f"duplicate external_fight_id in event card: {fight_id!r}"
+            )
+        seen_fight_ids.add(fight_id)
         f_links = tr.select('a[href*="fighter-details"]')
         if len(f_links) != 2:
             raise ParticipantError(
                 f"event fight {fight_id} expected 2 participants, got {len(f_links)}"
+            )
+        fa_id = _id_from_url(f_links[0].get("href", ""))
+        fb_id = _id_from_url(f_links[1].get("href", ""))
+        if not fa_id or not fb_id:
+            raise ParserSchemaDriftError(
+                f"event fight {fight_id} missing fighter external ids"
+            )
+        if fa_id == fb_id:
+            raise ParticipantError(
+                f"event fight {fight_id} has duplicate participant ids"
             )
         fights.append(
             {
                 "external_fight_id": fight_id,
                 "fight_url": link,
                 "fighter_a": {
-                    "id": _id_from_url(f_links[0].get("href", "")),
+                    "id": fa_id,
                     "name": f_links[0].get_text(strip=True),
                 },
                 "fighter_b": {
-                    "id": _id_from_url(f_links[1].get("href", "")),
+                    "id": fb_id,
                     "name": f_links[1].get_text(strip=True),
                 },
             }
@@ -130,6 +163,11 @@ def parse_event_details(html: str) -> dict[str, Any]:
         "event_name": event_name,
         "date_text": date_text,
         "location": location,
+        "cancelled_evidence": cancelled_evidence,
+        "has_fight_table": bool(
+            soup.select("table.b-fight-details__table")
+            or soup.select("tr.b-fight-details__table-row")
+        ),
         "fights": fights,
     }
 
@@ -233,8 +271,9 @@ def parse_fight_details(html: str) -> dict[str, Any]:
     fight_link = soup.select_one('a[href*="fight-details"]')
     external_fight_id = _id_from_url(fight_link["href"]) if fight_link else ""
     if not external_fight_id:
-        # Fallback: some fixtures only embed id in totals context.
-        external_fight_id = "unknown"
+        raise ParserSchemaDriftError(
+            "fight details missing external_fight_id (no fight-details link/id)"
+        )
 
     return {
         "external_fight_id": external_fight_id,
