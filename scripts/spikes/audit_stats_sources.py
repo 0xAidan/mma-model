@@ -2,16 +2,17 @@
 """DWCS-003 read-only spike: audit licensed stats/identity production sources.
 
 Builds a reproducible scorecard for BALLDONTLIE (provisional primary), API-Sports
-(coverage probe), and SportsDataIO / Combat Registry (documented fields + quote
+(coverage probe), and SportsDataIO / Combat Registry (credentialed probe + quote
 checklist). Applies the deterministic production source decision tree.
 
 Never scrapes Tapology, Sherdog, FightMatrix, UFC/UFCStats HTML, or Bet365.
 Missing credentials are recorded as not_configured / unknown — never as zero
-coverage. Sportsbook odds are out of scope for source selection.
+coverage. Entitlement-blocked seasons are classified separately from missing
+data. Sportsbook odds are out of scope for source selection.
 
-Phase 0 permits an explicit hard blocker when credentials/quotes are absent; the
-acceptance evidence is the reproducible blocked/unknown state plus a corrected,
-fixture-testable measurement path — not invented provider coverage.
+Phase 0 permits an explicit hard blocker when credentials/quotes/entitlements are
+absent; the acceptance evidence is the reproducible blocked/unknown state plus a
+corrected, fixture-testable measurement path — not invented provider coverage.
 """
 
 from __future__ import annotations
@@ -77,6 +78,9 @@ API_SPORTS_PROBE_USD = API_SPORTS_PROBE_CENTS / 100
 
 BALLDONTLIE_BASE = "https://api.balldontlie.io/mma/v1"
 API_SPORTS_BASE = "https://v1.mma.api-sports.io"
+SPORTSDATAIO_BASE = "https://api.sportsdata.io/v3/mma"
+SPORTSDATAIO_AUDIT_SEASONS = (2023, 2024, 2025)
+SPORTSDATAIO_LEAGUE = "UFC"
 
 REQUIRED_FIGHT_FIELDS = (
     "id",
@@ -90,6 +94,18 @@ REQUIRED_STAT_FIELDS = (
     "takedowns_landed",
     "control_time_seconds",
 )
+# SportsDataIO elapsed-time / method reconstruction inputs (sanitized presence).
+SPORTSDATAIO_RESULT_FIELDS = (
+    "result_method",
+    "result_round",
+    "result_clock",
+    "rounds",
+)
+SPORTSDATAIO_STAT_FIELD_ALIASES = {
+    "significant_strikes_landed": ("SigStrikesLanded", "significant_strikes_landed"),
+    "takedowns_landed": ("TakedownsLanded", "takedowns_landed"),
+    "control_time_seconds": ("TimeInControl", "control_time_seconds"),
+}
 
 PROHIBITED_PRODUCTION_SOURCES = (
     "tapology_scrape",
@@ -2355,6 +2371,584 @@ def probe_balldontlie_live(
     return measured
 
 
+def normalize_sportsdataio_fight(
+    fight: Mapping[str, Any],
+    *,
+    event_date: str | None = None,
+) -> dict[str, Any]:
+    """Map a SportsDataIO Event.Fights row into the shared bout-match schema."""
+    fighters = fight.get("Fighters") if isinstance(fight.get("Fighters"), list) else []
+    ordered: list[dict[str, Any]] = []
+    for item in fighters:
+        if isinstance(item, Mapping):
+            ordered.append(dict(item))
+    while len(ordered) < 2:
+        ordered.append({})
+
+    def _fighter_name(row: Mapping[str, Any]) -> str:
+        first = str(row.get("FirstName") or "").strip()
+        last = str(row.get("LastName") or "").strip()
+        return " ".join(part for part in (first, last) if part)
+
+    fighter1 = {
+        "id": ordered[0].get("FighterId"),
+        "name": _fighter_name(ordered[0]),
+        "winner": ordered[0].get("Winner") is True,
+        "pre_fight_wins": ordered[0].get("PreFightWins"),
+        "pre_fight_losses": ordered[0].get("PreFightLosses"),
+        "pre_fight_draws": ordered[0].get("PreFightDraws"),
+    }
+    fighter2 = {
+        "id": ordered[1].get("FighterId"),
+        "name": _fighter_name(ordered[1]),
+        "winner": ordered[1].get("Winner") is True,
+        "pre_fight_wins": ordered[1].get("PreFightWins"),
+        "pre_fight_losses": ordered[1].get("PreFightLosses"),
+        "pre_fight_draws": ordered[1].get("PreFightDraws"),
+    }
+    pre_fight_records_present = all(
+        row.get("PreFightWins") is not None and row.get("PreFightLosses") is not None
+        for row in ordered[:2]
+    )
+    return {
+        "id": fight.get("FightId"),
+        "date": event_date,
+        "status": fight.get("Status"),
+        "result_method": fight.get("ResultType"),
+        "result_round": fight.get("ResultRound"),
+        "result_clock": fight.get("ResultClock"),
+        "rounds": fight.get("Rounds"),
+        "winner_id": fight.get("WinnerId"),
+        "fighter1": fighter1,
+        "fighter2": fighter2,
+        "pre_fight_records_present": pre_fight_records_present,
+        "provider": "sportsdataio",
+    }
+
+
+def summarize_sportsdataio_fight_stats(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, bool]:
+    """Sanitize SportsDataIO FightStats rows to required-field presence flags."""
+    present = {field: False for field in REQUIRED_STAT_FIELDS}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        for field, aliases in SPORTSDATAIO_STAT_FIELD_ALIASES.items():
+            if present[field]:
+                continue
+            for alias in aliases:
+                if _field_present(row, alias):
+                    present[field] = True
+                    break
+    return present
+
+
+def evaluate_sportsdataio_universe_gates(
+    *,
+    audit_season_access: Mapping[int, str],
+    accessible_matched_fights: Sequence[Mapping[str, Any]],
+    accessible_stat_observations: Sequence[Mapping[str, Any]] | None,
+    full_event_denominator: int,
+    full_bout_denominator: int,
+) -> dict[str, Any]:
+    """Apply full-universe SportsDataIO gates without treating blocked access as zero.
+
+    A small accessible-season sample must never produce a global feature pass.
+    """
+    seasons_ok = sorted(
+        year for year, status in audit_season_access.items() if status == "ok"
+    )
+    seasons_entitlement_blocked = sorted(
+        year
+        for year, status in audit_season_access.items()
+        if status == "entitlement_blocked"
+    )
+    seasons_auth_failed = sorted(
+        year for year, status in audit_season_access.items() if status == "auth_failed"
+    )
+    seasons_failed = sorted(
+        year
+        for year, status in audit_season_access.items()
+        if status in {"request_failed", "quota_exceeded"}
+    )
+    diagnostics = {
+        "seasons_ok": seasons_ok,
+        "seasons_entitlement_blocked": seasons_entitlement_blocked,
+        "seasons_auth_failed": seasons_auth_failed,
+        "seasons_request_failed": seasons_failed,
+        "matched_bout_count": len(accessible_matched_fights),
+        "full_event_denominator": full_event_denominator,
+        "full_bout_denominator": full_bout_denominator,
+        "global_feature_pass_allowed": False,
+        "note": (
+            "Accessible-season matches are diagnostic only. Entitlement-blocked "
+            "audit seasons are not scored as coverage absences."
+        ),
+    }
+
+    blocked_reason = "historical_season_entitlement_blocked"
+    if seasons_entitlement_blocked:
+        empty = _empty_provider_metrics(
+            full_event_denominator,
+            full_bout_denominator,
+            DIFFICULT_IDENTITY_SAMPLE_SIZE,
+        )
+        for key in (
+            "event_coverage",
+            "bout_coverage",
+            "profile_coverage",
+            "stat_coverage",
+        ):
+            empty[key]["reason"] = blocked_reason
+            empty[key]["status"] = "unknown"
+        empty["outcome_agreement"]["reason"] = blocked_reason
+        empty["outcome_agreement"]["status"] = "unknown"
+        empty["difficult_identity_coverage"]["reason"] = blocked_reason
+        empty["required_features"] = {
+            "status": "unknown",
+            "reason": "full_universe_not_measurable_due_to_entitlement",
+            "coverage_min": REQUIRED_FEATURE_COVERAGE_MIN,
+            "fight_fields": {
+                "status": "unknown",
+                "denominator": full_bout_denominator,
+                "fields": {},
+            },
+            "stat_fields": {
+                "status": "unknown",
+                "denominator": full_bout_denominator,
+                "probed": 0,
+                "fields": {},
+            },
+            "result_fields": {
+                "status": "unknown",
+                "denominator": full_bout_denominator,
+                "fields": {
+                    field: {
+                        "numerator": None,
+                        "denominator": full_bout_denominator,
+                        "rate": None,
+                        "status": "unknown",
+                    }
+                    for field in SPORTSDATAIO_RESULT_FIELDS
+                },
+            },
+            "missing_fight_fields": list(REQUIRED_FIGHT_FIELDS),
+            "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
+            "missing_result_fields": list(SPORTSDATAIO_RESULT_FIELDS),
+            "accessible_sample_stat_observations": (
+                len(accessible_stat_observations or [])
+            ),
+        }
+        empty["pit_fitness"] = {
+            "status": "unknown",
+            "reason": (
+                "pre_fight_reconstruction_unproven,revision_support_unproven,"
+                "publication_timestamps_unproven"
+            ),
+            "pre_fight_reconstruction": "unknown",
+            "revision_support": "unknown",
+            "latency_ms_p50": None,
+            "request_cost_units": None,
+            "field_null_rates": {
+                "status": "unknown",
+                "reason": "not_probed_full_universe",
+                "fields": {},
+            },
+        }
+        # Schema diagnostic on accessible sample only (never a global pass).
+        if accessible_matched_fights:
+            sample_required = evaluate_required_features(
+                accessible_matched_fights,
+                bout_stat_observations=accessible_stat_observations,
+            )
+            result_field_metrics: dict[str, Any] = {}
+            for field in SPORTSDATAIO_RESULT_FIELDS:
+                numerator = sum(
+                    1 for fight in accessible_matched_fights if _field_present(fight, field)
+                )
+                result_field_metrics[field] = {
+                    "numerator": numerator,
+                    "denominator": len(accessible_matched_fights),
+                    "rate": numerator / max(len(accessible_matched_fights), 1),
+                    "status": "diagnostic_only",
+                }
+            pre_fight_present = sum(
+                1
+                for fight in accessible_matched_fights
+                if fight.get("pre_fight_records_present") is True
+            )
+            diagnostics["accessible_sample_required_features"] = {
+                "status": sample_required["status"],
+                "fight_fields_status": sample_required["fight_fields"]["status"],
+                "stat_fields_status": sample_required["stat_fields"]["status"],
+                "result_fields": result_field_metrics,
+                "pre_fight_records_present": {
+                    "numerator": pre_fight_present,
+                    "denominator": len(accessible_matched_fights),
+                    "rate": pre_fight_present / max(len(accessible_matched_fights), 1),
+                    "status": "diagnostic_only",
+                },
+                "note": (
+                    "Diagnostic only; incomplete audit-season entitlement prevents "
+                    "a global required-features pass."
+                ),
+            }
+        return {
+            "access_status": "entitlement_blocked",
+            "error": blocked_reason,
+            "metrics_status": "blocked",
+            "event_coverage": empty["event_coverage"],
+            "bout_coverage": empty["bout_coverage"],
+            "outcome_agreement": empty["outcome_agreement"],
+            "difficult_identity_coverage": empty["difficult_identity_coverage"],
+            "profile_coverage": empty["profile_coverage"],
+            "stat_coverage": empty["stat_coverage"],
+            "required_features": empty["required_features"],
+            "pit_fitness": empty["pit_fitness"],
+            "accessible_season_diagnostics": diagnostics,
+            "access_classification": {
+                "auth": "ok" if seasons_ok or seasons_entitlement_blocked else "unknown",
+                "subscription_entitlement": "historical_seasons_blocked",
+                "quota": "ok",
+                "schema": (
+                    "ok_on_accessible_endpoints"
+                    if accessible_matched_fights
+                    else "unknown"
+                ),
+                "missing_data": "not_assessed_for_blocked_seasons",
+                "rights": "unknown",
+                "quote": "quote_pending",
+            },
+        }
+
+    # Full audit seasons accessible — caller must run shared measurement path.
+    return {
+        "access_status": "ok",
+        "error": None,
+        "metrics_status": "pending_full_measurement",
+        "accessible_season_diagnostics": diagnostics,
+        "full_universe_measurable": True,
+    }
+
+
+def probe_sportsdataio_live(
+    *,
+    api_key: str,
+    bouts: Sequence[Mapping[str, Any]],
+    difficult_identities: Sequence[Mapping[str, Any]],
+    timeout_sec: float = 30.0,
+    max_requests: int = 120,
+    sleep_fn: Any = time.sleep,
+    polite_delay_sec: float = 0.25,
+    max_stat_probes: int = 8,
+) -> dict[str, Any]:
+    """Credentialed SportsDataIO probe. Returns sanitized aggregates only."""
+    headers = {"Ocp-Apim-Subscription-Key": api_key}
+    request_count = 0
+    latencies: list[float] = []
+    access: AccessStatus = "ok"
+    error: str | None = None
+    authenticated_ok_prior = False
+    season_access: dict[int, AccessStatus] = {}
+
+    def _get(path: str) -> tuple[int, Any]:
+        nonlocal request_count, access, error, authenticated_ok_prior
+        if request_count >= max_requests:
+            access = "quota_exceeded"
+            error = "local_max_requests"
+            return 429, {"error": "local_max_requests"}
+        if request_count > 0 and polite_delay_sec > 0:
+            sleep_fn(polite_delay_sec)
+        request_count += 1
+        started = time.perf_counter()
+        try:
+            with httpx.Client(timeout=timeout_sec) as client:
+                response = client.get(
+                    f"{SPORTSDATAIO_BASE}{path}",
+                    headers=headers,
+                    params={"key": api_key},
+                )
+            latencies.append((time.perf_counter() - started) * 1000.0)
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            access = classify_provider_access(
+                api_key=api_key,
+                http_status=response.status_code,
+                body=body if isinstance(body, Mapping) else None,
+                authenticated_ok_prior=authenticated_ok_prior,
+            )
+            if access == "ok":
+                authenticated_ok_prior = True
+            else:
+                error = f"http_{response.status_code}"
+            return response.status_code, body
+        except httpx.HTTPError as exc:
+            access = "request_failed"
+            error = type(exc).__name__
+            return 0, None
+
+    # Auth / entitlement probe.
+    leagues_status, leagues_body = _get("/scores/json/Leagues")
+    if access != "ok":
+        return {
+            "access_status": access,
+            "error": error or f"leagues_http_{leagues_status}",
+            "request_count": request_count,
+            "latencies_ms": latencies,
+            "metrics_status": "blocked" if access != "not_configured" else "unknown",
+            "access_classification": {
+                "auth": "auth_failed" if access == "auth_failed" else access,
+                "subscription_entitlement": "unknown",
+                "quota": "quota_exceeded" if access == "quota_exceeded" else "unknown",
+                "schema": "unknown",
+                "missing_data": "unknown",
+                "rights": "unknown",
+                "quote": "quote_pending",
+            },
+        }
+    del leagues_body
+
+    provider_events: list[dict[str, Any]] = []
+    for season in SPORTSDATAIO_AUDIT_SEASONS:
+        if request_count >= max_requests:
+            season_access[season] = "quota_exceeded"
+            continue
+        status, body = _get(
+            f"/scores/json/Schedule/{SPORTSDATAIO_LEAGUE}/{season}"
+        )
+        season_access[season] = access
+        if access == "entitlement_blocked":
+            # Restore access for subsequent seasons after a season-scoped block.
+            access = "ok"
+            error = None
+            continue
+        if access != "ok":
+            continue
+        if not isinstance(body, list):
+            season_access[season] = "request_failed"
+            continue
+        for event in body:
+            if not isinstance(event, Mapping):
+                continue
+            if not is_dwcs_provider_event_name(str(event.get("Name") or "")):
+                continue
+            provider_events.append(dict(event))
+
+    # Fetch fight cards for accessible DWCS events.
+    provider_fights: list[dict[str, Any]] = []
+    for event in provider_events:
+        if request_count >= max_requests:
+            break
+        event_id = event.get("EventId")
+        if event_id is None:
+            continue
+        status, body = _get(f"/scores/json/Event/{event_id}")
+        if access == "entitlement_blocked":
+            access = "ok"
+            error = None
+            continue
+        if access != "ok" or not isinstance(body, Mapping):
+            if access != "ok":
+                access = "ok"
+                error = None
+            continue
+        day_raw = body.get("Day") or body.get("DateTime") or event.get("Day")
+        event_date = str(day_raw)[:10] if day_raw else None
+        fights = body.get("Fights") if isinstance(body.get("Fights"), list) else []
+        for fight in fights:
+            if isinstance(fight, Mapping):
+                provider_fights.append(
+                    normalize_sportsdataio_fight(fight, event_date=event_date)
+                )
+
+    # Match accessible fights to the frozen universe (diagnostic only when blocked).
+    matched_fights: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for bout in bouts:
+        matched = match_bout_to_provider_fight(bout, provider_fights)
+        if matched is None or matched.get("id") is None:
+            continue
+        key = str(matched["id"])
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        matched_fights.append(dict(matched))
+
+    # Bounded FightFinal schema/stat diagnostic (never enough for global pass alone).
+    stat_observations: list[dict[str, Any]] = []
+    for fight in matched_fights[:max_stat_probes]:
+        if request_count >= max_requests:
+            break
+        fight_id = fight.get("id")
+        if fight_id is None:
+            continue
+        status, body = _get(f"/stats/json/FightFinal/{fight_id}")
+        if access != "ok":
+            access = "ok"
+            error = None
+            continue
+        rows = body.get("FightStats") if isinstance(body, Mapping) else None
+        if isinstance(rows, list) and rows:
+            stat_observations.append(
+                {
+                    "fight_id": str(fight_id),
+                    "status": "present",
+                    "fields": summarize_sportsdataio_fight_stats(
+                        [dict(row) for row in rows if isinstance(row, Mapping)]
+                    ),
+                }
+            )
+        else:
+            stat_observations.append(
+                {
+                    "fight_id": str(fight_id),
+                    "status": "absent",
+                    "fields": {field: False for field in REQUIRED_STAT_FIELDS},
+                }
+            )
+
+    # Difficult-identity probe against FightersBasic (single list download).
+    difficult_results: list[dict[str, Any]] = []
+    fighters_index: dict[str, str] = {}
+    if request_count < max_requests:
+        status, body = _get("/scores/json/FightersBasic")
+        if access == "ok" and isinstance(body, list):
+            for row in body:
+                if not isinstance(row, Mapping):
+                    continue
+                name = normalize_fighter_name(
+                    f"{row.get('FirstName') or ''} {row.get('LastName') or ''}"
+                )
+                if name:
+                    fighters_index[name] = str(row.get("FighterId") or "")
+        elif access != "ok":
+            access = "ok"
+            error = None
+    for entrant in difficult_identities:
+        target = normalize_fighter_name(str(entrant.get("normalized_name") or ""))
+        if not fighters_index:
+            difficult_results.append(
+                {
+                    "entrant_key": entrant.get("entrant_key"),
+                    "status": "unknown",
+                    "reason": "fighters_index_unavailable",
+                }
+            )
+            continue
+        difficult_results.append(
+            {
+                "entrant_key": entrant.get("entrant_key"),
+                "status": "hit" if target in fighters_index else "miss",
+                "reason": None,
+            }
+        )
+
+    event_ids = {str(bout["event_id"]) for bout in bouts}
+    bout_ids = {str(bout["bout_id"]) for bout in bouts}
+    gated = evaluate_sportsdataio_universe_gates(
+        audit_season_access={int(k): str(v) for k, v in season_access.items()},
+        accessible_matched_fights=matched_fights,
+        accessible_stat_observations=stat_observations,
+        full_event_denominator=len(event_ids),
+        full_bout_denominator=len(bout_ids),
+    )
+    identity = summarize_difficult_identity_probe(
+        difficult_results,
+        expected_size=DIFFICULT_IDENTITY_SAMPLE_SIZE,
+    )
+    if gated.get("full_universe_measurable"):
+        # Entitled for all audit seasons: score the shared full-universe metrics.
+        bout_stat_full: list[dict[str, Any]] | None = None
+        if matched_fights and len(stat_observations) == len(matched_fights):
+            bout_stat_full = list(stat_observations)
+        measured = measure_balldontlie_from_observations(
+            bouts=bouts,
+            provider_fights=provider_fights,
+            difficult_identity_results=difficult_results,
+            bout_stat_observations=bout_stat_full,
+            latencies_ms=latencies,
+            request_count=request_count,
+            pre_fight_reconstruction_status=None,
+            revision_support_status=None,
+        )
+        measured["access_status"] = "ok"
+        measured["error"] = None
+        measured["metrics_status"] = "measured"
+        measured["accessible_season_diagnostics"] = gated.get(
+            "accessible_season_diagnostics"
+        )
+        measured["access_classification"] = {
+            "auth": "ok",
+            "subscription_entitlement": "ok",
+            "quota": "ok",
+            "schema": "ok",
+            "missing_data": "assessed",
+            "rights": "unknown",
+            "quote": "quote_pending",
+        }
+        gated = measured
+    elif identity.get("probed"):
+        # Prefer identity evidence even under entitlement block.
+        gated["difficult_identity_coverage"] = identity
+        gated["profile_coverage"] = make_rate_metric(
+            numerator=identity.get("hit"),
+            denominator=identity.get("probed"),
+            status="measured" if identity.get("probed") else "unknown",
+            reason=identity.get("reason"),
+        )
+
+    pre_fight_present = sum(
+        1 for fight in matched_fights if fight.get("pre_fight_records_present") is True
+    )
+    pit = evaluate_pit_fitness(
+        {
+            "latencies_ms": latencies,
+            "request_count": request_count,
+            # Pre-fight record fields exist on accessible Event cards, but that is
+            # not full historical reconstruction / revision evidence.
+            "pre_fight_reconstruction_status": None,
+            "revision_support_status": None,
+            "field_null_rates": {
+                "status": "unknown",
+                "reason": "full_universe_field_nulls_not_probed",
+                "fields": {},
+            },
+        }
+    )
+    if matched_fights and pre_fight_present == len(matched_fights):
+        pit["pre_fight_records_on_accessible_sample"] = {
+            "numerator": pre_fight_present,
+            "denominator": len(matched_fights),
+            "status": "diagnostic_only",
+            "note": (
+                "Accessible Event.Fighters expose PreFightWins/Losses/Draws, but "
+                "point-in-time historical reconstruction and revision/correction "
+                "support remain unproven for the full audit universe."
+            ),
+        }
+    gated["pit_fitness"] = pit
+    gated["request_count"] = request_count
+    gated["latencies_ms"] = latencies
+    gated["provider_dwcs_named_event_count"] = len(provider_events)
+    gated["provider_dwcs_named_fight_count"] = len(provider_fights)
+    gated["season_access"] = {str(k): v for k, v in season_access.items()}
+    gated["probe_notes"] = {
+        "league": SPORTSDATAIO_LEAGUE,
+        "audit_seasons": list(SPORTSDATAIO_AUDIT_SEASONS),
+        "event_discovery": "Schedule_by_season_then_Event_by_id",
+        "dwcs_event_name_filter": "strict_dana_white_contender_or_dwcs",
+        "stat_probe": "bounded_FightFinal_diagnostic_only",
+        "max_stat_probes": max_stat_probes,
+        "auth_mode": "subscription_key_header_or_query",
+    }
+    if gated.get("error") is None and error:
+        gated["error"] = error
+    return gated
+
+
 def measure_api_sports_from_observations(
     *,
     provider_history_bouts: Sequence[Mapping[str, Any]],
@@ -2541,6 +3135,7 @@ def build_scorecard(
     api_sports_key: str | None,
     vendor_notes: Mapping[str, Any],
     live_observations: Mapping[str, Any] | None = None,
+    sportsdataio_key: str | None = None,
 ) -> dict[str, Any]:
     filtered = filter_bouts_by_year(bouts, 2023, 2025)
     entrants = extract_entrants(filtered)
@@ -2555,6 +3150,9 @@ def build_scorecard(
     live = dict(live_observations or {})
     bdl_live = live.get("balldontlie") if isinstance(live.get("balldontlie"), Mapping) else None
     api_live = live.get("api_sports") if isinstance(live.get("api_sports"), Mapping) else None
+    sdio_live = (
+        live.get("sportsdataio") if isinstance(live.get("sportsdataio"), Mapping) else None
+    )
 
     if balldontlie_key and bdl_live is None and capture_mode in {"live", "mixed"}:
         bdl_live = probe_balldontlie_live(
@@ -2564,6 +3162,12 @@ def build_scorecard(
         )
     if api_sports_key and api_live is None and capture_mode in {"live", "mixed"}:
         api_live = probe_api_sports_live(api_key=api_sports_key, dwcs_bouts=filtered)
+    if sportsdataio_key and sdio_live is None and capture_mode in {"live", "mixed"}:
+        sdio_live = probe_sportsdataio_live(
+            api_key=sportsdataio_key,
+            bouts=filtered,
+            difficult_identities=difficult,
+        )
 
     if not balldontlie_key and bdl_live is None:
         bdl_access: AccessStatus = "not_configured"
@@ -2659,6 +3263,120 @@ def build_scorecard(
             )
         )
 
+    if not sportsdataio_key and sdio_live is None:
+        sdio_access: AccessStatus = "not_configured"
+        sdio_error: str | None = "SPORTSDATAIO_API_KEY not set"
+        sdio_metrics: dict[str, Any] = _empty_provider_metrics(
+            len(event_ids), len(bout_ids), len(difficult)
+        )
+        sdio_metrics_status = "unknown"
+        sdio_classification = {
+            "auth": "not_configured",
+            "subscription_entitlement": "unknown",
+            "quota": "unknown",
+            "schema": "unknown",
+            "missing_data": "unknown",
+            "rights": "unknown",
+            "quote": "quote_pending",
+        }
+        sdio_diagnostics = None
+        sdio_probe_notes = None
+        sdio_season_access = None
+    elif sdio_live is None:
+        sdio_access = "not_configured"
+        sdio_error = "live probe not executed"
+        sdio_metrics = _empty_provider_metrics(
+            len(event_ids), len(bout_ids), len(difficult)
+        )
+        sdio_metrics_status = "unknown"
+        sdio_classification = {
+            "auth": "not_configured",
+            "subscription_entitlement": "unknown",
+            "quota": "unknown",
+            "schema": "unknown",
+            "missing_data": "unknown",
+            "rights": "unknown",
+            "quote": "quote_pending",
+        }
+        sdio_diagnostics = None
+        sdio_probe_notes = None
+        sdio_season_access = None
+    else:
+        sdio_access = _as_access_status(sdio_live.get("access_status") or "request_failed")
+        sdio_error = sdio_live.get("error")
+        sdio_metrics_status = str(sdio_live.get("metrics_status") or "unknown")
+        sdio_classification = dict(
+            sdio_live.get("access_classification")
+            if isinstance(sdio_live.get("access_classification"), Mapping)
+            else {
+                "auth": "unknown",
+                "subscription_entitlement": "unknown",
+                "quota": "unknown",
+                "schema": "unknown",
+                "missing_data": "unknown",
+                "rights": "unknown",
+                "quote": "quote_pending",
+            }
+        )
+        sdio_diagnostics = (
+            dict(sdio_live["accessible_season_diagnostics"])
+            if isinstance(sdio_live.get("accessible_season_diagnostics"), Mapping)
+            else None
+        )
+        sdio_probe_notes = (
+            dict(sdio_live["probe_notes"])
+            if isinstance(sdio_live.get("probe_notes"), Mapping)
+            else None
+        )
+        sdio_season_access = (
+            dict(sdio_live["season_access"])
+            if isinstance(sdio_live.get("season_access"), Mapping)
+            else None
+        )
+        if sdio_access == "ok" and "event_coverage" in sdio_live:
+            sdio_metrics = {
+                "event_coverage": sdio_live["event_coverage"],
+                "bout_coverage": sdio_live["bout_coverage"],
+                "outcome_agreement": sdio_live["outcome_agreement"],
+                "difficult_identity_coverage": sdio_live["difficult_identity_coverage"],
+                "profile_coverage": sdio_live["profile_coverage"],
+                "stat_coverage": sdio_live["stat_coverage"],
+                "required_features": sdio_live["required_features"],
+                "pit_fitness": sdio_live["pit_fitness"],
+            }
+            sdio_metrics_status = "measured"
+        else:
+            sdio_metrics = _empty_provider_metrics(
+                len(event_ids), len(bout_ids), len(difficult)
+            )
+            reason = str(sdio_access if sdio_access != "ok" else "incomplete_observation")
+            for key in (
+                "event_coverage",
+                "bout_coverage",
+                "profile_coverage",
+                "stat_coverage",
+            ):
+                sdio_metrics[key]["reason"] = reason
+                sdio_metrics[key]["status"] = "unknown"
+            sdio_metrics["outcome_agreement"]["reason"] = reason
+            sdio_metrics["outcome_agreement"]["status"] = "unknown"
+            live_identity = sdio_live.get("difficult_identity_coverage")
+            if isinstance(live_identity, Mapping) and live_identity.get("probed"):
+                sdio_metrics["difficult_identity_coverage"] = dict(live_identity)
+                sdio_metrics["profile_coverage"] = make_rate_metric(
+                    numerator=live_identity.get("hit"),
+                    denominator=live_identity.get("probed"),
+                    status="measured",
+                    reason=live_identity.get("reason"),
+                )
+            if isinstance(sdio_live.get("required_features"), Mapping):
+                sdio_metrics["required_features"] = dict(sdio_live["required_features"])
+            if isinstance(sdio_live.get("pit_fitness"), Mapping):
+                sdio_metrics["pit_fitness"] = dict(sdio_live["pit_fitness"])
+            sdio_metrics_status = (
+                "blocked" if sdio_access not in {"not_configured", "ok"} else "unknown"
+            )
+
     sports_checklist = build_vendor_request_checklist("sportsdataio")
     combat_checklist = build_vendor_request_checklist("combat_registry")
     sports_notes = (
@@ -2713,6 +3431,25 @@ def build_scorecard(
         sports_notes,
         checklist_status=str(sports_checklist.get("status") or "quote_pending"),
     )
+    if sports_gates is None and sdio_live is not None:
+        # Live probe evidence alone cannot satisfy quote/rights/budget gates.
+        sports_gates = {
+            "quote_status": str(sports_checklist.get("status") or "quote_pending"),
+            "metrics_status": sdio_metrics_status,
+            "event_coverage_rate": (sdio_metrics.get("event_coverage") or {}).get("rate"),
+            "bout_coverage_rate": (sdio_metrics.get("bout_coverage") or {}).get("rate"),
+            "outcome_agreement_rate": (sdio_metrics.get("outcome_agreement") or {}).get(
+                "rate"
+            ),
+            "required_features_status": _as_gate_status(
+                (sdio_metrics.get("required_features") or {}).get("status") or "unknown"
+            ),
+            "pit_fitness_status": _as_gate_status(
+                (sdio_metrics.get("pit_fitness") or {}).get("status") or "unknown"
+            ),
+            "rights_status": "unknown",
+            "budget_status": "unknown",
+        }
     combat_gates = _fallback_gates_from_vendor_notes(
         combat_notes,
         checklist_status=str(combat_checklist.get("status") or "quote_pending"),
@@ -2730,6 +3467,8 @@ def build_scorecard(
 
     live_claimed = False
     if capture_mode == "live" and bdl_metrics_status == "measured":
+        live_claimed = True
+    if capture_mode == "live" and sdio_metrics_status in {"measured", "blocked"}:
         live_claimed = True
     if capture_mode == "fixtures":
         live_claimed = False
@@ -2834,7 +3573,14 @@ def build_scorecard(
             },
             "sportsdataio": {
                 "role": "preferred_paid_fallback_upgrade",
-                "access_status": "not_configured",
+                "access_status": sdio_access,
+                "error": sdio_error,
+                "metrics_status": sdio_metrics_status,
+                "metrics": sdio_metrics,
+                "access_classification": sdio_classification,
+                "accessible_season_diagnostics": sdio_diagnostics,
+                "season_access": sdio_season_access,
+                "probe_notes": sdio_probe_notes,
                 "documented_public": sports_checklist,
                 "adoption_gates": sports_gates,
                 "rights": evaluate_rights_gate(
@@ -2844,7 +3590,8 @@ def build_scorecard(
                         "source": sports_notes.get("rights_source", "no_written_response"),
                         "citation": sports_notes.get("rights_citation"),
                         "notes": (
-                            "Requires written quote; public marketing SLA is not a contract"
+                            "Requires written quote; public marketing SLA is not a contract. "
+                            "Key access alone does not grant storage/modeling/retention rights."
                         ),
                         "checked_at": rights_checked_at,
                     }
@@ -2852,6 +3599,7 @@ def build_scorecard(
                 "docs_citations": [
                     "https://sportsdata.io/developers/workflow-guide/mma",
                     "https://sportsdata.io/developers/data-dictionary/mma",
+                    "https://sportsdata.io/developers/api-documentation/mma",
                     "https://sportsdata.io/mma-ufc-api",
                 ],
             },
@@ -2975,6 +3723,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Env var holding API-Sports key (also checks API_SPORTS_API_KEY)",
     )
     parser.add_argument(
+        "--sportsdataio-key-env",
+        default="SPORTSDATAIO_API_KEY",
+        help="Env var holding SportsDataIO API key",
+    )
+    parser.add_argument(
+        "--prior-scorecard",
+        type=Path,
+        default=Path("output/research/stats-source-scorecard.json"),
+        help=(
+            "When BALLDONTLIE key is absent, reuse sanitized measured metrics from "
+            "this prior scorecard instead of inventing not_configured zeros"
+        ),
+    )
+    parser.add_argument(
         "--max-live-requests-balldontlie",
         type=int,
         default=300,
@@ -2987,6 +3749,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-live-requests-api-sports",
         type=int,
         default=30,
+    )
+    parser.add_argument(
+        "--max-live-requests-sportsdataio",
+        type=int,
+        default=120,
     )
     parser.add_argument(
         "--stat-checkpoint",
@@ -3035,6 +3802,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     bdl_key = _optional_env_key(args.balldontlie_key_env)
     api_key = _optional_env_key(args.api_sports_key_env, "API_SPORTS_API_KEY")
+    sdio_key = _optional_env_key(args.sportsdataio_key_env)
 
     bouts = _load_jsonl(args.manifest)
     live_observations: dict[str, Any] | None = None
@@ -3051,11 +3819,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_requests=args.max_live_requests_balldontlie,
                 stat_checkpoint_path=args.stat_checkpoint,
             )
+        elif args.prior_scorecard.is_file():
+            prior = _load_json(args.prior_scorecard)
+            prior_bdl = (
+                prior.get("providers", {}).get("balldontlie")
+                if isinstance(prior, Mapping)
+                else None
+            )
+            if (
+                isinstance(prior_bdl, Mapping)
+                and prior_bdl.get("metrics_status") == "measured"
+                and isinstance(prior_bdl.get("metrics"), Mapping)
+            ):
+                preserved = dict(prior_bdl["metrics"])
+                preserved["access_status"] = prior_bdl.get("access_status") or "ok"
+                preserved["error"] = prior_bdl.get("error")
+                preserved["rate_limit_limit_header"] = prior_bdl.get(
+                    "rate_limit_limit_header"
+                )
+                preserved["probe_notes"] = prior_bdl.get("probe_notes")
+                preserved["provider_dwcs_named_event_count"] = prior_bdl.get(
+                    "provider_dwcs_named_event_count"
+                )
+                preserved["preserved_from_prior_scorecard"] = True
+                live_observations["balldontlie"] = preserved
         if api_key:
             live_observations["api_sports"] = probe_api_sports_live(
                 api_key=api_key,
                 dwcs_bouts=filtered,
                 max_requests=args.max_live_requests_api_sports,
+            )
+        if sdio_key:
+            live_observations["sportsdataio"] = probe_sportsdataio_live(
+                api_key=sdio_key,
+                bouts=filtered,
+                difficult_identities=difficult,
+                max_requests=args.max_live_requests_sportsdataio,
             )
 
     scorecard = build_scorecard(
@@ -3064,6 +3863,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         capture_mode=args.capture_mode,
         balldontlie_key=bdl_key,
         api_sports_key=api_key,
+        sportsdataio_key=sdio_key,
         vendor_notes=vendor_notes,
         live_observations=live_observations,
     )
@@ -3077,6 +3877,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "live_measurements_claimed": scorecard["live_measurements_claimed"],
                 "balldontlie_access": scorecard["providers"]["balldontlie"]["access_status"],
                 "api_sports_access": scorecard["providers"]["api_sports"]["access_status"],
+                "sportsdataio_access": scorecard["providers"]["sportsdataio"][
+                    "access_status"
+                ],
                 "decision_path": scorecard["decision"]["path"],
                 "primary": scorecard["decision"]["primary"],
                 "hard_blocker": scorecard["decision"]["hard_blocker"],

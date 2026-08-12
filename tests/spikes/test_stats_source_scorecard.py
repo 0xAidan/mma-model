@@ -1114,12 +1114,13 @@ def test_match_bout_to_event_by_participants_and_date(audit: Any) -> None:
 
 
 def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
-    """Lock the exact post-entitlement revalidation evidence in this PR.
+    """Lock SportsDataIO entitlement refresh + preserved BALLDONTLIE history.
 
-    Coverage/outcome measured pass; required_features fails honestly on
-    universe-wide fight_stats (control_time_seconds below min); PIT remains
-    unknown. Primary stays null. Synthetic adoption-path coverage lives in
-    ``test_decision_thresholds_balldontlie_boundary``.
+    BALLDONTLIE remains measured (coverage/outcome pass; required_features fail on
+    control_time_seconds; PIT unknown). SportsDataIO auth succeeds but 2023–2024
+    schedule seasons are entitlement-blocked, so full-universe technical gates stay
+    unknown/blocked — not scored as zero coverage. Rights/budget remain
+    quote-pending/unknown. Primary stays null.
     """
     path = ROOT / "output" / "research" / "stats-source-scorecard.json"
     if not path.is_file():
@@ -1129,6 +1130,7 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
         assert key in payload
     blob = path.read_text(encoding="utf-8")
     assert SENTINEL_API_KEY not in blob
+    assert "Ocp-Apim-Subscription-Key" not in blob
     assert not re.search(
         r"(?i)(api[_-]?key|authorization)\s*[\"']?\s*[:=]\s*[\"'][^\"']+", blob
     )
@@ -1138,7 +1140,7 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert payload["decision"]["prohibited_scraping_selected"] is False
     assert payload["capture_mode"] == "live"
     assert payload["live_measurements_claimed"] is True
-    assert payload["captured_at"] == "2026-08-12T02:20:00+00:00"
+    assert payload["captured_at"] == "2026-08-12T14:30:00+00:00"
     assert payload["budget_context"]["recurring_monthly"]["usd_cents"] == 6999
 
     # Exact hard-blocker evidence for this PR (not an adopted-or-blocked union).
@@ -1221,6 +1223,39 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert gates["budget_status"] == "pass"
     assert gates["adopt"] is False
 
+    sdio = payload["providers"]["sportsdataio"]
+    assert sdio["access_status"] == "entitlement_blocked"
+    assert sdio["error"] == "historical_season_entitlement_blocked"
+    assert sdio["metrics_status"] == "blocked"
+    classification = sdio["access_classification"]
+    assert classification["auth"] == "ok"
+    assert classification["subscription_entitlement"] == "historical_seasons_blocked"
+    assert classification["quota"] == "ok"
+    assert classification["schema"] == "ok_on_accessible_endpoints"
+    assert classification["rights"] == "unknown"
+    assert classification["quote"] == "quote_pending"
+    assert sdio["season_access"] == {
+        "2023": "entitlement_blocked",
+        "2024": "entitlement_blocked",
+        "2025": "ok",
+    }
+    diag = sdio["accessible_season_diagnostics"]
+    assert diag["seasons_ok"] == [2025]
+    assert diag["seasons_entitlement_blocked"] == [2023, 2024]
+    assert diag["full_event_denominator"] == 30
+    assert diag["full_bout_denominator"] == 149
+    assert diag["matched_bout_count"] == 49
+    assert diag["global_feature_pass_allowed"] is False
+    assert sdio["metrics"]["event_coverage"]["numerator"] is None
+    assert sdio["metrics"]["bout_coverage"]["numerator"] is None
+    assert sdio["metrics"]["required_features"]["status"] == "unknown"
+    assert sdio["metrics"]["pit_fitness"]["status"] == "unknown"
+    assert sdio["metrics"]["difficult_identity_coverage"]["hit"] == 50
+    assert sdio["rights"]["status"] == "unknown"
+    assert sdio["documented_public"]["status"] == "quote_pending"
+    sdio_gates = payload["decision"]["gates"]["sportsdataio"]
+    assert sdio_gates["adopt"] is False
+    assert sdio_gates["quote_status"] == "quote_pending"
 
 def test_decision_doc_exists_with_citations() -> None:
     path = ROOT / "docs" / "research" / "stats-source-decision.md"
@@ -1246,3 +1281,289 @@ def test_cli_help_mentions_manifest_and_out(audit: Any) -> None:
     assert "--out" in help_text
     assert "--capture-time" in help_text
     assert "--redact" in help_text
+    assert "--sportsdataio-key-env" in help_text
+    assert "--prior-scorecard" in help_text
+
+
+def test_normalize_sportsdataio_fight_maps_common_contract(audit: Any) -> None:
+    raw = {
+        "FightId": 9904,
+        "Status": "Final",
+        "ResultType": "KO/TKO",
+        "ResultRound": 2,
+        "ResultClock": 45,
+        "Rounds": 3,
+        "WinnerId": 11,
+        "Fighters": [
+            {
+                "FighterId": 11,
+                "FirstName": "Alice",
+                "LastName": "Alpha",
+                "Winner": True,
+                "PreFightWins": 5,
+                "PreFightLosses": 1,
+                "PreFightDraws": 0,
+            },
+            {
+                "FighterId": 12,
+                "FirstName": "Bob",
+                "LastName": "Beta",
+                "Winner": False,
+                "PreFightWins": 4,
+                "PreFightLosses": 2,
+                "PreFightDraws": 0,
+            },
+        ],
+    }
+    normalized = audit.normalize_sportsdataio_fight(raw, event_date="2025-09-09")
+    assert normalized["id"] == 9904
+    assert normalized["date"] == "2025-09-09"
+    assert normalized["status"] == "Final"
+    assert normalized["result_method"] == "KO/TKO"
+    assert normalized["result_round"] == 2
+    assert normalized["result_clock"] == 45
+    assert normalized["rounds"] == 3
+    assert normalized["fighter1"]["name"] == "Alice Alpha"
+    assert normalized["fighter2"]["name"] == "Bob Beta"
+    assert normalized["winner_id"] == 11
+    assert normalized["pre_fight_records_present"] is True
+
+
+def test_summarize_sportsdataio_fight_stats_aliases(audit: Any) -> None:
+    rows = [
+        {
+            "FighterId": 11,
+            "SigStrikesLanded": 12.0,
+            "TakedownsLanded": 1.0,
+            "TimeInControl": 30.0,
+        },
+        {
+            "FighterId": 12,
+            "SigStrikesLanded": 8.0,
+            "TakedownsLanded": 0.0,
+            "TimeInControl": 10.0,
+        },
+    ]
+    fields = audit.summarize_sportsdataio_fight_stats(rows)
+    assert fields == {
+        "significant_strikes_landed": True,
+        "takedowns_landed": True,
+        "control_time_seconds": True,
+    }
+
+
+def test_sportsdataio_401_after_auth_is_entitlement_blocked(audit: Any) -> None:
+    access = audit.classify_provider_access(
+        api_key="SENTINEL_SDIO_KEY",
+        http_status=401,
+        body={"Code": 401, "Description": "Subscription does not include this feed"},
+        authenticated_ok_prior=True,
+    )
+    assert access == "entitlement_blocked"
+
+
+def test_sportsdataio_partial_season_cannot_pass_global_features(audit: Any) -> None:
+    """Accessible-season sample must never clear the full-universe feature gate."""
+    result = audit.evaluate_sportsdataio_universe_gates(
+        audit_season_access={
+            2023: "entitlement_blocked",
+            2024: "entitlement_blocked",
+            2025: "ok",
+        },
+        accessible_matched_fights=[{"id": 1}, {"id": 2}],
+        accessible_stat_observations=[
+            {
+                "fight_id": "1",
+                "status": "present",
+                "fields": {
+                    "significant_strikes_landed": True,
+                    "takedowns_landed": True,
+                    "control_time_seconds": True,
+                },
+            },
+            {
+                "fight_id": "2",
+                "status": "present",
+                "fields": {
+                    "significant_strikes_landed": True,
+                    "takedowns_landed": True,
+                    "control_time_seconds": True,
+                },
+            },
+        ],
+        full_event_denominator=30,
+        full_bout_denominator=149,
+    )
+    assert result["access_status"] == "entitlement_blocked"
+    assert result["metrics_status"] == "blocked"
+    assert result["required_features"]["status"] in {"unknown", "blocked"}
+    assert result["required_features"]["status"] != "pass"
+    assert result["event_coverage"]["status"] == "unknown"
+    assert result["event_coverage"]["numerator"] is None
+    assert result["bout_coverage"]["numerator"] is None
+    assert "entitlement" in str(result["required_features"].get("reason") or "").lower() or (
+        "entitlement" in str(result.get("error") or "").lower()
+    )
+    diag = result["accessible_season_diagnostics"]
+    assert diag["seasons_ok"] == [2025]
+    assert diag["seasons_entitlement_blocked"] == [2023, 2024]
+    assert diag["matched_bout_count"] == 2
+    assert diag["global_feature_pass_allowed"] is False
+
+
+def test_sportsdataio_key_absent_is_not_zero_coverage(
+    audit: Any, sample_bouts: list[dict[str, Any]]
+) -> None:
+    scorecard = audit.build_scorecard(
+        bouts=sample_bouts,
+        captured_at="2026-08-12T14:30:00+00:00",
+        capture_mode="fixtures",
+        balldontlie_key=None,
+        api_sports_key=None,
+        sportsdataio_key=None,
+        vendor_notes={},
+        live_observations=None,
+    )
+    sdio = scorecard["providers"]["sportsdataio"]
+    assert sdio["access_status"] == "not_configured"
+    metrics = sdio.get("metrics") or {}
+    event = metrics.get("event_coverage") or {}
+    assert event.get("numerator") is None
+    assert event.get("status") == "unknown"
+    assert scorecard["decision"]["primary"] is None
+
+
+def test_sportsdataio_complete_quote_still_needs_technical_pass(audit: Any) -> None:
+    bdl_fail = {
+        "event_coverage_rate": 1.0,
+        "bout_coverage_rate": 1.0,
+        "outcome_agreement_rate": 1.0,
+        "required_features_status": "fail",
+        "pit_fitness_status": "unknown",
+        "rights_status": "pass",
+        "budget_status": "pass",
+        "metrics_status": "measured",
+    }
+    blocked = audit.apply_stats_source_decision_tree(
+        balldontlie_gates=bdl_fail,
+        api_sports_gates={"access_status": "not_configured"},
+        sportsdataio_status="complete",
+        sportsdataio_gates={
+            "quote_status": "complete",
+            "metrics_status": "blocked",
+            "event_coverage_rate": None,
+            "bout_coverage_rate": None,
+            "outcome_agreement_rate": None,
+            "required_features_status": "unknown",
+            "pit_fitness_status": "unknown",
+            "rights_status": "unknown",
+            "budget_status": "unknown",
+        },
+    )
+    assert blocked["primary"] is None
+    assert blocked["hard_blocker"] is True
+
+
+def test_preserve_prior_balldontlie_when_key_absent(
+    audit: Any, sample_bouts: list[dict[str, Any]]
+) -> None:
+    prior_live = {
+        "balldontlie": {
+            "access_status": "ok",
+            "error": None,
+            "event_coverage": {
+                "numerator": 30,
+                "denominator": 30,
+                "rate": 1.0,
+                "status": "measured",
+                "reason": None,
+            },
+            "bout_coverage": {
+                "numerator": 149,
+                "denominator": 149,
+                "rate": 1.0,
+                "status": "measured",
+                "reason": None,
+            },
+            "outcome_agreement": {
+                "numerator": 149,
+                "denominator": 149,
+                "rate": 1.0,
+                "status": "measured",
+                "reason": None,
+                "excluded_unknown_count": 0,
+                "denominator_policy": "comparable_mapped_pairs_only",
+            },
+            "difficult_identity_coverage": {
+                "status": "measured",
+                "expected_size": 50,
+                "probed": 50,
+                "hit": 50,
+                "miss": 0,
+                "unknown": 0,
+                "hit_rate": 1.0,
+                "reason": None,
+                "denominator_policy": "hit_miss_unknown_partition_of_probed_sample",
+            },
+            "profile_coverage": {
+                "numerator": 50,
+                "denominator": 50,
+                "rate": 1.0,
+                "status": "measured",
+                "reason": None,
+            },
+            "stat_coverage": {
+                "numerator": 149,
+                "denominator": 149,
+                "rate": 1.0,
+                "status": "measured",
+                "reason": None,
+            },
+            "required_features": {
+                "status": "fail",
+                "reason": "required_feature_coverage_below_min",
+                "coverage_min": 0.98,
+                "fight_fields": {"status": "pass", "denominator": 149, "fields": {}},
+                "stat_fields": {
+                    "status": "fail",
+                    "denominator": 149,
+                    "probed": 149,
+                    "fields": {},
+                },
+                "missing_fight_fields": [],
+                "missing_stat_fields": ["control_time_seconds"],
+            },
+            "pit_fitness": {
+                "status": "unknown",
+                "reason": "pre_fight_reconstruction_unproven,revision_support_unproven",
+                "pre_fight_reconstruction": "unknown",
+                "revision_support": "unknown",
+                "latency_ms_p50": 1.0,
+                "request_cost_units": 1,
+                "field_null_rates": {"status": "unknown", "reason": "x", "fields": {}},
+            },
+            "year_diagnostics": {
+                "years_with_any_provider_dwcs_named_events": 3,
+                "manifest_calendar_years": [2023, 2024, 2025],
+                "note": "Year diagnostics are informational only and are never used as event_coverage numerator/denominator.",
+            },
+            "rate_limit_limit_header": "600",
+            "preserved_from_prior_scorecard": True,
+        }
+    }
+    scorecard = audit.build_scorecard(
+        bouts=sample_bouts,
+        captured_at="2026-08-12T14:30:00+00:00",
+        capture_mode="live",
+        balldontlie_key=None,
+        api_sports_key=None,
+        sportsdataio_key=None,
+        vendor_notes={},
+        live_observations=prior_live,
+    )
+    bdl = scorecard["providers"]["balldontlie"]
+    assert bdl["access_status"] == "ok"
+    assert bdl["metrics_status"] == "measured"
+    assert bdl["metrics"]["event_coverage"]["numerator"] == 30
+    assert bdl["metrics"]["required_features"]["status"] == "fail"
+    assert scorecard["decision"]["primary"] is None
