@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "contract_id": "dwcs_source_policy",
+  "contract_version": "1.1.1",
+  "effective_date": "2026-08-12",
+  "ticket": "DWCS-003",
+  "decision_recorded_by": "user_explicit_approval",
+  "policy_mode": "public_first_hybrid_personal_project",
+  "source_ids": [
+    "ufcstats_public",
+    "mma_ai_bootstrap",
+    "tapology_public",
+    "sherdog_public",
+    "combat_registry",
+    "wikidata",
+    "bestfightodds_archive",
+    "the_odds_api",
+    "sportsdataio",
+    "balldontlie",
+    "explicit_missing"
+  ],
+  "supersedes": {
+    "phase1_production_rights_rule": "official_licensed_apis_only",
+    "note": "Licensed-provider-only Phase 1 production rule is replaced for this personal project. Identity, leakage, provenance, explicit-missingness, and coverage gates are not weakened."
+  },
+  "licensed_audit_status": {
+    "decision_primary": null,
+    "licensed_hard_blocker": true,
+    "scorecard_path": "output/research/stats-source-scorecard.json",
+    "preserved_evidence": [
+      "balldontlie_measured_2023_2025_slice",
+      "sportsdataio_entitlement_blocked_2023_2024"
+    ],
+    "rule": "Do not set decision.primary until a measured audit for the chosen stack passes all technical gates. Historical BALLDONTLIE and SportsDataIO scorecard rows remain audit records, not adoption claims."
+  },
+  "gates_retained": {
+    "dwcs_universe_cards": 89,
+    "dwcs_universe_bouts": 440,
+    "every_exclusion_categorized": true,
+    "cross_source_reconciliation_min_where_comparable": 0.98,
+    "result_agreement_min": 0.99,
+    "unresolved_evaluated_or_upcoming_identity_conflicts_max": 0,
+    "future_row_leakage_failures_max": 0,
+    "mutable_current_as_historical_feature_failures_max": 0,
+    "weakening_forbidden": true,
+    "policy_change_permits_only": "public-source observations for a personal project with explicit source labels and quality tiers"
+  },
+  "roles": {
+    "ufcstats_public": {
+      "role": "canonical_ufc_dwcs_facts_and_stats",
+      "acquisition": "direct_reproducible_public_snapshots",
+      "bootstrap": "mma_ai_bootstrap_after_hash_count_schema_reconciliation",
+      "forbidden": ["opaque_precomputed_feature_csvs_as_training_inputs"]
+    },
+    "mma_ai_bootstrap": {
+      "role": "optional_raw_normalized_bootstrap_only_after_reconciliation",
+      "forbidden": ["opaque_precomputed_feature_csvs_as_training_inputs"]
+    },
+    "tapology_public": {
+      "role": "primary_regional_pre_ufc_breadth",
+      "condition": "only_where_public_pages_are_accessible_without_bypass"
+    },
+    "sherdog_public": {
+      "role": "selective_secondary_regional_reconciliation"
+    },
+    "combat_registry": {
+      "role": "authoritative_validation_and_overrides",
+      "surfaces": ["public_results", "eventual_api", "state_commission_records"]
+    },
+    "wikidata": {
+      "role": "identity_crosswalk_and_aliases",
+      "forbidden": ["canonical_bout_ledger"]
+    },
+    "bestfightodds_archive": {
+      "role": "public_historical_odds_reconciliation"
+    },
+    "the_odds_api": {
+      "role": "optional_structured_odds_snapshots_from_2020",
+      "odds_vs_outcome_model": "separate_unless_evaluation_contract_explicitly_enables_challenger"
+    },
+    "sportsdataio": {
+      "role": "validation_enrichment_only",
+      "limitations": "historical_2023_2024_entitlement_blocked_on_measured_key"
+    },
+    "balldontlie": {
+      "role": "validation_enrichment_only",
+      "limitations": "control_time_seconds_below_required_feature_gate; pit_unknown"
+    },
+    "explicit_missing": {
+      "role": "terminal_fallback_categorized_as_missing_quality_tier"
+    }
+  },
+  "identity_rules": {
+    "exact_source_ids_first": true,
+    "wikidata_crosswalk_first": true,
+    "fuzzy_or_transliteration": "candidates_only_in_reversible_review_queue",
+    "same_name_auto_merge": false
+  },
+  "access_controls": {
+    "never_bypass": [
+      "logins",
+      "paywalls",
+      "captchas",
+      "robots_or_access_controls",
+      "technical_restrictions"
+    ],
+    "public_extraction_required": [
+      "bounded_respectful_rates",
+      "cache_and_checkpointing",
+      "deterministic_fixture_tests",
+      "identifiable_user_agent_and_contact",
+      "exponential_backoff",
+      "stop_on_block_signals"
+    ]
+  },
+  "pit_timestamps": {
+    "never_backdate_observed_at": true,
+    "separate_clocks": [
+      "acquisition_time",
+      "source_publication_or_update_time",
+      "fact_effective_time",
+      "documented_proxy_time"
+    ],
+    "publication_proxy": {
+      "allowed_for": "historical_immutable_bout_result_stat_facts",
+      "requires": "frozen_documented_rule_and_quality_tier_label",
+      "example_rule": "event_completion_plus_fixed_delay",
+      "forbidden_for": "current_mutable_profile_aggregates_as_historical_features"
+    },
+    "prefer_wayback_or_revision_snapshots": true,
+    "preserve_capture_timestamp_and_hash": true
+  },
+  "observation_metadata": {
+    "required_timestamp_fields": [
+      "observed_at",
+      "source_published_at",
+      "source_updated_at",
+      "effective_at",
+      "proxy_published_at"
+    ],
+    "required_quality_fields": [
+      "timestamp_quality",
+      "timestamp_quality_source",
+      "quality_tier"
+    ],
+    "required_raw_fields": [
+      "payload_hash",
+      "raw_ref"
+    ],
+    "timestamp_quality_values": [
+      "direct_source_timestamp",
+      "revision_snapshot",
+      "publication_proxy",
+      "unknown"
+    ],
+    "quality_tier_values": [
+      "gold",
+      "silver",
+      "bronze",
+      "missing",
+      "conflict"
+    ],
+    "reserved_attribute_keys": [
+      "observed_at",
+      "source_published_at",
+      "source_updated_at",
+      "effective_at",
+      "proxy_published_at",
+      "timestamp_quality",
+      "timestamp_quality_source",
+      "quality_tier",
+      "payload_hash",
+      "raw_ref",
+      "raw_blob_absent",
+      "detail_level",
+      "source",
+      "stream",
+      "external_id",
+      "entity_kind",
+      "version_kind",
+      "schema_version",
+      "subject_id"
+    ],
+    "attributes_json_rule": "source_specific_non_contract_metadata_only_never_shadow_reserved_keys"
+  },
+  "dwcs_102_persistence": {
+    "implement_in_this_pr": false,
+    "migration_id": "0006_observation_pit_metadata",
+    "table_columns": {
+      "raw_observations": [
+        "observed_at",
+        "source_published_at",
+        "source_updated_at",
+        "effective_at",
+        "proxy_published_at",
+        "timestamp_quality",
+        "timestamp_quality_source",
+        "quality_tier",
+        "attributes_json",
+        "payload_hash",
+        "raw_ref"
+      ]
+    },
+    "source_observation_record_fields": [
+      "observed_at",
+      "source_published_at",
+      "source_updated_at",
+      "effective_at",
+      "proxy_published_at",
+      "timestamp_quality",
+      "timestamp_quality_source",
+      "quality_tier",
+      "attributes",
+      "payload_hash",
+      "raw_ref",
+      "raw_blob_absent"
+    ],
+    "repository_requirements": [
+      "persist_all_timestamp_and_quality_columns",
+      "persist_attributes_json_without_drop",
+      "round_trip_read_equals_written_observation",
+      "reject_verified_detail_when_required_metadata_missing",
+      "reject_attributes_containing_reserved_contract_keys"
+    ],
+    "required_tests": [
+      "round_trip_silver_vs_gold_quality_tier",
+      "proxy_published_at_persisted_when_timestamp_quality_publication_proxy",
+      "attributes_json_not_dropped_on_commit_batch",
+      "source_published_at_distinct_from_observed_at",
+      "mapper_first_class_pit_quality_round_trip",
+      "mapper_rejects_reserved_attribute_key_collision"
+    ],
+    "gap_note": "DWCS-101 IngestRepository currently constructs RawObservation without attributes and without proxy/quality columns, so silver vs gold metadata cannot survive commit. DWCS-102 must close this before public adapters write production history. Mappers must set first-class PIT/quality fields; attributes_json is source-specific only."
+  },
+  "quality_tiers": {
+    "gold": "direct_timestamp_or_revision",
+    "silver": "stable_immutable_fact_with_documented_publication_proxy_and_independent_agreement",
+    "bronze": "single_current_retrospective_source",
+    "missing": "explicit_missing_category",
+    "conflict": "preserved_disagreement_never_silent_overwrite"
+  },
+  "kill_criteria": {
+    "ufcstats_public": [
+      "robots_or_http_block_persists_after_backoff",
+      "schema_drift_unresolved_after_parser_version_bump",
+      "reconciliation_vs_manifest_below_gates"
+    ],
+    "mma_ai_bootstrap": [
+      "hash_count_or_schema_reconciliation_fails",
+      "only_opaque_feature_csvs_available"
+    ],
+    "tapology_public": [
+      "login_paywall_or_captcha_required_for_needed_pages",
+      "persistent_block_signals",
+      "robots_disallow_for_target_paths"
+    ],
+    "sherdog_public": [
+      "access_controls_block_needed_pages",
+      "persistent_block_signals"
+    ],
+    "combat_registry": [
+      "public_results_unavailable_and_api_quote_absent"
+    ],
+    "bestfightodds_archive": [
+      "archive_paths_blocked",
+      "irreconcilable_event_matching_below_gate"
+    ]
+  },
+  "deterministic_fallback_order": [
+    "ufcstats_public",
+    "mma_ai_bootstrap",
+    "tapology_public",
+    "sherdog_public",
+    "combat_registry",
+    "sportsdataio",
+    "balldontlie",
+    "explicit_missing"
+  ],
+  "phase1_tickets": [
+    "DWCS-102",
+    "DWCS-103",
+    "DWCS-104",
+    "DWCS-105",
+    "DWCS-106"
+  ],
+  "design_spec": "docs/superpowers/specs/2026-08-12-public-first-mma-history-design.md",
+  "implementation_plan": "docs/superpowers/plans/2026-08-12-public-first-mma-history.md"
+}

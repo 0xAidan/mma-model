@@ -62,8 +62,12 @@ Independent official cross-checks (not used as the ledger seed):
    `python scripts/spikes/build_dwcs_manifest.py --through 2025 --refresh-espn --verify`
    may be run by an operator to spot ESPN drift. It remains spike-only and must
    not be treated as a production dependency.
-4. **Prohibited for this ticket:** automated scraping of Bet365, Tapology,
-   Sherdog, FightMatrix, UFC.com HTML, or UFCStats HTML. No silent scrape fallback.
+4. **Source policy (amended 2026-08-12):** Bet365 scraping and access-control
+   bypass remain prohibited. Phase 1 public-first adapters (UFCStats direct
+   snapshots; Tapology/Sherdog public pages only where accessible; Combat
+   Registry public results) are permitted under
+   `config/sources/source_policy_v1.json` with rate limits, kill criteria, and
+   quality tiers. Silent unrestricted scrape fallback remains rejected.
 5. **Event-night evidence:** structured citation provenance
    (`evidence[]`, `evidence_checked_at`, `evidence_grade`, `citation_only`,
    `evidence_limitations`). CI validates URL shape and required fields offline; it

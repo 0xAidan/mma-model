@@ -129,6 +129,10 @@ PROHIBITED_PRODUCTION_SOURCES = (
     "ufc_html_scrape",
     "bet365_scrape",
 )
+# Silent/unlabeled scrape names remain rejected by the licensed decision tree.
+# Labeled public-first adapters are governed by config/sources/source_policy_v1.json
+# and must never appear as silent ranked_lawful_fallbacks substitutes.
+SOURCE_POLICY_PATH = "config/sources/source_policy_v1.json"
 
 SCORECARD_SCHEMA_KEYS = (
     "schema_version",
@@ -1651,8 +1655,9 @@ def apply_stats_source_decision_tree(
             f"metrics_status={balldontlie_gates.get('metrics_status')}); "
             f"SportsDataIO quote_status={sportsdataio_status}; "
             f"Combat Registry quote_status={combat_registry_status}. "
-            "Missing quote/credentials remain hard blockers. "
-            "Prohibited scraping is rejected."
+            "Missing quote/credentials remain licensed hard blockers. "
+            "Silent prohibited scraping is rejected. Phase 1 public-first hybrid "
+            f"is governed separately by {SOURCE_POLICY_PATH}."
         )
         ranked.extend(
             [
@@ -1691,6 +1696,9 @@ def apply_stats_source_decision_tree(
         "primary": primary,
         "path": path,
         "hard_blocker": hard_blocker,
+        "licensed_primary_adoption": "adopted" if primary else "hard_blocker",
+        "phase1_source_policy": "public_first_hybrid_personal_project",
+        "source_policy_path": SOURCE_POLICY_PATH,
         "rationale": rationale,
         "api_sports_probe_keep": api_keep,
         "ranked_lawful_fallbacks": ranked,
@@ -3879,7 +3887,26 @@ def build_scorecard(
         "decision": decision,
         "prohibited_sources": {
             "rejected": list(PROHIBITED_PRODUCTION_SOURCES),
-            "rule": "Never silently fall back to prohibited scraping",
+            "rejected_silent_or_bypass": [
+                "tapology_scrape_silent_fallback",
+                "sherdog_scrape_silent_fallback",
+                "fightmatrix_scrape",
+                "bet365_scrape",
+                "login_paywall_captcha_bypass",
+                "robots_or_access_control_bypass",
+            ],
+            "approved_labeled_public_roles": [
+                "ufcstats_public",
+                "mma_ai_bootstrap",
+                "tapology_public",
+                "sherdog_public",
+                "combat_registry",
+                "bestfightodds_archive",
+            ],
+            "rule": (
+                "Never silently fall back to prohibited scraping or access-control bypass. "
+                "Labeled public-first adapters are allowed only under source_policy_v1.json."
+            ),
         },
         "evidence_timestamps": {
             "scorecard_captured_at": captured_at,
@@ -3892,18 +3919,32 @@ def build_scorecard(
         "handoff": {
             "next_ticket": "DWCS-102",
             "contract": (
-                "Implement exactly one selected primary adapter only if decision.primary "
-                "is set; otherwise keep production stats ingest blocked and pursue ranked "
-                "lawful fallbacks. Do not enable UFCStats/Tapology/Sherdog scrapers."
+                "Licensed decision.primary remains null when licensed gates fail "
+                "(licensed hard_blocker preserved). Phase 1 proceeds under "
+                f"{SOURCE_POLICY_PATH} (public_first_hybrid_personal_project): "
+                "implement UFCStats public snapshots and labeled regional public "
+                "adapters per the public-first plan. Do not invent licensed adoption. "
+                "Never bypass logins/paywalls/CAPTCHAs/robots/access controls; stop on "
+                "block signals. BALLDONTLIE/SportsDataIO remain validation/enrichment only."
             ),
             "odds_note": (
                 "Missing Bet365 feed is irrelevant to stats/identity source selection; "
-                "odds remain optional enrichment (DWCS-000)."
+                "odds remain optional enrichment (DWCS-000). BestFightOdds archive is the "
+                "public historical odds lane; The Odds API remains optional structured "
+                "snapshots."
             ),
             "phase0_note": (
-                "Phase 0 permits an explicit hard blocker when credentials/quotes are "
-                "absent. Acceptance evidence is the reproducible blocked/unknown state "
-                "plus the executable measurement path, not invented live coverage."
+                "Phase 0 licensed audit evidence is preserved. Acceptance of licensed "
+                "primary still requires measured gates. Public-first Phase 1 is an "
+                "explicit personal-project policy amendment and does not weaken "
+                "identity/leakage/coverage gates."
+            ),
+            "source_policy_path": SOURCE_POLICY_PATH,
+            "design_spec": (
+                "docs/superpowers/specs/2026-08-12-public-first-mma-history-design.md"
+            ),
+            "implementation_plan": (
+                "docs/superpowers/plans/2026-08-12-public-first-mma-history.md"
             ),
         },
     }

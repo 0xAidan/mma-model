@@ -1235,6 +1235,16 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert payload["decision"]["primary"] is None
     assert payload["decision"]["hard_blocker"] is True
     assert payload["decision"]["path"] == "hard_blocker"
+    assert payload["decision"]["phase1_source_policy"] == (
+        "public_first_hybrid_personal_project"
+    )
+    assert payload["decision"]["source_policy_path"] == (
+        "config/sources/source_policy_v1.json"
+    )
+    assert payload["handoff"]["source_policy_path"] == (
+        "config/sources/source_policy_v1.json"
+    )
+    assert "public_first" in payload["handoff"]["contract"]
 
     balldontlie = payload["providers"]["balldontlie"]
     assert balldontlie["access_status"] == "ok"
@@ -1369,6 +1379,8 @@ def test_decision_doc_exists_with_citations() -> None:
     assert "not measured provider coverage" in text.lower() or (
         "not invented" in text.lower()
     )
+    assert "public-first" in text.lower() or "public_first" in text.lower()
+    assert "source_policy_v1.json" in text
 
 
 def test_cli_help_mentions_manifest_and_out(audit: Any) -> None:
