@@ -1,12 +1,21 @@
-"""SQLAlchemy models for UFC Stats–derived data."""
+"""SQLAlchemy models facade.
+
+Legacy UFC Stats–shaped tables live here. Canonical DWCS entities are defined in
+``mma_model.db.tables.core`` and re-exported below so ``from mma_model.db.models
+import ...`` remains the stable import path.
+"""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -23,7 +32,9 @@ class Fighter(Base):
     reach_in: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stance: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     dob: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now
+    )
 
     fights_a: Mapped[list["Fight"]] = relationship(
         back_populates="fighter_a", foreign_keys="Fight.fighter_a_id"
@@ -41,7 +52,7 @@ class Event(Base):
     event_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     location: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
     raw_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
     fights: Mapped[list["Fight"]] = relationship(back_populates="event")
 
@@ -98,14 +109,18 @@ class IngestCursor(Base):
 
     cursor_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     next_page: Mapped[int] = mapped_column(Integer, default=1)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now
+    )
 
 
 class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, index=True
+    )
     sport_key: Mapped[str] = mapped_column(String(80))
     event_id_external: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     payload_json: Mapped[str] = mapped_column(Text)
@@ -122,4 +137,42 @@ class FighterComposite(Base):
     grapple_score: Mapped[float] = mapped_column(Float, default=0.0)
     pace_score: Mapped[float] = mapped_column(Float, default=0.0)
     momentum_score: Mapped[float] = mapped_column(Float, default=0.0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+# Canonical core schema (registered on the same Base.metadata).
+from mma_model.db.tables.core import (  # noqa: E402
+    BoutParticipant,
+    BoutResultVersion,
+    BoutSourceId,
+    CanonicalBout,
+    CanonicalEvent,
+    CanonicalFighter,
+    EventSourceId,
+    FighterAlias,
+    FighterProfileObservation,
+    FighterSourceId,
+    FighterStatObservation,
+)
+
+__all__ = [
+    "Base",
+    "BoutParticipant",
+    "BoutResultVersion",
+    "BoutSourceId",
+    "CanonicalBout",
+    "CanonicalEvent",
+    "CanonicalFighter",
+    "Event",
+    "EventSourceId",
+    "Fight",
+    "FightFighterStats",
+    "Fighter",
+    "FighterAlias",
+    "FighterComposite",
+    "FighterProfileObservation",
+    "FighterSourceId",
+    "FighterStatObservation",
+    "IngestCursor",
+    "OddsSnapshot",
+]
