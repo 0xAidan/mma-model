@@ -61,6 +61,15 @@ labeled modeling choice.
   must not be the default.
 - Price-target classification never consults settlement source status.
 
+## Fact-version modeling (implementation invariant)
+
+Cancelled and no-contest are terminal on a **single** `BoutSettlementFacts`
+version: that version must not also carry `winner_side` / `method`. Public
+pages that void “unless already determined” are about prop markets already
+resolved before an NC, not permission to mix a stale finish method into the
+same NC fact object. Retain earlier methods on prior versions if a source
+stream revises the result.
+
 ## Remaining ambiguity (explicit)
 
 1. **Totals duration for technical decision/draw outside Bodog** — Sky/Paddy define

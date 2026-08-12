@@ -173,6 +173,22 @@ lane is `provisional_pending_approved_source` and hard-fails unless
 when no completed `result_class` / winner / method is present. Pending combined
 with completed result fields or `cancelled=True` raises `SettlementFactsError`.
 
+**Method / result_class invariants (single fact version):**
+- `method="technical_draw"` requires `result_class="draw"` (and no winner).
+- Decisive methods (`decision`, `technical_decision`, finishes) require
+  `result_class="decisive"`.
+- Ordinary scorecard draw is `result_class="draw"` with `method` omitted.
+- Incomplete pairs (method without the matching class, or clocks without a
+  settled `result_class` for totals) never produce a confident grade:
+  structurally impossible combinations raise `SettlementFactsError`; otherwise
+  families return `unresolved`.
+
+**Cancelled / no-contest precedence:** On one fact version, `cancelled=True` or
+`result_class="no_contest"` must not retain `winner_side` or `method`. If a
+source stream previously recorded a method before an NC/cancel revision, keep
+that on an earlier version — do not mix contradictory fields into the terminal
+version (settlement would otherwise risk consuming stale method data).
+
 **Pinned digest bump procedure:** edit packaged `settlement_v1.yaml` → bump
 `contract_version` and affected rule-set `version` → recompute
 `compute_settlement_hash(payload)` → update `PINNED_SETTLEMENT_HASH` and

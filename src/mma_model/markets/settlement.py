@@ -20,6 +20,7 @@ from mma_model.domain.markets import (
     outcomes_for_family,
 )
 from mma_model.markets.rules import (
+    DurationPolicy,
     SettlementRuleSet,
     SideEffect,
     get_rule_set,
@@ -38,6 +39,10 @@ MethodLabel = Literal[
 
 SUPPORTED_SCHEDULED_ROUNDS: frozenset[int] = frozenset({3, 5})
 DEFAULT_ROUND_SECONDS: int = 300
+DECISIVE_METHODS: frozenset[str] = frozenset(
+    {"ko_tko", "submission", "decision", "other_stoppage", "technical_decision"}
+)
+SETTLED_RESULT_CLASSES: frozenset[str] = frozenset({"decisive", "draw"})
 
 
 class SettlementResult(StrEnum):
@@ -66,6 +71,10 @@ class BoutSettlementFacts:
 
     Represent an early technical draw as ``result_class="draw"`` with
     ``method="technical_draw"`` (never as an ordinary full-distance draw).
+
+    Single-version invariants: a completed method requires its matching
+    ``result_class``; ``cancelled`` / ``no_contest`` must not retain winner or
+    method fields (prior versions may, but not this fact object).
     """
 
     scheduled_rounds: int
@@ -269,6 +278,8 @@ def validate_settlement_facts(
         return
 
     if facts.cancelled:
+        # Cancelled is a terminal non-result. Do not retain completed outcome
+        # fields on the same fact version (emit a prior version if needed).
         if facts.result_class in {"decisive", "draw", "no_contest"}:
             raise SettlementFactsError(
                 f"cancelled bout cannot also have result_class={facts.result_class!r}"
@@ -279,27 +290,44 @@ def validate_settlement_facts(
             raise SettlementFactsError("cancelled bout cannot have method")
         return
 
+    if facts.result_class == "no_contest":
+        # Official NC clears winner/method on this fact version. Sources that
+        # keep an earlier method belong in a prior version, not mixed here —
+        # otherwise method-aware families could consume contradictory fields.
+        if facts.winner_side is not None:
+            raise SettlementFactsError("no_contest cannot have winner_side")
+        if facts.method is not None:
+            raise SettlementFactsError(
+                "no_contest cannot have method on the same fact version"
+            )
+        return
+
     if facts.method == "technical_draw":
-        if facts.result_class not in {None, "draw"}:
+        if facts.result_class != "draw":
             raise SettlementFactsError(
                 "technical_draw requires result_class='draw'"
             )
         if facts.winner_side is not None:
             raise SettlementFactsError("technical_draw cannot have winner_side")
+        return
+
+    if facts.method in DECISIVE_METHODS:
+        if facts.result_class != "decisive":
+            raise SettlementFactsError(
+                f"method {facts.method!r} requires result_class='decisive'"
+            )
 
     if facts.result_class == "draw":
         if facts.winner_side is not None:
             raise SettlementFactsError("draw cannot have winner_side")
-        if facts.method in {"ko_tko", "submission", "other_stoppage", "technical_decision"}:
+        if facts.method is not None:
             raise SettlementFactsError(
-                f"draw cannot have finish/decisive method {facts.method!r}"
+                f"ordinary draw cannot have method {facts.method!r}; "
+                "use method='technical_draw' for an early technical draw"
             )
 
     if facts.result_class == "decisive" and facts.method == "technical_draw":
         raise SettlementFactsError("decisive result cannot use technical_draw method")
-
-    if facts.result_class == "no_contest" and facts.winner_side is not None:
-        raise SettlementFactsError("no_contest cannot have winner_side")
 
 
 def _validate_selection(
@@ -327,21 +355,19 @@ def _validate_selection(
 def _duration_policy_for_facts(
     facts: BoutSettlementFacts,
     *,
-    ordinary_decision_duration: str,
-    ordinary_draw_duration: str,
-    technical_decision_duration: str,
-    technical_draw_duration: str,
-) -> str | None:
+    ordinary_decision_duration: DurationPolicy,
+    ordinary_draw_duration: DurationPolicy,
+    technical_decision_duration: DurationPolicy,
+    technical_draw_duration: DurationPolicy,
+) -> DurationPolicy | None:
     """Return the applicable totals duration policy, or None if unknown."""
-    if facts.method == "technical_draw" or (
-        facts.result_class == "draw" and facts.method == "technical_draw"
-    ):
+    if facts.result_class == "draw" and facts.method == "technical_draw":
         return technical_draw_duration
     if facts.method == "technical_decision" and facts.result_class == "decisive":
         return technical_decision_duration
     if facts.method == "decision" and facts.result_class == "decisive":
         return ordinary_decision_duration
-    if facts.result_class == "draw" and facts.method in {None, "decision"}:
+    if facts.result_class == "draw" and facts.method is None:
         return ordinary_draw_duration
     return None
 
@@ -350,10 +376,10 @@ def resolve_total_elapsed_seconds(
     facts: BoutSettlementFacts,
     *,
     round_seconds: int,
-    ordinary_decision_duration: str,
-    ordinary_draw_duration: str,
-    technical_decision_duration: str,
-    technical_draw_duration: str,
+    ordinary_decision_duration: DurationPolicy,
+    ordinary_draw_duration: DurationPolicy,
+    technical_decision_duration: DurationPolicy,
+    technical_draw_duration: DurationPolicy,
 ) -> int | None:
     """Resolve fight duration in seconds, or None when clocks are insufficient."""
     if facts.total_elapsed_seconds is not None:
@@ -395,9 +421,7 @@ def _settle_moneyline(
             "no_contest",
             rule_set,
         )
-    if facts.method == "technical_draw" or (
-        facts.result_class == "draw" and facts.method == "technical_draw"
-    ):
+    if facts.result_class == "draw" and facts.method == "technical_draw":
         return _decision(
             _side_effect_to_result(rules.technical_draw),
             "technical_draw",
@@ -427,27 +451,26 @@ def _distance_realized(
     facts: BoutSettlementFacts,
     rule_set: SettlementRuleSet,
 ) -> Literal["goes_distance", "inside_distance"] | None:
+    """Classify distance only when method and result_class agree."""
     rules = rule_set.goes_distance
     method = facts.method
-    if method == "technical_decision":
+    if method == "technical_decision" and facts.result_class == "decisive":
         return (
             "goes_distance"
             if rules.technical_decision_counts_as_goes_distance
             else "inside_distance"
         )
-    if method == "technical_draw" or (
-        facts.result_class == "draw" and method == "technical_draw"
-    ):
+    if method == "technical_draw" and facts.result_class == "draw":
         return (
             "goes_distance"
             if rules.technical_draw_counts_as_goes_distance
             else "inside_distance"
         )
-    if method == "decision":
+    if method == "decision" and facts.result_class == "decisive":
         return "goes_distance" if rules.decision_counts_as_goes_distance else "inside_distance"
-    if facts.result_class == "draw":
+    if facts.result_class == "draw" and method is None:
         return "goes_distance" if rules.draw_counts_as_goes_distance else "inside_distance"
-    if method in {"ko_tko", "submission", "other_stoppage"}:
+    if method in {"ko_tko", "submission", "other_stoppage"} and facts.result_class == "decisive":
         return "inside_distance"
     return None
 
@@ -501,6 +524,18 @@ def _settle_totals(
         return _decision(
             _side_effect_to_result(rules.no_contest),
             "no_contest",
+            rule_set,
+        )
+    if facts.result_class not in SETTLED_RESULT_CLASSES:
+        return _decision(
+            SettlementResult.UNRESOLVED,
+            "incomplete result_class for totals",
+            rule_set,
+        )
+    if facts.result_class == "decisive" and facts.method is None:
+        return _decision(
+            SettlementResult.UNRESOLVED,
+            "incomplete method for totals",
             rule_set,
         )
     line = selection.line_point
@@ -594,9 +629,7 @@ def _settle_method_family(
             "no_contest",
             rule_set,
         )
-    if facts.method == "technical_draw" or (
-        facts.result_class == "draw" and facts.method == "technical_draw"
-    ):
+    if facts.result_class == "draw" and facts.method == "technical_draw":
         return _decision(
             _side_effect_to_result(rules.technical_draw),
             "technical_draw",
@@ -654,9 +687,7 @@ def _settle_exact_round(
             "no_contest",
             rule_set,
         )
-    if facts.method == "technical_draw" or (
-        facts.result_class == "draw" and facts.method == "technical_draw"
-    ):
+    if facts.result_class == "draw" and facts.method == "technical_draw":
         return _decision(
             _side_effect_to_result(rules.technical_draw),
             "technical_draw",
@@ -664,6 +695,12 @@ def _settle_exact_round(
         )
     if facts.result_class == "draw":
         return _decision(_side_effect_to_result(rules.draw), "draw", rule_set)
+    if facts.result_class != "decisive":
+        return _decision(
+            SettlementResult.UNRESOLVED,
+            "incomplete result_class for exact_round",
+            rule_set,
+        )
     if facts.method == "technical_decision":
         return _decision(
             _side_effect_to_result(rules.technical_decision),
