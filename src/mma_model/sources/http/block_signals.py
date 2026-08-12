@@ -36,7 +36,13 @@ def detect_block_signal(
     lowered = (body_text or "").lower()
     if "captcha" in lowered:
         return "captcha_interstitial"
-    if "cf-browser-verification" in lowered or "cf-challenge" in lowered:
+    if (
+        "cf-browser-verification" in lowered
+        or "cf-challenge" in lowered
+        or "checking your browser" in lowered
+        or ("cloudflare" in lowered and "challenge" in lowered)
+        or ("just a moment" in lowered and "cloudflare" in lowered)
+    ):
         return "cloudflare_challenge"
     if "access denied" in lowered:
         return "access_denied"

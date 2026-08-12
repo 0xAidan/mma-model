@@ -38,6 +38,7 @@ def test_detect_robots_disallow() -> None:
         (429, "slow down", "http_429"),
         (503, "unavailable", "http_503"),
         (200, "cf-browser-verification challenge", "cloudflare_challenge"),
+        (200, "Checking your browser…", "cloudflare_challenge"),
         (200, "Access Denied by security policy", "access_denied"),
     ],
 )

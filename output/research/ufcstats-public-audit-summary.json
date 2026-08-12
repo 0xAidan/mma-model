@@ -1,0 +1,31 @@
+{
+  "block_reason": "cloudflare_challenge",
+  "blocked": true,
+  "bouts": {
+    "blocked": 0,
+    "missing": 0,
+    "present": 0,
+    "unresolved": 440
+  },
+  "bouts_total": 440,
+  "events": {
+    "blocked": 0,
+    "missing": 0,
+    "present": 0,
+    "unresolved": 89
+  },
+  "events_total": 89,
+  "live_probe": {
+    "probe_url": "http://www.ufcstats.com/statistics/events/completed?page=all",
+    "reason": "cloudflare_challenge",
+    "result": "BLOCKED",
+    "robots_txt": "404_not_found"
+  },
+  "note": "Manifest audit classifies all 89/440 as unresolved (ufcstats_*_id unmapped). Live probe blocked by Cloudflare browser check; no bypass attempted.",
+  "source": "ufcstats_public",
+  "status": "BLOCKED",
+  "years": {
+    "start": 2017,
+    "stop": 2025
+  }
+}
