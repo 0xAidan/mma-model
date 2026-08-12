@@ -1,5 +1,5 @@
 {
-  "acceptance_evidence_mode": "phase0_credential_blocker_with_executable_measurement_path",
+  "acceptance_evidence_mode": "measured_or_blocked_probe",
   "audit_universes": {
     "difficult_identities": {
       "sample": [
@@ -394,8 +394,8 @@
     "recurring_monthly_usd": "69.99",
     "status": "pass"
   },
-  "capture_mode": "fixtures",
-  "captured_at": "2026-08-11T21:00:00+00:00",
+  "capture_mode": "live",
+  "captured_at": "2026-08-12T01:00:00+00:00",
   "decision": {
     "api_sports_probe_keep": false,
     "gates": {
@@ -413,7 +413,7 @@
         "budget_status": "pass",
         "event_coverage_min": 0.98,
         "event_coverage_rate": null,
-        "metrics_status": "unknown",
+        "metrics_status": "blocked",
         "outcome_agreement_min": 0.99,
         "outcome_agreement_rate": null,
         "pit_fitness_status": "unknown",
@@ -470,14 +470,14 @@
         "status": "probe_cancel_or_blocked"
       }
     ],
-    "rationale": "No provider cleared all adoption gates. BALLDONTLIE (technical=False, rights=True, budget=True, metrics_status=unknown); SportsDataIO quote_status=quote_pending; Combat Registry quote_status=quote_pending. Missing quote/credentials remain hard blockers. Prohibited scraping is rejected."
+    "rationale": "No provider cleared all adoption gates. BALLDONTLIE (technical=False, rights=True, budget=True, metrics_status=blocked); SportsDataIO quote_status=quote_pending; Combat Registry quote_status=quote_pending. Missing quote/credentials remain hard blockers. Prohibited scraping is rejected."
   },
   "evidence_timestamps": {
-    "api_sports_terms_checked_at": "2026-08-11T21:00:00+00:00",
-    "balldontlie_terms_checked_at": "2026-08-11T21:00:00+00:00",
-    "combat_registry_docs_checked_at": "2026-08-11T21:00:00+00:00",
-    "scorecard_captured_at": "2026-08-11T21:00:00+00:00",
-    "sportsdataio_docs_checked_at": "2026-08-11T21:00:00+00:00"
+    "api_sports_terms_checked_at": "2026-08-12T01:00:00+00:00",
+    "balldontlie_terms_checked_at": "2026-08-12T01:00:00+00:00",
+    "combat_registry_docs_checked_at": "2026-08-12T01:00:00+00:00",
+    "scorecard_captured_at": "2026-08-12T01:00:00+00:00",
+    "sportsdataio_docs_checked_at": "2026-08-12T01:00:00+00:00"
   },
   "handoff": {
     "contract": "Implement exactly one selected primary adapter only if decision.primary is set; otherwise keep production stats ingest blocked and pursue ranked lawful fallbacks. Do not enable UFCStats/Tapology/Sherdog scrapers.",
@@ -538,7 +538,7 @@
       },
       "metrics_status": "unknown",
       "rights": {
-        "checked_at": "2026-08-11T21:00:00+00:00",
+        "checked_at": "2026-08-12T01:00:00+00:00",
         "citation": "https://api-sports.io/terms",
         "modeling_allowed": null,
         "notes": "Terms place responsibility on the user to obtain league/rights-holder authorization for commercial/betting uses; no explicit grant equivalent to BALLDONTLIE \u00a76 storage+modeling permission. Treat rights as unknown until clarified in writing.",
@@ -549,7 +549,7 @@
       "role": "one_month_coverage_probe"
     },
     "balldontlie": {
-      "access_status": "not_configured",
+      "access_status": "entitlement_blocked",
       "budget": {
         "citation": "https://mma.balldontlie.io/",
         "listed_monthly": {
@@ -562,31 +562,31 @@
         "https://mma.balldontlie.io/",
         "https://balldontlie.io/terms.html"
       ],
-      "error": "BALLDONTLIE_API_KEY not set",
+      "error": "fights_endpoint_entitlement_blocked",
       "metrics": {
         "bout_coverage": {
           "denominator": 149,
           "numerator": null,
           "rate": null,
-          "reason": "not_configured",
+          "reason": "entitlement_blocked",
           "status": "unknown"
         },
         "difficult_identity_coverage": {
           "denominator_policy": "hit_miss_unknown_partition_of_probed_sample",
           "expected_size": 50,
-          "hit": null,
-          "hit_rate": null,
-          "miss": null,
-          "probed": null,
-          "reason": "not_configured",
-          "status": "unknown",
-          "unknown": null
+          "hit": 50,
+          "hit_rate": 1.0,
+          "miss": 0,
+          "probed": 50,
+          "reason": null,
+          "status": "measured",
+          "unknown": 0
         },
         "event_coverage": {
           "denominator": 30,
           "numerator": null,
           "rate": null,
-          "reason": "not_configured",
+          "reason": "entitlement_blocked",
           "status": "unknown"
         },
         "field_null_rates": {
@@ -600,7 +600,7 @@
           "excluded_unknown_count": null,
           "numerator": null,
           "rate": null,
-          "reason": "not_configured",
+          "reason": "entitlement_blocked",
           "status": "unknown"
         },
         "pit_fitness": {
@@ -620,7 +620,7 @@
           "denominator": 50,
           "numerator": null,
           "rate": null,
-          "reason": "not_configured",
+          "reason": "entitlement_blocked",
           "status": "unknown"
         },
         "required_features": {
@@ -633,7 +633,7 @@
           "denominator": 149,
           "numerator": null,
           "rate": null,
-          "reason": "not_configured",
+          "reason": "entitlement_blocked",
           "status": "unknown"
         },
         "year_diagnostics": {
@@ -642,9 +642,18 @@
           "years_with_any_provider_dwcs_named_events": null
         }
       },
-      "metrics_status": "unknown",
+      "metrics_status": "blocked",
+      "probe_notes": {
+        "dwcs_event_name_filter": "strict_dana_white_contender_or_dwcs",
+        "event_discovery": "manifest_occurrence_dates_with_cursor_pagination",
+        "false_positive_rejected_example": "Full Contact Contender",
+        "rate_limit_limit_header": "5",
+        "reason": "fights_endpoint_entitlement_blocked"
+      },
+      "provider_dwcs_named_event_count": 30,
+      "rate_limit_limit_header": null,
       "rights": {
-        "checked_at": "2026-08-11T21:00:00+00:00",
+        "checked_at": "2026-08-12T01:00:00+00:00",
         "citation": "https://balldontlie.io/terms.html",
         "modeling_allowed": true,
         "notes": "Terms \u00a76 expressly permit store/archive/modify/analyze and AI/ML training from lawfully obtained Data. Coverage remains best-effort; docs state only UFC is comprehensive.",
@@ -726,7 +735,7 @@
         "vendor": "combat_registry"
       },
       "rights": {
-        "checked_at": "2026-08-11T21:00:00+00:00",
+        "checked_at": "2026-08-12T01:00:00+00:00",
         "citation": "https://www.abcboxing.com/mma-record-keeper-criteria/",
         "modeling_allowed": null,
         "notes": "ABC criteria describe registry obligations; commercial API rights/price unanswered",
@@ -816,7 +825,7 @@
         "vendor": "sportsdataio"
       },
       "rights": {
-        "checked_at": "2026-08-11T21:00:00+00:00",
+        "checked_at": "2026-08-12T01:00:00+00:00",
         "citation": null,
         "modeling_allowed": null,
         "notes": "Requires written quote; public marketing SLA is not a contract",

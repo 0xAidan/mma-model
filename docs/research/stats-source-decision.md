@@ -10,22 +10,25 @@ This document records method, citations, gates, and the handoff contract. It doe
 
 ## Phase 0 acceptance posture (important)
 
-Phase 0 **permits** an explicit hard blocker when credentials or written vendor
-quotes are missing. That is a documented missing-credential risk, not a silent
-pass.
+Phase 0 **permits** an explicit hard blocker when credentials, entitlements, or
+written vendor quotes are missing. That is a documented risk, not a silent pass.
 
-For this PR, acceptance evidence is:
+For the credentialed refresh capture, acceptance evidence is:
 
-1. A reproducible committed scorecard in `capture_mode=fixtures` with
-   `live_measurements_claimed=false`, null live numerators, and
-   `decision.path=hard_blocker` while keys remain absent.
-2. A corrected, fixture-testable **executable measurement path** (event/bout
-   coverage, outcome agreement, difficult-identity probe, PIT/features,
-   API-Sports non-overlap, fallback adoption gates).
+1. A reproducible committed scorecard in `capture_mode=live` with
+   `live_measurements_claimed=false` (technical coverage not measured),
+   `providers.balldontlie.access_status=entitlement_blocked`, null coverage
+   numerators, and `decision.path=hard_blocker` / `primary=null`.
+2. Sanitized aggregate probe notes only (no raw licensed payloads): DWCS-named
+   event discovery count, difficult-identity hit/miss/unknown partition, rate-limit
+   tier header, and explicit fights-endpoint entitlement classification.
+3. Audit-code fixes required for a valid executable measurement path (cursor
+   pagination / date-based event discovery, strict DWCS name matcher, 429 retry,
+   entitlement-after-auth classification) covered by unit tests.
 
-It is **not** acceptance of measured BALLDONTLIE/API-Sports provider coverage
-and **not invented** live coverage. Do not overclaim the ticket’s first metric
-criterion as “coverage measured in production” when credentials were absent.
+It is **not** acceptance of measured BALLDONTLIE bout/outcome coverage and **not**
+adoption. Coverage was **not invented**. A present API key or successful
+`/events`/`/fighters` call alone is not adoption evidence.
 
 ## Goal
 
@@ -123,23 +126,24 @@ blockers** until answered in writing
 
 ## Live credential outcomes (this PR capture)
 
-Committed scorecard: **`fixtures`**,
-`captured_at=2026-08-11T21:00:00+00:00`.
+Committed scorecard: **`live`**,
+`captured_at=2026-08-12T01:00:00+00:00`,
+`live_measurements_claimed=false`.
 
 | Provider | Credential / access | Outcome |
 |----------|---------------------|---------|
-| BALLDONTLIE | `BALLDONTLIE_API_KEY` absent (env + root `.env`) | `not_configured`; metrics **unknown** (null numerators, denom events=30); not zero |
+| BALLDONTLIE | Key present; observed `x-ratelimit-limit=5` | `/events` + `/fighters` ok; **`/fights` → `entitlement_blocked`** (tier lacks Fights; Fight Statistics also GOAT-only). Coverage numerators remain **null/unknown** (not zero). Strict date-based discovery found **30/30** DWCS-named events on manifest dates. Difficult-identity sample **50 hit / 0 miss / 0 unknown**. |
 | API-Sports | `API_SPORTS_KEY` absent | `not_configured`; non-overlap/accuracy **unknown** |
 | SportsDataIO / Combat Registry | No written quote on file | `quote_pending` blockers |
 
-Operator live mode (not claimed by the committed artifact):
+Re-run command:
 
 ```bash
 python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
   --capture-mode live \
-  --capture-time 2026-08-11T21:00:00+00:00 \
+  --capture-time 2026-08-12T01:00:00+00:00 \
   --env-file /path/to/.env \
   --redact
 ```
@@ -154,12 +158,19 @@ and threshold decisions only. They are **not** live provider evidence.
 
 Reasons:
 
-1. BALLDONTLIE technical gates cannot pass without measured metrics; credentials
-   absent ⇒ unknown (not zero).
+1. BALLDONTLIE technical gates cannot pass: `/fights` is **entitlement_blocked** on
+   the configured key (Free/trial-class RPM observed at 5 req/min). Event/bout
+   coverage and outcome agreement therefore remain **blocked/unknown**, not
+   measured pass. Required features + PIT stay unknown (fight_stats/PIT evidence
+   not available without entitled fight access).
 2. SportsDataIO / Combat Registry lack complete written quotes with measured
    thresholds.
 3. API-Sports probe cannot be kept without measured ≥10% non-overlap + accuracy.
 4. Prohibited scraping was not selected.
+
+Identity probe note (sanitized): difficult-identity sample completed at 50/50
+hits under free-tier `/fighters`, but identity success does **not** clear
+event/bout/outcome/feature/PIT gates.
 
 ### Rights / budget conclusion
 
@@ -182,8 +193,9 @@ Reasons:
 python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
-  --capture-mode fixtures \
-  --capture-time 2026-08-11T21:00:00+00:00 \
+  --capture-mode live \
+  --capture-time 2026-08-12T01:00:00+00:00 \
+  --env-file /path/to/.env \
   --redact
 
 pytest tests/spikes/test_stats_source_scorecard.py -q
