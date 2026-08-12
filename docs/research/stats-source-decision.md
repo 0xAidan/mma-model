@@ -14,19 +14,19 @@ Phase 0 **permits** an explicit hard blocker when any required gate fails or
 remains unknown (credentials, entitlements, required features, PIT fitness, or
 written vendor quotes). That is a documented risk, not a silent pass.
 
-For this post-entitlement-upgrade revalidation capture, acceptance evidence is:
+For this SportsDataIO credentialed refresh, acceptance evidence is:
 
 1. A reproducible committed scorecard in `capture_mode=live` with
-   `live_measurements_claimed=true`, `providers.balldontlie.access_status=ok`,
-   measured event/bout/outcome aggregates, **universe-wide** required-feature
-   scoring (fight fields vs fight_stats fields reported separately), and
-   `decision.path=hard_blocker` / `primary=null`.
+   `live_measurements_claimed=true`, preserved BALLDONTLIE measured history,
+   SportsDataIO classified separately for auth / entitlement / quota / schema /
+   rights / quote, and `decision.path=hard_blocker` / `primary=null`.
 2. Sanitized aggregate metrics only (no raw licensed payloads).
-3. A small fight_stats sample must never produce a global required-features pass.
+3. A small accessible-season sample must never produce a global required-features
+   pass. Entitlement-blocked seasons are **not** scored as coverage absences.
 4. Difficult-identity hits alone do **not** qualify adoption.
 
-It is **not** adoption. Coverage was measured, not invented. HTTP success and
-identity hits do not auto-pass PIT or required features.
+It is **not** adoption. Coverage was measured or honestly blocked, not invented.
+HTTP success and identity hits do not auto-pass PIT or required features.
 
 ## Goal
 
@@ -43,8 +43,9 @@ HTML, UFCStats HTML, or Bet365 scraping.
 | 2023–2025 bout slice | Audit universe: **30 unique events**, 149 bouts |
 | Deterministic 50 difficult-identity sample | Identity stress set (seeded ranking) |
 | Public provider docs/terms | Rights, list price, documented fields only |
-| Optional `BALLDONTLIE_API_KEY` / `API_SPORTS_KEY` | Live measured probes only when present |
+| Optional `BALLDONTLIE_API_KEY` / `API_SPORTS_KEY` / `SPORTSDATAIO_API_KEY` | Live measured probes only when present |
 | Optional vendor-notes JSON | SportsDataIO / Combat Registry written quote gates |
+| Prior committed scorecard | Preserve sanitized BALLDONTLIE measured history when that key is absent |
 
 DWCS-002 caveats carried forward: Phase 1 must ingest the frozen manifests first;
 null UFCStats IDs and publication timestamps remain open gaps for later tickets;
@@ -60,10 +61,6 @@ Selection is encoded in `scripts/spikes/audit_stats_sources.py`:
 3. Tie-break with `sha256("dwcs-003-difficult-identities-v1\|{entrant_key}")`.
 4. Take the top 50.
 
-The BALLDONTLIE live path probes **this 50-sample** (hit / miss / unknown), with
-bounded request budgets. It does not silently substitute a smaller generic
-entrant slice as the identity metric.
-
 ## Measurement definitions (executable measurement path)
 
 | Metric | Definition |
@@ -72,8 +69,8 @@ entrant slice as the identity metric.
 | Bout coverage | Unique matched bouts / unique frozen bouts. |
 | Outcome agreement | Comparable mapped pairs only: provider winner/result vs manifest **event-night** result. Unmapped/ambiguous excluded (`denominator_policy=comparable_mapped_pairs_only`). |
 | Difficult identities | Partition of probed sample into hit / miss / unknown. |
-| Required features | Fight-level fields and fight_stats fields scored **separately**. Denominator for every required field is the matched-bout universe (149). Pass requires full-universe stat probing and each field rate ≥ **0.98**. Partial samples ⇒ `unknown` (`stat_probe_incomplete`), never pass. |
-| PIT / nulls / revisions / latency / request cost | Measured when evidenced; otherwise `unknown` with reason. HTTP success alone does **not** auto-fail or auto-pass. |
+| Required features | Fight-level fields and fight_stats fields scored **separately**. Denominator for every required field is the matched-bout universe (149). Pass requires full-universe stat probing and each field rate ≥ **0.98**. Partial samples ⇒ `unknown` (`stat_probe_incomplete`), never pass. SportsDataIO also records diagnostic result/elapsed-time field presence on accessible seasons only. |
+| PIT / nulls / revisions / latency / request cost | PIT **pass** requires every explicit dimension: pre-fight reconstruction, revision/correction support, **and** publication/source-update timestamps. Missing/unknown timestamp proof can never pass. HTTP success alone does **not** auto-fail or auto-pass. |
 | API-Sports non-overlap | Fingerprinted provider pre-DWCS history bouts not present in the DWCS universe / total fingerprintable history. |
 | Year diagnostics | Informational only (`years_with_any_provider_dwcs_named_events`); never used as event coverage. |
 
@@ -87,7 +84,7 @@ Money amounts are quantized to integer cents with decimal-safe USD strings
    required features + PIT fitness, written storage/modeling rights, budget ≤~$100.
 3. Else adopt SportsDataIO or Combat Registry only when a **complete written quote**
    supplies rights/budget **and** the same technical thresholds are measured.
-   Missing quote/credentials ⇒ hard blocker (no silent selection).
+   Missing quote/credentials/entitlement ⇒ hard blocker (no silent selection).
 4. Keep API-Sports for one paid month only if non-overlap ≥10% **and** accuracy
    pass; else cancel.
 5. Never silently fall back to prohibited scraping.
@@ -115,30 +112,42 @@ Checked at scorecard `evidence_timestamps` (committed capture uses fixed
 
 ### SportsDataIO / Combat Registry
 
-Public field/workflow/criteria citations only. Monthly price, retention, revision
-semantics, SLA contract language, and commercial reuse rights remain **quote
-blockers** until answered in writing
+Official endpoints used for credentialed probing:
+[API docs](https://sportsdata.io/developers/api-documentation/mma)
+(`Schedule/{league}/{season}`, `Event/{eventid}`, `FightFinal/{fightid}`,
+`FightersBasic`, `Leagues`). Auth uses the least-exposing supported mechanism:
+`Ocp-Apim-Subscription-Key` **header only** (never query/URL).
+
+Access classification rule: entitlement may be claimed only after an earlier
+request in the same probe authenticated successfully. A first-call 401/403 with
+generic “access” text is `auth_failed`, not entitlement.
+
+Public field/workflow citations only for rights/price. Monthly price, retention,
+revision semantics, SLA contract language, and commercial reuse rights remain
+**quote blockers** until answered in writing
 ([workflow](https://sportsdata.io/developers/workflow-guide/mma),
 [dictionary](https://sportsdata.io/developers/data-dictionary/mma),
 [ABC criteria](https://www.abcboxing.com/mma-record-keeper-criteria/),
-[portal](https://app.combatreg.com/)).
+[portal](https://app.combatreg.com/)). Key access alone does **not** pass rights
+or budget.
 
 ## Live credential outcomes (this PR capture)
 
 Committed scorecard: **`live`**,
-`captured_at=2026-08-12T02:20:00+00:00`,
+`captured_at=2026-08-12T14:30:00+00:00`,
 `live_measurements_claimed=true`,
 `acceptance_evidence_mode=measured_or_blocked_probe`.
 
-Minimal entitlement probe (sanitized): `/fights` → `access_status=ok`,
-observed `x-ratelimit-limit=600`. Full matched-universe `/fight_stats` probe:
-**149/149** bouts probed (checkpointed sanitized field-presence only).
+BALLDONTLIE measured history is **preserved** from the prior entitlement-upgrade
+capture (key may be absent locally). SportsDataIO was freshly probed with a
+configured key.
 
 | Provider | Credential / access | Outcome |
 |----------|---------------------|---------|
-| BALLDONTLIE | Key present; fights+stats entitled (600 RPM) | event **30/30 (1.0)**; bout **149/149 (1.0)**; outcome **149/149 (1.0)**; fight fields **pass** (149/149 each); stat fields: `significant_strikes_landed` **149/149**, `takedowns_landed` **149/149**, `control_time_seconds` **98/149 (≈0.658)** → required_features **fail**; PIT **unknown**; identity **50/50 hit** |
+| BALLDONTLIE | Preserved measured history (fights+stats entitled at capture) | event **30/30 (1.0)**; bout **149/149 (1.0)**; outcome **149/149 (1.0)**; fight fields **pass** (149/149 each); stat fields: `significant_strikes_landed` **149/149**, `takedowns_landed` **149/149**, `control_time_seconds` **98/149 (≈0.658)** → required_features **fail**; PIT **unknown**; identity **50/50 hit** |
+| SportsDataIO | Key present; auth **ok**; seasons 2023–2024 **entitlement_blocked**; 2025 **ok** | Full-universe event/bout/outcome numerators **null** (not zero); metrics_status **blocked**; required_features **unknown**; PIT **unknown**; rights **unknown**; quote **quote_pending**. Accessible-season diagnostic only: 49 matched bouts vs denom 149; identity **50/50 hit**; result/elapsed fields present on accessible sample — **not** a global pass |
 | API-Sports | `API_SPORTS_KEY` absent | `not_configured`; non-overlap/accuracy **unknown** |
-| SportsDataIO / Combat Registry | No written quote on file | `quote_pending` blockers |
+| Combat Registry | No written quote on file | `quote_pending` blockers |
 
 Re-run command:
 
@@ -147,11 +156,11 @@ python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
   --capture-mode live \
-  --capture-time 2026-08-12T02:20:00+00:00 \
+  --capture-time 2026-08-12T14:30:00+00:00 \
   --env-file /path/to/.env \
   --redact \
-  --max-live-requests-balldontlie 300 \
-  --stat-checkpoint output/research/.balldontlie-stat-probe-checkpoint.json
+  --prior-scorecard output/research/stats-source-scorecard.json \
+  --max-live-requests-sportsdataio 120
 ```
 
 Synthetic unit fixtures under
@@ -162,7 +171,7 @@ and threshold decisions only. They are **not** live provider evidence.
 
 **Hard production blocker** — `decision.path = hard_blocker`, `primary = null`.
 
-Technical gate snapshot (BALLDONTLIE):
+Technical gate snapshot (BALLDONTLIE, preserved):
 
 | Gate | Result |
 |------|--------|
@@ -170,44 +179,55 @@ Technical gate snapshot (BALLDONTLIE):
 | bout_coverage | 149/149 = 1.0 (≥0.98) |
 | outcome_agreement | 149/149 = 1.0 (≥0.99) |
 | required_features | **fail** (`control_time_seconds` 98/149 < 0.98) |
-| pit_fitness | **unknown** (reconstruction + revision unproven) |
+| pit_fitness | **unknown** (reconstruction + revision + publication timestamps unproven) |
 | rights | pass |
 | budget | pass (6999¢ ≤ 10000¢) |
+| technical_pass / adopt | **false** |
+
+SportsDataIO gate snapshot:
+
+| Classification | Status |
+|----------------|--------|
+| auth | ok |
+| subscription entitlement | historical_seasons_blocked (2023–2024) |
+| quota | ok |
+| schema | ok_on_accessible_endpoints |
+| missing data | not_assessed_for_blocked_seasons |
+| rights | unknown (no written storage/modeling/retention terms) |
+| quote / budget | quote_pending / unknown |
 | technical_pass / adopt | **false** |
 
 Reasons:
 
 1. BALLDONTLIE clears coverage and outcome agreement, but required features fail
    under the universe-wide fight_stats contract (`control_time_seconds` coverage
-   below 0.98). PIT fitness also remains unknown. Decision tree keeps
+   below 0.98). PIT fitness also remains unknown (reconstruction, revision, and
+   publication/source-update timestamps all unproven). Decision tree keeps
    `primary=null`.
-2. SportsDataIO / Combat Registry lack complete written quotes with measured
-   thresholds.
+2. SportsDataIO auth was established independently (Leagues ok), then audit
+   seasons 2023–2024 returned post-auth feed denials classified as
+   entitlement-blocked. Full-universe technical gates remain unknown/blocked
+   (not invented zeros). Written rights and monthly quote remain unanswered
+   blockers.
 3. API-Sports probe cannot be kept without measured ≥10% non-overlap + accuracy.
 4. Prohibited scraping was not selected.
-
-Identity probe note (sanitized): difficult-identity sample completed at 50/50
-hits, but identity success does **not** clear required-features or PIT gates.
 
 ### Rights / budget conclusion
 
 - BALLDONTLIE written rights: **pass** (public terms §6); list price **3999¢**.
-- Hypothetical stack if later adopted: Odds API 3000¢ + GOAT 3999¢ = **6999¢
-  ($69.99) ≤ 10000¢ cap**.
-- API-Sports storage/modeling rights: **unknown**.
-- SportsDataIO / Combat Registry commercial rights+price: **unanswered blockers**.
+- Hypothetical BALLDONTLIE stack if later adopted: Odds API 3000¢ + GOAT 3999¢ =
+  **6999¢ ($69.99) ≤ 10000¢ cap**.
+- SportsDataIO rights+price: **unknown / quote_pending** (do not infer from key
+  access or marketing pages).
+- Combat Registry commercial rights+price: **unanswered blockers**.
 
 ### Ranked lawful fallback paths
 
-1. SportsDataIO — complete quote + same technical thresholds.
+1. SportsDataIO — entitle full 2023–2025 history + complete written quote/rights/
+   budget + same technical thresholds.
 2. Combat Registry — complete quote + same technical thresholds.
 3. API-Sports — one-month probe only after credentials exist and non-overlap≥10%
    + accuracy pass; otherwise cancel.
-
-Next evidence needed for BALLDONTLIE adoption (not claimed here): raise
-`control_time_seconds` universe support to ≥98% (or document an explicit
-contract change with new thresholds + regressions), plus explicit pass/fail
-measurement of pre-fight reconstruction and revision support.
 
 ## Commands
 
@@ -216,10 +236,11 @@ python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
   --capture-mode live \
-  --capture-time 2026-08-12T02:20:00+00:00 \
+  --capture-time 2026-08-12T14:30:00+00:00 \
   --env-file /path/to/.env \
   --redact \
-  --max-live-requests-balldontlie 300
+  --prior-scorecard output/research/stats-source-scorecard.json \
+  --max-live-requests-sportsdataio 120
 
 pytest tests/spikes/test_stats_source_scorecard.py -q
 ruff check scripts/spikes/audit_stats_sources.py tests/spikes/test_stats_source_scorecard.py
