@@ -8,10 +8,11 @@ from typing import Any, Mapping
 from mma_model import __version__ as CLIENT_VERSION
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.http.polite_client import PoliteHttpClient
+from mma_model.sources.http.robots import RobotsAccessDecision, evaluate_robots_access
+from mma_model.sources.http_politeness import load_http_politeness
 from mma_model.sources.ufcstats_public.parser import SOURCE_UFCSTATS_PUBLIC
 
 PARSER_VERSION = "ufcstats_public_parser@1"
-ROBOTS_UNAVAILABLE_POLICY = "fail_closed_unavailable"
 
 
 def evaluate_robots_policy(
@@ -19,47 +20,25 @@ def evaluate_robots_policy(
     robots_status_code: int | None,
     robots_body_text: str,
     target_path: str,
+    user_agent: str | None = None,
+    network_error: str | None = None,
+    host: str = "www.ufcstats.com",
 ) -> dict[str, Any]:
-    """Fail-closed robots policy.
+    """RFC 9309 robots policy for the configured identifiable UA.
 
-    Missing/unavailable robots (404/5xx/empty) is NOT treated as permission.
-    Explicit Disallow matching target_path is a hard stop.
+    Redirect policy for fetches remains same-host/bounded in PoliteHttpClient.
     """
-    path = target_path or "/"
-    if robots_status_code != 200:
-        return {
-            "robots_status_code": robots_status_code,
-            "policy_decision": ROBOTS_UNAVAILABLE_POLICY,
-            "allowed": False,
-            "detail": "robots unavailable; fail closed (do not infer permission)",
-            "target_path": path,
-        }
-    disallow_paths: list[str] = []
-    for line in robots_body_text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        lower = stripped.lower()
-        if lower.startswith("disallow:"):
-            value = stripped.split(":", 1)[1].strip()
-            if value:
-                disallow_paths.append(value)
-    for rule in disallow_paths:
-        if rule == "/" or path.startswith(rule):
-            return {
-                "robots_status_code": robots_status_code,
-                "policy_decision": "disallow_match",
-                "allowed": False,
-                "detail": f"robots Disallow matched {rule!r}",
-                "target_path": path,
-            }
-    return {
-        "robots_status_code": robots_status_code,
-        "policy_decision": "allow_no_disallow_match",
-        "allowed": True,
-        "detail": "robots fetched; no disallow match for target path",
-        "target_path": path,
-    }
+    ua = user_agent or load_http_politeness().user_agent
+    path = target_path if target_path.startswith("/") else f"/{target_path}"
+    target_url = f"http://{host}{path}"
+    decision: RobotsAccessDecision = evaluate_robots_access(
+        status_code=robots_status_code,
+        body_text=robots_body_text,
+        user_agent=ua,
+        target_url=target_url,
+        network_error=network_error,
+    )
+    return decision.as_dict()
 
 
 def build_sanitized_probe_evidence(
@@ -112,23 +91,29 @@ def run_bounded_live_probe(
     """One bounded probe: robots policy then one allowlisted page. Never bypasses blocks."""
     observed = observed_at or datetime.now(timezone.utc)
     robots_url = f"http://www.{host}/robots.txt"
+    ua = client.politeness.user_agent
     try:
         robots_status, robots_body, robots_hash = client.fetch_robots_txt()
-    except Exception as exc:  # noqa: BLE001 - fail closed
+        network_error = None
+    except Exception as exc:  # noqa: BLE001 - fail closed per RFC 9309
+        robots_decision = evaluate_robots_policy(
+            robots_status_code=None,
+            robots_body_text="",
+            target_path=path_category,
+            user_agent=ua,
+            network_error=type(exc).__name__,
+            host=f"www.{host}",
+        )
         robots_decision = {
+            **robots_decision,
             "robots_url": robots_url,
-            "robots_status_code": None,
-            "policy_decision": ROBOTS_UNAVAILABLE_POLICY,
-            "allowed": False,
-            "detail": f"robots fetch failed: {type(exc).__name__}",
             "response_content_hash": None,
-            "target_path": path_category,
         }
         return build_sanitized_probe_evidence(
             host=host,
             path_category=path_category,
             http_status=None,
-            block_reason="robots_unavailable",
+            block_reason=str(robots_decision["policy_decision"]),
             response_content_hash=None,
             observed_at=observed,
             robots=robots_decision,
@@ -138,6 +123,9 @@ def run_bounded_live_probe(
         robots_status_code=robots_status,
         robots_body_text=robots_body,
         target_path=path_category,
+        user_agent=ua,
+        network_error=network_error,
+        host=f"www.{host}",
     )
     robots_decision = {
         **robots_decision,

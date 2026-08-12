@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 from mma_model.sources.contracts import SourceObservationRecord
 from mma_model.sources.http.block_signals import SourceBlockedError
@@ -117,14 +117,21 @@ class UfcstatsPublicAdapter:
         *,
         event_external_ids: list[str],
         observed_at: datetime,
+        event_effective_at_by_id: Mapping[str, datetime] | None = None,
     ) -> Iterator[SourceObservationRecord]:
         if observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware UTC")
+        manifest_effective = event_effective_at_by_id or {}
         for event_id in event_external_ids:
             event_html, _event_hash = self._load_event_html(event_id)
             if self.raw_store is not None:
                 self.raw_store.put(event_html.encode("utf-8"))
             event = parse_event_details(event_html)
+            effective_at = self._resolve_effective_at(
+                event_id=event_id,
+                event=event,
+                manifest_effective=manifest_effective,
+            )
             for fight in event.get("fights", []):
                 fight_id = str(fight["external_fight_id"])
                 fight_html, fight_hash = self._load_fight_html(fight_id)
@@ -136,9 +143,6 @@ class UfcstatsPublicAdapter:
                     raise ParserSchemaDriftError(
                         f"fight id mismatch listing={fight_id!r} details={parsed_id!r}"
                     )
-                effective_at = observed_at
-                if effective_at.year >= 2020:
-                    effective_at = datetime(2019, 1, 1, tzinfo=timezone.utc)
                 yield from map_fight_to_observations(
                     parsed=parsed,
                     observed_at=observed_at,
@@ -148,6 +152,37 @@ class UfcstatsPublicAdapter:
                     proxy=self.proxy,
                     payload_hash=fight_hash,
                 )
+
+    @staticmethod
+    def _resolve_effective_at(
+        *,
+        event_id: str,
+        event: dict[str, Any],
+        manifest_effective: Mapping[str, datetime],
+    ) -> datetime:
+        """Derive effective_at from manifest override or parsed event date.
+
+        Never invents a timestamp. Missing/unparseable dates are schema drift.
+        """
+        override = manifest_effective.get(event_id)
+        if override is not None:
+            if override.tzinfo is None:
+                raise ValueError(
+                    f"event_effective_at_by_id[{event_id!r}] must be timezone-aware UTC"
+                )
+            return override.astimezone(timezone.utc)
+        event_date = event.get("event_date")
+        if isinstance(event_date, datetime):
+            if event_date.tzinfo is None:
+                raise ParserSchemaDriftError(
+                    f"event_date for {event_id!r} missing timezone"
+                )
+            return event_date.astimezone(timezone.utc)
+        date_text = str(event.get("date_text") or "").strip()
+        raise ParserSchemaDriftError(
+            f"missing event_date/effective_at for event {event_id!r} "
+            f"(date_text={date_text!r}); refuse fabricated timestamp"
+        )
 
     def audit_manifest_scope(self, *, years: range) -> dict[str, object]:
         """Classify every DWCS event/bout in scope; no silent omissions."""

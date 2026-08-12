@@ -56,10 +56,20 @@ def import_reconciled_observations(
                 f"mma_ai_bootstrap: reserved attribute collision {collisions[0]}"
             )
         effective_raw = item.get("effective_at")
-        if isinstance(effective_raw, str):
+        if isinstance(effective_raw, str) and effective_raw.strip():
             effective_at = datetime.fromisoformat(effective_raw.replace("Z", "+00:00"))
+        elif isinstance(effective_raw, datetime):
+            effective_at = effective_raw
         else:
-            effective_at = datetime(2019, 1, 1, tzinfo=timezone.utc)
+            raise BootstrapReject(
+                f"mma_ai_bootstrap: missing effective_at for fight_id={fight_id!r}; "
+                "refuse fabricated timestamp"
+            )
+        if effective_at.tzinfo is None:
+            raise BootstrapReject(
+                f"mma_ai_bootstrap: effective_at must be timezone-aware for "
+                f"fight_id={fight_id!r}"
+            )
         rows.append(
             SourceObservationRecord(
                 source=SOURCE_MMA_AI_BOOTSTRAP,

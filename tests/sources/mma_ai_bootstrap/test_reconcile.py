@@ -94,7 +94,21 @@ def test_import_emits_first_class_pit_fields() -> None:
     assert [r.external_id for r in rows] == sorted(r.external_id for r in rows)
     assert all(r.source == "mma_ai_bootstrap" for r in rows)
     assert all(r.observed_at == observed for r in rows)
+    assert all(r.effective_at == datetime(2020, 8, 4, tzinfo=UTC) for r in rows)
     assert all(r.quality_tier == "bronze" for r in rows)
     assert all(r.timestamp_quality_source == "mma_ai_bootstrap" for r in rows)
     assert all("quality_tier" not in r.attributes for r in rows)
     assert all("significant_strikes_landed" in r.attributes for r in rows)
+
+
+def test_import_missing_effective_at_rejects() -> None:
+    report = reconcile_mma_ai_dump(
+        normalized_path=FIXTURES / "normalized_fights_sample.jsonl",
+        ufcstats_sample_hashes={},
+        expected_counts={"fights": 2},
+    )
+    report.rows[0].pop("effective_at", None)
+    with pytest.raises(BootstrapReject, match="missing effective_at"):
+        import_reconciled_observations(
+            report, observed_at=datetime(2026, 8, 12, tzinfo=UTC)
+        )

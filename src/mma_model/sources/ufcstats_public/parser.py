@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ __all__ = [
     "SOURCE_UFCSTATS_PUBLIC",
     "ParserSchemaDriftError",
     "ParticipantError",
+    "parse_event_date_text",
     "parse_event_details",
     "parse_fight_details",
 ]
@@ -86,6 +88,24 @@ def _parse_int_label(value: str, *, label: str) -> int:
     if not text.isdigit():
         raise ParserSchemaDriftError(f"malformed {label}: {value!r}")
     return int(text)
+
+
+def parse_event_date_text(date_text: str) -> datetime | None:
+    """Parse UFCStats ``Date:`` values into timezone-aware UTC midnight.
+
+    Returns None when blank/unparseable — callers must fail closed rather than
+    invent an effective_at.
+    """
+    text = date_text.strip()
+    if not text:
+        return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
+        try:
+            naive = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return naive.replace(tzinfo=timezone.utc)
+    return None
 
 
 def parse_event_details(html: str) -> dict[str, Any]:
@@ -162,6 +182,7 @@ def parse_event_details(html: str) -> dict[str, Any]:
     return {
         "event_name": event_name,
         "date_text": date_text,
+        "event_date": parse_event_date_text(date_text),
         "location": location,
         "cancelled_evidence": cancelled_evidence,
         "has_fight_table": bool(

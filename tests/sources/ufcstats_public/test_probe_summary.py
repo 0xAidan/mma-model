@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[3]
 UTC = timezone.utc
 
 
-def test_robots_unavailable_is_fail_closed_not_permission() -> None:
+def test_robots_404_is_rfc9309_allow_all_not_bypass() -> None:
     from mma_model.sources.ufcstats_public.probe import evaluate_robots_policy
 
     decision = evaluate_robots_policy(
@@ -18,9 +18,22 @@ def test_robots_unavailable_is_fail_closed_not_permission() -> None:
         robots_body_text="Not Found",
         target_path="/statistics/events/completed",
     )
-    assert decision["policy_decision"] == "fail_closed_unavailable"
-    assert decision["allowed"] is False
+    assert decision["policy_decision"] == "rfc9309_http_404_410_allow_all"
+    assert decision["allowed"] is True
     assert decision["robots_status_code"] == 404
+    assert decision["standard"] == "RFC9309"
+
+
+def test_robots_5xx_is_rfc9309_temporary_disallow() -> None:
+    from mma_model.sources.ufcstats_public.probe import evaluate_robots_policy
+
+    decision = evaluate_robots_policy(
+        robots_status_code=503,
+        robots_body_text="unavailable",
+        target_path="/statistics/events/completed",
+    )
+    assert decision["policy_decision"] == "rfc9309_http_5xx_temporary_disallow"
+    assert decision["allowed"] is False
 
 
 def test_build_sanitized_probe_evidence_has_required_fields_no_body() -> None:
@@ -30,15 +43,16 @@ def test_build_sanitized_probe_evidence_has_required_fields_no_body() -> None:
     evidence = build_sanitized_probe_evidence(
         host="ufcstats.com",
         path_category="/statistics/events/completed",
-        http_status=200,
+        http_status=403,
         block_reason="cloudflare_challenge",
         response_content_hash="a" * 64,
         observed_at=observed,
         robots={
             "robots_url": "http://www.ufcstats.com/robots.txt",
             "robots_status_code": 404,
-            "policy_decision": "fail_closed_unavailable",
-            "allowed": False,
+            "policy_decision": "rfc9309_http_404_410_allow_all",
+            "allowed": True,
+            "standard": "RFC9309",
         },
     )
     required = {
