@@ -1,0 +1,136 @@
+# DWCS-200 settlement rule contract (versioned, deterministic).
+# Authoritative packaged bytes: mma_model/markets/settlement_v1.yaml
+# Plan-visible path: config/markets/settlement_v1.yaml (symlink).
+#
+# Source research: docs/research/mma-settlement-sources.md (accessed 2026-08-12).
+# Sportsbook-agnostic price guidance does not depend on this rule set.
+
+schema_version: 1
+contract_id: dwcs_settlement
+contract_version: "1.3.0"
+default_rule_set_id: mma_generic
+
+rule_sets:
+  mma_generic:
+    version: "1.3.0"
+    status: externally_sourced
+    source:
+      id: mma_generic_public_house_rules_v1
+      citation: >
+        Generic DWCS settlement defaults reconciled only to statements present
+        on cited public UFC/MMA house-rule pages (Sky Bet, Paddy Power, and
+        where noted bet365 / Bodog). Not universal sportsbook rules.
+        Disagreements live in versioned overrides. See
+        docs/research/mma-settlement-sources.md.
+      references:
+        - id: skybet_ufc_mma_rules
+          locator: https://support.skybet.com/app/answers/detail/ufc-mma-rules
+          role: >
+            2-way draw void; NC/cancel void; totals half at 2:30 with under at
+            exact; technical decision/draw defined as early stoppage; fight to
+            go the distance requires full stated rounds
+          accessed: "2026-08-12"
+        - id: paddypower_ufc_mma_rules
+          locator: https://helpcenter.paddypower.com/app/answers/detail/ufc-mma-rules
+          role: >
+            Match-bet draw void; NC void; totals half at 2:30 with under at
+            exact; will-go-distance false if concluded before stated rounds;
+            technical decision is early scorecard stoppage
+          accessed: "2026-08-12"
+        - id: bet365_nj_mma_rules_goes_distance
+          locator: https://help.nj.bet365.com/s/en-us/sportsrules/mma
+          role: >
+            Will fight go the distance requires full scheduled rounds; Fight To
+            Go The Distance is points/draw after scheduled rounds (tech
+            decision/draw are not full-distance Yes)
+          accessed: "2026-08-12"
+        - id: dwcs_settlement_source_notes
+          locator: docs/research/mma-settlement-sources.md
+          role: reconciliation table and disagreement map
+          accessed: "2026-08-12"
+    moneyline:
+      draw: void
+      technical_draw: void
+      no_contest: void
+      cancellation: void
+      technical_decision: settle_as_decision
+    goes_distance:
+      # Ordinary decision / full-distance draw = goes distance.
+      # Technical decision / technical draw end before scheduled rounds
+      # (Sky Bet, Paddy Power, bet365) → inside_distance.
+      decision_counts_as_goes_distance: true
+      technical_decision_counts_as_goes_distance: false
+      draw_counts_as_goes_distance: true
+      technical_draw_counts_as_goes_distance: false
+      no_contest: void
+      cancellation: void
+    totals:
+      half_round_lines: [1.5, 2.5]
+      half_round_boundary: elapsed_rounds
+      round_seconds: 300
+      exact_half_result: under
+      # Ordinary full-distance decision/draw may omit clocks and use schedule.
+      # Technical decision/draw require stoppage clocks (Bodog explicit; also
+      # required so early stoppages are not invented as full distance).
+      ordinary_decision_duration: full_scheduled
+      ordinary_draw_duration: full_scheduled
+      technical_decision_duration: stoppage_time
+      technical_draw_duration: stoppage_time
+      no_contest: void
+      cancellation: void
+    method:
+      technical_decision_counts_as: decision
+      draw: void
+      technical_draw: void
+      no_contest: void
+      cancellation: void
+    fighter_by_method:
+      technical_decision_counts_as: decision
+      draw: void
+      technical_draw: void
+      no_contest: void
+      cancellation: void
+    exact_round:
+      decision: loss
+      draw: loss
+      technical_decision: loss
+      technical_draw: loss
+      no_contest: void
+      cancellation: void
+
+  bodog_mma:
+    version: "1.3.0"
+    status: externally_sourced
+    extends: mma_generic
+    source:
+      id: bodog_mma_totals_exact_and_tech_stoppage
+      citation: >
+        Bodog Boxing/MMA rules: exact 2:30 voids totals; technical decision or
+        technical draw totals settle from the point the fight was stopped
+        (stoppage_time), not invented full scheduled duration.
+      references:
+        - id: bodog_boxing_mma_betting_rules
+          locator: https://www.bodog.eu/help/common-faq/boxing-mma-betting-rules
+          role: >
+            totals exact 2:30 void; technical decision/technical draw use
+            stoppage point for totals; moneyline draw no action
+          accessed: "2026-08-12"
+    overrides:
+      totals:
+        exact_half_result: void
+        technical_decision_duration: stoppage_time
+        technical_draw_duration: stoppage_time
+
+  bet365_mma:
+    version: "1.3.0"
+    status: provisional_pending_approved_source
+    extends: mma_generic
+    source:
+      id: bet365_mma_rules_pending
+      citation: >
+        Placeholder Bet365 override lane for bookmaker-specific differences not
+        already encoded in mma_generic. Full Bet365 DWCS house-rules adoption
+        remains provisional until a complete approved citation set is attached.
+        Selecting without allow_provisional hard-fails.
+      references: []
+    overrides: {}

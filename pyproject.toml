@@ -38,6 +38,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "mma_model.evaluation" = ["dwcs_v1.json"]
 "mma_model.identity.data" = ["adjudicated_cases_v1.json"]
+"mma_model.markets" = ["settlement_v1.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -59,4 +60,7 @@ select = ["E4", "E7", "E9", "F"]
 # Focused stricter lint for DWCS evaluation contract code/tests:
 #   ruff check src/mma_model/evaluation tests/test_evaluation_contract.py \
 #              tests/test_evaluation_contract_packaging.py \
+#              --select E,F,I,UP,B,SIM
+# Focused stricter lint for DWCS-200 market contracts:
+#   ruff check src/mma_model/domain src/mma_model/markets tests/markets \
 #              --select E,F,I,UP,B,SIM

@@ -24,5 +24,12 @@ jobs:
           tests/test_evaluation_contract.py
           tests/test_evaluation_contract_packaging.py
           --select E,F,I,UP,B,SIM
+      - name: Ruff markets (strict)
+        run: >
+          ruff check
+          src/mma_model/domain
+          src/mma_model/markets
+          tests/markets
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q

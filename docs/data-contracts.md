@@ -120,6 +120,118 @@ Quality tiers (overall): **gold** = qualifying direct/revision timestamp evidenc
 | Odds snapshot blob | `odds_snapshots` | Untyped JSON payload; not bout-matched quotes |
 | Fighter composites | `fighter_composites` | Rolling scores; watch for current-aggregate leakage |
 
+## Market / settlement contracts (DWCS-200)
+
+| Field | Value |
+|-------|--------|
+| **Domain enums** | `mma_model.domain.markets` |
+| **Price targets** | `mma_model.markets.price_targets` |
+| **Settlement** | `mma_model.markets.settlement` |
+| **Authoritative rules bytes** | Packaged `mma_model/markets/settlement_v1.yaml` |
+| **Plan-visible path** | `config/markets/settlement_v1.yaml` (symlink to packaged file) |
+| **Loader** | `mma_model.markets.rules.load_settlement_rules` / `get_rule_set` |
+| **Contract id / version** | `dwcs_settlement` / `1.3.0` |
+| **Pinned digest** | `PINNED_SETTLEMENT_HASH` in `rules.py` (SHA-256 of canonical JSON) |
+| **Default rule set** | `mma_generic` `1.3.0` (`externally_sourced`) |
+| **Source notes** | `docs/research/mma-settlement-sources.md` |
+
+### v1 market families and outcomes
+
+- **moneyline:** `fighter_a`, `fighter_b`
+- **totals:** outcomes `over` / `under`; canonical lines `1.5`, `2.5` only
+- **goes_distance:** `goes_distance`, `inside_distance`
+- **method:** `ko_tko`, `submission`, `decision`, `other_stoppage`
+- **fighter_by_method:** `a_*` / `b_*` method atoms
+- **exact_round:** schedule-specific — 3-round bouts use `round_1`…`round_3`;
+  5-round bouts use `round_1`…`round_5`. Out-of-schedule selections are rejected.
+
+Market-family maturity is `qualified` / `experimental` / `blocked`. Failed or
+non-qualified families may not emit `confirmed_value` or `price_target`.
+
+### Sportsbook-agnostic price guidance (required)
+
+Computed from calibrated `p50` / `p25` with no bookmaker dependency:
+
+- Fair decimal: `1 / p50`
+- Actionable decimal: `max(1 / p25, 1.05 / p50)` (exact round uses `1.10` EV target)
+- Strong-value decimal: `max(1 / p25, 1.10 / p50)`
+- Recommendation states: `confirmed_value` (timestamped offer meets actionable +
+  confidence), `price_target` (no offer; thresholds still published), `no_bet`
+
+Exact bookmaker lines remain optional enrichment (later tickets). Missing Bet365
+does not block these thresholds. Price guidance does **not** depend on settlement
+rule-set approval status.
+
+### Settlement
+
+Pure functions return `win` / `loss` / `push` / `void` / `unresolved` plus reason,
+rule-set id/version, and the contract `content_hash`.
+
+**Totals boundary (v1):** half-round lines use fight duration in rounds
+(`elapsed_rounds = total_elapsed_seconds / 300`). Over wins when
+`elapsed_rounds > line`; under when `elapsed_rounds < line`; at exact equality
+the default (`mma_generic`) grades **under** per Sky Bet / Paddy Power public
+rules. Bodog’s exact-half **void** is the `bodog_mma` override. Duration comes
+from `ending_round` + `elapsed_seconds_in_round`, or `total_elapsed_seconds`.
+Ordinary full-distance `decision` / scorecard `draw` may omit clocks when
+policy is `full_scheduled`. Technical decision and technical draw use
+`stoppage_time` (Bodog explicit; generic refuses to invent scheduled
+duration). Represent technical draw as `result_class="draw"` +
+`method="technical_draw"`. Partial clock fields are checked for consistency
+(including round-boundary dual forms); conflicts raise `SettlementFactsError`.
+Missing required clocks → `unresolved` (never invent a grade). Whole-number
+totals lines are not offered in v1.
+
+**Moneyline draw / technical draw:** default is `void` (Sky Bet / Paddy Power /
+Bodog “no action”), not push.
+
+**Goes the distance:** ordinary decision and full-distance draw count as
+`goes_distance`. Early technical decision / technical draw count as
+`inside_distance` (Sky/Paddy “concluded before stated rounds”; bet365/Bodog
+require full scheduled rounds for Yes).
+
+**Governance:** `mma_generic` and `bodog_mma` are `externally_sourced` and must
+cite at least one public `https://` house-rules page with an access date.
+Disagreements are documented in `docs/research/mma-settlement-sources.md` and
+captured as versioned overrides — never claimed as universal. The `bet365_mma`
+lane is `provisional_pending_approved_source` and hard-fails unless
+`allow_provisional=True`. Price guidance does not depend on settlement status.
+
+**Pending facts:** `pending=True` is a valid transitional pre-result state only
+when no completed `result_class` / winner / method is present. Pending combined
+with completed result fields or `cancelled=True` raises `SettlementFactsError`.
+
+**Method / result_class invariants (single fact version):**
+- `method="technical_draw"` requires `result_class="draw"` (and no winner).
+- Decisive methods (`decision`, `technical_decision`, finishes) require
+  `result_class="decisive"`.
+- Ordinary scorecard draw is `result_class="draw"` with `method` omitted.
+- Incomplete pairs (method without the matching class, or clocks without a
+  settled `result_class` for totals) never produce a confident grade:
+  structurally impossible combinations raise `SettlementFactsError`; otherwise
+  families return `unresolved`.
+
+**Cancelled / no-contest precedence:** On one fact version, `cancelled=True` or
+`result_class="no_contest"` must not retain `winner_side` or `method`. If a
+source stream previously recorded a method before an NC/cancel revision, keep
+that on an earlier version — do not mix contradictory fields into the terminal
+version (settlement would otherwise risk consuming stale method data).
+
+**Pinned digest bump procedure:** edit packaged `settlement_v1.yaml` → bump
+`contract_version` and affected rule-set `version` → recompute
+`compute_settlement_hash(payload)` → update `PINNED_SETTLEMENT_HASH` and
+`EXPECTED_CONTRACT_VERSION` in `rules.py` in the same change. Default loads
+always verify the pin (fail-closed on silent drift).
+
+**Immutability:** loaded `rule_sets` is a `MappingProxyType`; nested rule models
+are frozen Pydantic models.
+
+**Fact validation:** structurally impossible facts raise `SettlementFactsError`
+(unsupported schedule, out-of-range clocks, contradictory cancel/draw/NC/winner
+combinations). Genuinely incomplete/pending facts settle as `unresolved`.
+
+Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core
