@@ -1,0 +1,76 @@
+# DWCS-200 settlement rule contract (versioned, deterministic).
+# Authoritative packaged bytes: mma_model/markets/settlement_v1.yaml
+# Plan-visible path: config/markets/settlement_v1.yaml (symlink).
+#
+# Bookmaker lines remain optional enrichment. This file encodes how bets settle
+# once an event-night result exists; it does not require a live sportsbook feed.
+#
+# Default applicable rule set is mma_generic. Sportsbook overrides are versioned
+# separately and activate only when explicitly selected with an approved source.
+
+schema_version: 1
+contract_id: dwcs_settlement
+contract_version: "1.0.0"
+default_rule_set_id: mma_generic
+
+rule_sets:
+  mma_generic:
+    version: "1.0.0"
+    status: approved
+    source:
+      id: generic_mma_industry_conventions
+      citation: >
+        Generic MMA settlement conventions for DWCS v1 (moneyline draw=push,
+        NC/cancel=void, technical decision settles as decision, half-round
+        totals use ending-round boundary with no push). Not a claim of any
+        specific sportsbook's published house rules.
+    moneyline:
+      draw: push
+      no_contest: void
+      cancellation: void
+      technical_decision: settle_as_decision
+    goes_distance:
+      decision_counts_as_goes_distance: true
+      technical_decision_counts_as_goes_distance: true
+      draw_counts_as_goes_distance: true
+      no_contest: void
+      cancellation: void
+    totals:
+      half_round_lines: [1.5, 2.5]
+      half_round_boundary: ending_round
+      # over X.5 wins when ending_round >= ceil(X.5); under otherwise; no push
+      half_round_push: false
+      whole_round_push: true
+      decision_uses_scheduled_rounds_as_ending_round: true
+      no_contest: void
+      cancellation: void
+    method:
+      technical_decision_counts_as: decision
+      draw: void
+      no_contest: void
+      cancellation: void
+    fighter_by_method:
+      technical_decision_counts_as: decision
+      draw: void
+      no_contest: void
+      cancellation: void
+    exact_round:
+      # Decision / draw at distance is not a round finish → loss
+      decision: loss
+      draw: loss
+      technical_decision: loss
+      no_contest: void
+      cancellation: void
+
+  bet365_mma:
+    version: "1.0.0"
+    status: provisional_pending_approved_source
+    extends: mma_generic
+    source:
+      id: bet365_mma_rules_pending
+      citation: >
+        Placeholder sportsbook override lane for Bet365 MMA. Exact Bet365 DWCS
+        house rules are not activated until an approved public/licensed rule
+        source is attached. Selecting this rule set without allow_provisional
+        hard-fails. Differences versus mma_generic remain empty until approved.
+    overrides: {}

@@ -92,6 +92,55 @@ immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 | Odds snapshot blob | `odds_snapshots` | Untyped JSON payload; not bout-matched quotes |
 | Fighter composites | `fighter_composites` | Rolling scores; watch for current-aggregate leakage |
 
+## Market / settlement contracts (DWCS-200)
+
+| Field | Value |
+|-------|--------|
+| **Domain enums** | `mma_model.domain.markets` |
+| **Price targets** | `mma_model.markets.price_targets` |
+| **Settlement** | `mma_model.markets.settlement` |
+| **Authoritative rules bytes** | Packaged `mma_model/markets/settlement_v1.yaml` |
+| **Plan-visible path** | `config/markets/settlement_v1.yaml` (symlink to packaged file) |
+| **Loader** | `mma_model.markets.rules.load_settlement_rules` / `get_rule_set` |
+| **Contract id / version** | `dwcs_settlement` / `1.0.0` |
+| **Default rule set** | `mma_generic` `1.0.0` (approved) |
+
+### v1 market families and outcomes
+
+- **moneyline:** `fighter_a`, `fighter_b`
+- **totals:** outcomes `over` / `under`; canonical lines `1.5`, `2.5`
+- **goes_distance:** `goes_distance`, `inside_distance`
+- **method:** `ko_tko`, `submission`, `decision`, `other_stoppage`
+- **fighter_by_method:** `a_*` / `b_*` method atoms
+- **exact_round:** `round_1`…`round_5` (DWCS cards typically use the 3-round subset)
+
+Market-family maturity is `qualified` / `experimental` / `blocked`. Failed or
+non-qualified families may not emit `confirmed_value` or `price_target`.
+
+### Sportsbook-agnostic price guidance (required)
+
+Computed from calibrated `p50` / `p25` with no bookmaker dependency:
+
+- Fair decimal: `1 / p50`
+- Actionable decimal: `max(1 / p25, 1.05 / p50)` (exact round uses `1.10` EV target)
+- Strong-value decimal: `max(1 / p25, 1.10 / p50)`
+- Recommendation states: `confirmed_value` (timestamped offer meets actionable +
+  confidence), `price_target` (no offer; thresholds still published), `no_bet`
+
+Exact bookmaker lines remain optional enrichment (later tickets). Missing Bet365
+does not block these thresholds.
+
+### Settlement
+
+Pure functions return `win` / `loss` / `push` / `void` / `unresolved` plus reason,
+versioned by rule set id. Generic MMA conventions cover draw/NC/cancellation,
+technical decision → decision, and half-round totals via ending-round boundary
+with no push. The `bet365_mma` override lane is
+`provisional_pending_approved_source` and hard-fails unless
+`allow_provisional=True` after an approved rule citation exists.
+
+Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core
