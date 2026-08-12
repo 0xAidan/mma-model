@@ -2,4 +2,8 @@
 
 from mma_model.sources.contracts import DETAIL_LEVEL_RANK, DetailLevel, SourceObservationRecord
 
-__all__ = ["DETAIL_LEVEL_RANK", "DetailLevel", "SourceObservationRecord"]
+__all__ = [
+    "DETAIL_LEVEL_RANK",
+    "DetailLevel",
+    "SourceObservationRecord",
+]

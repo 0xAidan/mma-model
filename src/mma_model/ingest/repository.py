@@ -62,7 +62,6 @@ class IngestRepository:
             session.add(run)
             session.commit()
             session.refresh(run)
-            # Detach plain values for caller use outside the session.
             return IngestRun(
                 id=run.id,
                 source=run.source,
@@ -104,7 +103,6 @@ class IngestRepository:
         observations: Sequence[SourceObservationRecord],
         checkpoint_token: str,
         checkpoint_version: str,
-        require_raw_present: bool = False,
     ) -> BatchCommitResult:
         inserted = 0
         skipped_identical = 0
@@ -117,23 +115,14 @@ class IngestRepository:
                 raise KeyError(f"unknown ingest run {run_id}")
 
             for obs in observations:
-                if require_raw_present or obs.raw_ref:
-                    ref = obs.raw_ref or obs.payload_hash
-                    if ref != obs.payload_hash:
-                        raise PayloadCorruptionError(
-                            f"raw_ref {ref} does not match payload_hash {obs.payload_hash}"
-                        )
-                    if require_raw_present and not self._raw_store.exists(obs.payload_hash):
-                        raise PayloadCorruptionError(
-                            f"missing raw payload for hash {obs.payload_hash}"
-                        )
-                    if self._raw_store.exists(obs.payload_hash):
-                        self._raw_store.verify(obs.payload_hash)
+                raw_ref = self._resolve_raw_ref(obs)
 
                 existing = session.scalars(
                     select(RawObservation).where(
                         RawObservation.source == obs.source,
                         RawObservation.stream == obs.stream,
+                        RawObservation.scope == run.scope,
+                        RawObservation.checkpoint_version == checkpoint_version,
                         RawObservation.external_id == obs.external_id,
                         RawObservation.payload_hash == obs.payload_hash,
                     )
@@ -147,13 +136,15 @@ class IngestRepository:
                         ingest_run_id=run.id,
                         source=obs.source,
                         stream=obs.stream,
+                        scope=run.scope,
+                        checkpoint_version=checkpoint_version,
                         external_id=obs.external_id,
                         entity_kind=obs.entity_kind,
                         observed_at=obs.observed_at,
                         effective_at=obs.effective_at,
                         source_updated_at=obs.source_updated_at,
                         payload_hash=obs.payload_hash,
-                        raw_ref=obs.raw_ref or obs.payload_hash,
+                        raw_ref=raw_ref,
                         detail_level=str(obs.detail_level),
                         version_kind=obs.version_kind,
                         schema_version=obs.schema_version,
@@ -186,6 +177,22 @@ class IngestRepository:
             skipped_downgrade=skipped_downgrade,
             skipped_preserve_version=skipped_preserve_version,
         )
+
+    def _resolve_raw_ref(self, obs: SourceObservationRecord) -> str | None:
+        """Enforce verified-blob invariant or explicit absence (no dangling raw_ref)."""
+        if obs.raw_blob_absent:
+            return None
+        claimed = obs.raw_ref or obs.payload_hash
+        if claimed != obs.payload_hash:
+            raise PayloadCorruptionError(
+                f"raw_ref {claimed} does not match payload_hash {obs.payload_hash}"
+            )
+        if not self._raw_store.exists(obs.payload_hash):
+            raise PayloadCorruptionError(
+                f"missing raw payload for hash {obs.payload_hash}"
+            )
+        self._raw_store.verify(obs.payload_hash)
+        return obs.payload_hash
 
     def get_checkpoint(
         self, *, source: str, stream: str, scope: str, version: str
@@ -258,58 +265,46 @@ class IngestRepository:
         if not isinstance(fighter_a_id, str) or not isinstance(fighter_b_id, str):
             raise ValueError("bout_result observations require fighter_a_id and fighter_b_id")
 
-        existing = session.scalars(
-            select(BoutResultVersion).where(
+        latest = session.scalars(
+            select(BoutResultVersion)
+            .where(
                 BoutResultVersion.bout_id == obs.subject_id,
                 BoutResultVersion.version_kind == obs.version_kind,
             )
+            .order_by(BoutResultVersion.revision.desc())
         ).first()
 
-        if existing is None:
-            session.add(
-                BoutResultVersion(
-                    bout_id=obs.subject_id,
-                    version_kind=obs.version_kind,
-                    fighter_a_id=fighter_a_id,
-                    fighter_b_id=fighter_b_id,
-                    winner_fighter_id=attrs.get("winner_fighter_id"),
-                    result_type=attrs.get("result_type"),
-                    method=attrs.get("method"),
-                    ending_round=attrs.get("ending_round"),
-                    time_str=attrs.get("time_str"),
-                    effective_at=obs.effective_at,
-                    observed_at=obs.observed_at,
-                )
+        if latest is not None:
+            prior_detail = self._latest_applied_detail(
+                session,
+                bout_id=obs.subject_id,
+                version_kind=obs.version_kind,
+                excluding_hash=obs.payload_hash,
             )
-            return None
+            existing_level = prior_detail or self._infer_detail(latest)
+            if DETAIL_LEVEL_RANK[obs.detail_level] < DETAIL_LEVEL_RANK[existing_level]:
+                return "downgrade"
 
-        # Event-night (and any prior immutable version_kind row) is never overwritten.
-        if obs.version_kind == "event_night":
-            return "preserve_version"
+        next_revision = 1
+        if latest is not None:
+            next_revision = int(latest.revision) + 1
 
-        existing_level = DetailLevel(getattr(existing, "_detail_level", None) or self._infer_detail(existing))
-        # Prefer explicit detail stamped on a prior apply via raw_observations lookup.
-        prior_detail = self._latest_applied_detail(
-            session,
-            bout_id=obs.subject_id,
-            version_kind=obs.version_kind,
-            excluding_hash=obs.payload_hash,
+        session.add(
+            BoutResultVersion(
+                bout_id=obs.subject_id,
+                version_kind=obs.version_kind,
+                revision=next_revision,
+                fighter_a_id=fighter_a_id,
+                fighter_b_id=fighter_b_id,
+                winner_fighter_id=attrs.get("winner_fighter_id"),
+                result_type=attrs.get("result_type"),
+                method=attrs.get("method"),
+                ending_round=attrs.get("ending_round"),
+                time_str=attrs.get("time_str"),
+                effective_at=obs.effective_at,
+                observed_at=obs.observed_at,
+            )
         )
-        if prior_detail is not None:
-            existing_level = prior_detail
-
-        if DETAIL_LEVEL_RANK[obs.detail_level] < DETAIL_LEVEL_RANK[existing_level]:
-            return "downgrade"
-
-        existing.fighter_a_id = fighter_a_id
-        existing.fighter_b_id = fighter_b_id
-        existing.winner_fighter_id = attrs.get("winner_fighter_id")
-        existing.result_type = attrs.get("result_type")
-        existing.method = attrs.get("method")
-        existing.ending_round = attrs.get("ending_round")
-        existing.time_str = attrs.get("time_str")
-        existing.effective_at = obs.effective_at
-        existing.observed_at = obs.observed_at
         return None
 
     def _latest_applied_detail(
@@ -332,7 +327,6 @@ class IngestRepository:
         ).all()
         if not rows:
             return None
-        # Highest detail among prior applied observations for this version.
         best = DetailLevel.SUMMARY
         for row in rows:
             level = DetailLevel(row.detail_level)

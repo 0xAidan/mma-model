@@ -375,7 +375,6 @@ def test_failed_batch_retains_earlier_committed_progress(db_env) -> None:
             observations=[bad],
             checkpoint_token="bad",
             checkpoint_version="v1",
-            require_raw_present=True,
         )
 
     with Session() as session:
@@ -504,6 +503,8 @@ def test_provenance_uniqueness_enforced(db_env) -> None:
                 ingest_run_id="run-x",
                 source="s",
                 stream="st",
+                scope="sc",
+                checkpoint_version="v1",
                 external_id="e1",
                 entity_kind="event",
                 observed_at=now,
@@ -521,16 +522,17 @@ def test_provenance_uniqueness_enforced(db_env) -> None:
             conn.execute(
                 text(
                     "INSERT INTO raw_observations "
-                    "(ingest_run_id, source, stream, external_id, entity_kind, "
-                    "observed_at, effective_at, source_updated_at, payload_hash, raw_ref, "
-                    "detail_level, schema_version, created_at) "
-                    "VALUES ('run-x','s','st','e1','event',:now,:now,:now,:h,:h,'partial','1',:now)"
+                    "(ingest_run_id, source, stream, scope, checkpoint_version, external_id, "
+                    "entity_kind, observed_at, effective_at, source_updated_at, payload_hash, "
+                    "raw_ref, detail_level, schema_version, created_at) "
+                    "VALUES ('run-x','s','st','sc','v1','e1','event',:now,:now,:now,:h,:h,"
+                    "'partial','1',:now)"
                 ),
                 {"now": now.isoformat(), "h": "a" * 64},
             )
 
 
-def test_event_night_result_not_overwritten_by_same_kind_correction(db_env) -> None:
+def test_event_night_corrections_append_immutable_revisions(db_env) -> None:
     repo: IngestRepository = db_env["repo"]
     store: ContentAddressedRawStore = db_env["store"]
     Session = db_env["session_factory"]
@@ -575,11 +577,276 @@ def test_event_night_result_not_overwritten_by_same_kind_correction(db_env) -> N
     out = repo.commit_batch(
         run_id=run.id, observations=[second], checkpoint_token="2", checkpoint_version="v1"
     )
-    assert out.skipped_preserve_version == 1
+    assert out.inserted == 1
     with Session() as session:
         assert session.scalars(select(RawObservation)).all().__len__() == 2
-        night = session.scalars(
-            select(BoutResultVersion).where(BoutResultVersion.version_kind == "event_night")
-        ).one()
-        assert night.winner_fighter_id == "f-a"
-        assert night.method == "KO"
+        nights = session.scalars(
+            select(BoutResultVersion)
+            .where(BoutResultVersion.version_kind == "event_night")
+            .order_by(BoutResultVersion.revision)
+        ).all()
+        assert [n.revision for n in nights] == [1, 2]
+        assert nights[0].winner_fighter_id == "f-a"
+        assert nights[0].method == "KO"
+        assert nights[1].winner_fighter_id == "f-b"
+        assert nights[1].method == "DEC"
+
+
+def test_raw_observation_identity_includes_scope_and_checkpoint_version(db_env) -> None:
+    """Identical payloads in different scopes must not collide; same-scope replay is no-op."""
+    repo: IngestRepository = db_env["repo"]
+    store: ContentAddressedRawStore = db_env["store"]
+    Session = db_env["session_factory"]
+    body, digest = _payload(b'{"shared":true}')
+    store.put(body)
+    obs = _obs(
+        payload_hash=digest,
+        entity_kind="event",
+        version_kind=None,
+        subject_id=None,
+        attributes={},
+    )
+
+    run_quick = repo.start_run(source="testsource", stream="results", scope="profile:quick")
+    run_full = repo.start_run(source="testsource", stream="results", scope="profile:full")
+    run_other_src = repo.start_run(source="othersrc", stream="results", scope="profile:quick")
+    run_other_stream = repo.start_run(source="testsource", stream="odds", scope="profile:quick")
+
+    r1 = repo.commit_batch(
+        run_id=run_quick.id, observations=[obs], checkpoint_token="1", checkpoint_version="v1"
+    )
+    r1b = repo.commit_batch(
+        run_id=run_quick.id, observations=[obs], checkpoint_token="1", checkpoint_version="v1"
+    )
+    r2 = repo.commit_batch(
+        run_id=run_full.id, observations=[obs], checkpoint_token="1", checkpoint_version="v1"
+    )
+    r3 = repo.commit_batch(
+        run_id=run_quick.id, observations=[obs], checkpoint_token="1", checkpoint_version="v2"
+    )
+    r4 = repo.commit_batch(
+        run_id=run_other_src.id,
+        observations=[_obs(payload_hash=digest, entity_kind="event", source="othersrc")],
+        checkpoint_token="1",
+        checkpoint_version="v1",
+    )
+    r5 = repo.commit_batch(
+        run_id=run_other_stream.id,
+        observations=[_obs(payload_hash=digest, entity_kind="event", stream="odds")],
+        checkpoint_token="1",
+        checkpoint_version="v1",
+    )
+
+    assert r1.inserted == 1
+    assert r1b.skipped_identical == 1 and r1b.inserted == 0
+    assert r2.inserted == 1
+    assert r3.inserted == 1
+    assert r4.inserted == 1
+    assert r5.inserted == 1
+
+    with Session() as session:
+        rows = session.scalars(select(RawObservation)).all()
+        assert len(rows) == 5
+        keys = {
+            (r.source, r.stream, r.scope, r.checkpoint_version, r.external_id, r.payload_hash)
+            for r in rows
+        }
+        assert keys == {
+            ("testsource", "results", "profile:quick", "v1", "ext-1", digest),
+            ("testsource", "results", "profile:full", "v1", "ext-1", digest),
+            ("testsource", "results", "profile:quick", "v2", "ext-1", digest),
+            ("othersrc", "results", "profile:quick", "v1", "ext-1", digest),
+            ("testsource", "odds", "profile:quick", "v1", "ext-1", digest),
+        }
+
+
+def test_current_corrections_append_revisions_and_replay_is_noop(db_env) -> None:
+    repo: IngestRepository = db_env["repo"]
+    store: ContentAddressedRawStore = db_env["store"]
+    Session = db_env["session_factory"]
+    bout_id = _seed_bout(Session)
+    payloads = [
+        (b'{"rev":1,"w":"f-a"}', "f-a", "KO", 1, "1:00"),
+        (b'{"rev":2,"w":"f-b"}', "f-b", "SUB", 2, "2:00"),
+        (b'{"rev":3,"w":"f-a"}', "f-a", "DEC", 3, "5:00"),
+    ]
+    digests: list[str] = []
+    run = repo.start_run(source="testsource", stream="results", scope="profile:default")
+    for idx, (body, winner, method, rnd, time_str) in enumerate(payloads, start=1):
+        _, digest = _payload(body)
+        digests.append(digest)
+        store.put(body)
+        obs = _obs(
+            payload_hash=digest,
+            version_kind="current",
+            detail_level=DetailLevel.VERIFIED,
+            observed_at=_ts(10 + idx),
+            subject_id=bout_id,
+            attributes={
+                "fighter_a_id": "f-a",
+                "fighter_b_id": "f-b",
+                "winner_fighter_id": winner,
+                "result_type": "win",
+                "method": method,
+                "ending_round": rnd,
+                "time_str": time_str,
+            },
+        )
+        out = repo.commit_batch(
+            run_id=run.id,
+            observations=[obs],
+            checkpoint_token=f"p{idx}",
+            checkpoint_version="v1",
+        )
+        assert out.inserted == 1
+
+    # Replay middle correction — no-op.
+    replay = _obs(
+        payload_hash=digests[1],
+        version_kind="current",
+        detail_level=DetailLevel.VERIFIED,
+        observed_at=_ts(12),
+        subject_id=bout_id,
+        attributes={
+            "fighter_a_id": "f-a",
+            "fighter_b_id": "f-b",
+            "winner_fighter_id": "f-b",
+            "result_type": "win",
+            "method": "SUB",
+            "ending_round": 2,
+            "time_str": "2:00",
+        },
+    )
+    noop = repo.commit_batch(
+        run_id=run.id, observations=[replay], checkpoint_token="p2", checkpoint_version="v1"
+    )
+    assert noop.inserted == 0
+    assert noop.skipped_identical == 1
+
+    with Session() as session:
+        currents = session.scalars(
+            select(BoutResultVersion)
+            .where(BoutResultVersion.version_kind == "current")
+            .order_by(BoutResultVersion.revision)
+        ).all()
+        assert [c.revision for c in currents] == [1, 2, 3]
+        assert [c.method for c in currents] == ["KO", "SUB", "DEC"]
+        assert [c.winner_fighter_id for c in currents] == ["f-a", "f-b", "f-a"]
+        # Prior revisions remain immutable.
+        assert currents[0].method == "KO"
+        assert currents[1].method == "SUB"
+        assert session.scalars(select(RawObservation)).all().__len__() == 3
+
+
+def test_commit_batch_rejects_missing_or_corrupt_raw_blob(db_env) -> None:
+    repo: IngestRepository = db_env["repo"]
+    store: ContentAddressedRawStore = db_env["store"]
+    Session = db_env["session_factory"]
+    bout_id = _seed_bout(Session)
+    body_ok, h_ok = _payload(b'{"ok":1}')
+    store.put(body_ok)
+    run = repo.start_run(source="testsource", stream="results", scope="profile:default")
+    ok = _obs(
+        payload_hash=h_ok,
+        version_kind="event_night",
+        detail_level=DetailLevel.VERIFIED,
+        subject_id=bout_id,
+        attributes={
+            "fighter_a_id": "f-a",
+            "fighter_b_id": "f-b",
+            "winner_fighter_id": "f-a",
+            "result_type": "win",
+            "method": "KO",
+            "ending_round": 1,
+            "time_str": "1:00",
+        },
+    )
+    repo.commit_batch(run_id=run.id, observations=[ok], checkpoint_token="ok", checkpoint_version="v1")
+
+    missing_hash = "1" * 64
+    missing = _obs(
+        payload_hash=missing_hash,
+        version_kind="current",
+        detail_level=DetailLevel.VERIFIED,
+        subject_id=bout_id,
+        attributes={
+            "fighter_a_id": "f-a",
+            "fighter_b_id": "f-b",
+            "winner_fighter_id": "f-b",
+            "result_type": "win",
+            "method": "DEC",
+            "ending_round": 3,
+            "time_str": "5:00",
+        },
+    )
+    with pytest.raises(PayloadCorruptionError):
+        repo.commit_batch(
+            run_id=run.id,
+            observations=[missing],
+            checkpoint_token="missing",
+            checkpoint_version="v1",
+        )
+
+    body_bad, h_bad = _payload(b'{"corrupt":true}')
+    # Claim the hash without writing verified bytes, then plant corrupt file.
+    store.path_for(h_bad).parent.mkdir(parents=True, exist_ok=True)
+    store.path_for(h_bad).write_bytes(gzip.compress(b"not-the-bytes"))
+    corrupt = _obs(
+        payload_hash=h_bad,
+        version_kind="current",
+        detail_level=DetailLevel.VERIFIED,
+        subject_id=bout_id,
+        attributes={
+            "fighter_a_id": "f-a",
+            "fighter_b_id": "f-b",
+            "winner_fighter_id": "f-b",
+            "result_type": "win",
+            "method": "SUB",
+            "ending_round": 2,
+            "time_str": "2:22",
+        },
+    )
+    with pytest.raises(PayloadCorruptionError):
+        repo.commit_batch(
+            run_id=run.id,
+            observations=[corrupt],
+            checkpoint_token="corrupt",
+            checkpoint_version="v1",
+        )
+
+    with Session() as session:
+        assert session.scalars(select(SourceCheckpoint)).one().cursor_token == "ok"
+        assert session.scalars(select(RawObservation)).all().__len__() == 1
+        assert session.scalars(select(BoutResultVersion)).all().__len__() == 1
+        row = session.scalars(select(RawObservation)).one()
+        assert row.raw_ref == h_ok
+        store.verify(row.raw_ref)
+
+
+def test_explicit_raw_absence_allows_null_raw_ref_without_dangling_hash(db_env) -> None:
+    repo: IngestRepository = db_env["repo"]
+    Session = db_env["session_factory"]
+    digest = hashlib.sha256(b"metadata-only").hexdigest()
+    run = repo.start_run(source="testsource", stream="results", scope="profile:default")
+    obs = SourceObservationRecord(
+        source="testsource",
+        stream="results",
+        external_id="meta-1",
+        entity_kind="event",
+        observed_at=_ts(12),
+        effective_at=_ts(10),
+        source_updated_at=_ts(11),
+        payload_hash=digest,
+        raw_ref=None,
+        raw_blob_absent=True,
+        detail_level=DetailLevel.SUMMARY,
+        schema_version="1",
+    )
+    out = repo.commit_batch(
+        run_id=run.id, observations=[obs], checkpoint_token="m1", checkpoint_version="v1"
+    )
+    assert out.inserted == 1
+    with Session() as session:
+        row = session.scalars(select(RawObservation)).one()
+        assert row.payload_hash == digest
+        assert row.raw_ref is None

@@ -60,13 +60,15 @@ def upgrade() -> None:
             sa.Column("ingest_run_id", sa.String(length=36), nullable=False),
             sa.Column("source", sa.String(length=64), nullable=False),
             sa.Column("stream", sa.String(length=64), nullable=False),
+            sa.Column("scope", sa.String(length=128), nullable=False),
+            sa.Column("checkpoint_version", sa.String(length=64), nullable=False),
             sa.Column("external_id", sa.String(length=128), nullable=False),
             sa.Column("entity_kind", sa.String(length=64), nullable=False),
             sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("effective_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("source_updated_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("payload_hash", sa.String(length=64), nullable=False),
-            sa.Column("raw_ref", sa.String(length=64), nullable=False),
+            sa.Column("raw_ref", sa.String(length=64), nullable=True),
             sa.Column("detail_level", sa.String(length=32), nullable=False),
             sa.Column("version_kind", sa.String(length=32), nullable=True),
             sa.Column("schema_version", sa.String(length=32), nullable=False),
@@ -77,6 +79,8 @@ def upgrade() -> None:
             sa.UniqueConstraint(
                 "source",
                 "stream",
+                "scope",
+                "checkpoint_version",
                 "external_id",
                 "payload_hash",
                 name="uq_raw_obs_provenance",
@@ -85,6 +89,7 @@ def upgrade() -> None:
         op.create_index("ix_raw_observations_ingest_run_id", "raw_observations", ["ingest_run_id"])
         op.create_index("ix_raw_observations_source", "raw_observations", ["source"])
         op.create_index("ix_raw_observations_stream", "raw_observations", ["stream"])
+        op.create_index("ix_raw_observations_scope", "raw_observations", ["scope"])
         op.create_index("ix_raw_observations_external_id", "raw_observations", ["external_id"])
         op.create_index("ix_raw_observations_payload_hash", "raw_observations", ["payload_hash"])
         op.create_index("ix_raw_observations_subject_id", "raw_observations", ["subject_id"])

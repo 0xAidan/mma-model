@@ -39,13 +39,19 @@ class IngestRun(Base):
 
 
 class RawObservation(Base):
-    """Immutable provenance row for a source-neutral observation payload."""
+    """Immutable provenance row for a source-neutral observation payload.
+
+    Identity includes source/stream/scope/checkpoint_version so profiles cannot
+    collide, while identical replay within the same scope remains a no-op.
+    """
 
     __tablename__ = "raw_observations"
     __table_args__ = (
         UniqueConstraint(
             "source",
             "stream",
+            "scope",
+            "checkpoint_version",
             "external_id",
             "payload_hash",
             name="uq_raw_obs_provenance",
@@ -58,6 +64,8 @@ class RawObservation(Base):
     )
     source: Mapped[str] = mapped_column(String(64), index=True)
     stream: Mapped[str] = mapped_column(String(64), index=True)
+    scope: Mapped[str] = mapped_column(String(128), index=True)
+    checkpoint_version: Mapped[str] = mapped_column(String(64))
     external_id: Mapped[str] = mapped_column(String(128), index=True)
     entity_kind: Mapped[str] = mapped_column(String(64))
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -66,7 +74,8 @@ class RawObservation(Base):
         DateTime(timezone=True), nullable=True
     )
     payload_hash: Mapped[str] = mapped_column(String(64), index=True)
-    raw_ref: Mapped[str] = mapped_column(String(64))
+    # NULL means explicit blob absence; when set must equal a verified payload_hash.
+    raw_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     detail_level: Mapped[str] = mapped_column(String(32), default="partial")
     version_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     schema_version: Mapped[str] = mapped_column(String(32), default="1")

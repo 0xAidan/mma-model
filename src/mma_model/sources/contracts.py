@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DetailLevel(StrEnum):
@@ -39,8 +39,21 @@ class SourceObservationRecord(BaseModel):
     source_updated_at: datetime | None = None
     payload_hash: str = Field(min_length=64, max_length=64)
     raw_ref: str | None = None
+    # When True, raw_ref must be None (explicit blob absence). When False, a verified
+    # content-addressed blob must exist for payload_hash before commit.
+    raw_blob_absent: bool = False
     detail_level: DetailLevel = DetailLevel.PARTIAL
     version_kind: str | None = None
     schema_version: str = "1"
     subject_id: str | None = None
     attributes: Mapping[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_raw_ref_contract(self) -> SourceObservationRecord:
+        if self.raw_blob_absent:
+            if self.raw_ref is not None:
+                raise ValueError("raw_blob_absent=True requires raw_ref=None")
+            return self
+        if self.raw_ref is not None and self.raw_ref != self.payload_hash:
+            raise ValueError("raw_ref must equal payload_hash when a blob is claimed")
+        return self

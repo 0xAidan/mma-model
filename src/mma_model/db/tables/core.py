@@ -165,17 +165,27 @@ class BoutParticipant(Base):
 
 
 class BoutResultVersion(Base):
-    """Event-night vs current result versions; winner must be a bout participant when set."""
+    """Immutable event-night/current result revisions; winner must be a participant when set.
+
+    Corrections append a new ``revision`` under the same ``version_kind``; prior rows
+    are never updated in place.
+    """
 
     __tablename__ = "bout_result_versions"
     __table_args__ = (
-        UniqueConstraint("bout_id", "version_kind", name="uq_bout_result_version_kind"),
+        UniqueConstraint(
+            "bout_id",
+            "version_kind",
+            "revision",
+            name="uq_bout_result_version_revision",
+        ),
         CheckConstraint(
             "winner_fighter_id IS NULL OR winner_fighter_id = fighter_a_id "
             "OR winner_fighter_id = fighter_b_id",
             name="ck_result_winner_is_participant",
         ),
         CheckConstraint("fighter_a_id != fighter_b_id", name="ck_result_distinct_fighters"),
+        CheckConstraint("revision >= 1", name="ck_bout_result_revision_positive"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -183,6 +193,7 @@ class BoutResultVersion(Base):
         String(36), ForeignKey("canonical_bouts.id"), index=True
     )
     version_kind: Mapped[str] = mapped_column(String(32))  # event_night | current
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     fighter_a_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("canonical_fighters.id")
     )

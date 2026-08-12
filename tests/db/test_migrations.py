@@ -239,10 +239,10 @@ def test_distinct_fighters_and_winner_checks(tmp_path: Path) -> None:
             conn.execute(
                 text(
                     "INSERT INTO bout_result_versions "
-                    "(bout_id, version_kind, fighter_a_id, fighter_b_id, winner_fighter_id, "
-                    "result_type, method, ending_round, time_str, effective_at, observed_at, "
-                    "created_at) "
-                    "VALUES ('b1', 'event_night', 'fa', 'fb', 'fc', 'win', 'KO', 1, '1:00', "
+                    "(bout_id, version_kind, revision, fighter_a_id, fighter_b_id, "
+                    "winner_fighter_id, result_type, method, ending_round, time_str, "
+                    "effective_at, observed_at, created_at) "
+                    "VALUES ('b1', 'event_night', 1, 'fa', 'fb', 'fc', 'win', 'KO', 1, '1:00', "
                     ":now, :now, :now)"
                 ),
                 {"now": now},
