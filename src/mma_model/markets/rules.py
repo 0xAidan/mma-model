@@ -31,14 +31,14 @@ from pydantic import (
 SETTLEMENT_FILENAME: Final = "settlement_v1.yaml"
 CONTRACT_ID: Final = "dwcs_settlement"
 EXPECTED_SCHEMA_VERSION: Final = 1
-EXPECTED_CONTRACT_VERSION: Final = "1.2.0"
+EXPECTED_CONTRACT_VERSION: Final = "1.3.0"
 DEFAULT_RULE_SET_ID: Final = "mma_generic"
 # Canonical digest: SHA-256 of json.dumps(..., sort_keys=True,
 # separators=(",", ":"), ensure_ascii=True) over the authoritative YAML document
 # parsed as a plain mapping (packaged mma_model/markets/settlement_v1.yaml).
 # Update only together with an intentional contract_version bump.
 PINNED_SETTLEMENT_HASH: Final = (
-    "7403941cc821e340eaf4bb50e969a6882be19f72460e808038e1567a64993ff4"
+    "1a85424fba26526db471f213be6c822a35ff34bbbd2b67feb40af1d3d779016b"
 )
 
 
@@ -116,6 +116,7 @@ class RuleSourceSpec(_FrozenModel):
 
 class MoneylineRules(_FrozenModel):
     draw: SideEffect
+    technical_draw: SideEffect
     no_contest: SideEffect
     cancellation: SideEffect
     technical_decision: Literal["settle_as_decision"]
@@ -125,22 +126,29 @@ class GoesDistanceRules(_FrozenModel):
     decision_counts_as_goes_distance: bool
     technical_decision_counts_as_goes_distance: bool
     draw_counts_as_goes_distance: bool
+    technical_draw_counts_as_goes_distance: bool
     no_contest: SideEffect
     cancellation: SideEffect
+
+
+DurationPolicy = Literal["full_scheduled", "stoppage_time"]
 
 
 class TotalsRules(_FrozenModel):
     """v1 totals: half-round lines only with elapsed-rounds boundary.
 
-    ``exact_half_result`` encodes the disputed exact-mark policy:
-    ``under`` (Sky Bet / Paddy Power), ``void`` (Bodog), or ``push`` / ``over``.
+    Duration policies are split so ordinary full-distance decisions are not
+    conflated with early technical decision / technical draw stoppages.
     """
 
     half_round_lines: tuple[float, ...]
     half_round_boundary: Literal["elapsed_rounds"]
     round_seconds: int
     exact_half_result: Literal["under", "void", "push", "over"]
-    decision_uses_full_scheduled_duration: bool
+    ordinary_decision_duration: DurationPolicy
+    ordinary_draw_duration: DurationPolicy
+    technical_decision_duration: DurationPolicy
+    technical_draw_duration: DurationPolicy
     no_contest: SideEffect
     cancellation: SideEffect
 
@@ -168,6 +176,7 @@ class TotalsRules(_FrozenModel):
 class MethodRules(_FrozenModel):
     technical_decision_counts_as: Literal["decision"]
     draw: SideEffect
+    technical_draw: SideEffect
     no_contest: SideEffect
     cancellation: SideEffect
 
@@ -176,6 +185,7 @@ class ExactRoundRules(_FrozenModel):
     decision: SideEffect
     draw: SideEffect
     technical_decision: SideEffect
+    technical_draw: SideEffect
     no_contest: SideEffect
     cancellation: SideEffect
 

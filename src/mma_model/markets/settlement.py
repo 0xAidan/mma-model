@@ -33,6 +33,7 @@ MethodLabel = Literal[
     "decision",
     "other_stoppage",
     "technical_decision",
+    "technical_draw",
 ]
 
 SUPPORTED_SCHEDULED_ROUNDS: frozenset[int] = frozenset({3, 5})
@@ -57,8 +58,14 @@ class BoutSettlementFacts:
 
     Totals half-round boundaries require fight duration. Prefer
     ``ending_round`` + ``elapsed_seconds_in_round``, or
-    ``total_elapsed_seconds``. Decisions/draws may omit clocks when the active
-    rule set uses full scheduled duration.
+    ``total_elapsed_seconds``.
+
+    Ordinary full-distance ``decision`` / scorecard ``draw`` may omit clocks
+    when the active totals policy is ``full_scheduled``. Technical decision and
+    technical draw require stoppage clocks when policy is ``stoppage_time``.
+
+    Represent an early technical draw as ``result_class="draw"`` with
+    ``method="technical_draw"`` (never as an ordinary full-distance draw).
     """
 
     scheduled_rounds: int
@@ -272,13 +279,24 @@ def validate_settlement_facts(
             raise SettlementFactsError("cancelled bout cannot have method")
         return
 
+    if facts.method == "technical_draw":
+        if facts.result_class not in {None, "draw"}:
+            raise SettlementFactsError(
+                "technical_draw requires result_class='draw'"
+            )
+        if facts.winner_side is not None:
+            raise SettlementFactsError("technical_draw cannot have winner_side")
+
     if facts.result_class == "draw":
         if facts.winner_side is not None:
             raise SettlementFactsError("draw cannot have winner_side")
-        if facts.method in {"ko_tko", "submission", "other_stoppage"}:
+        if facts.method in {"ko_tko", "submission", "other_stoppage", "technical_decision"}:
             raise SettlementFactsError(
-                f"draw cannot have finish method {facts.method!r}"
+                f"draw cannot have finish/decisive method {facts.method!r}"
             )
+
+    if facts.result_class == "decisive" and facts.method == "technical_draw":
+        raise SettlementFactsError("decisive result cannot use technical_draw method")
 
     if facts.result_class == "no_contest" and facts.winner_side is not None:
         raise SettlementFactsError("no_contest cannot have winner_side")
@@ -306,22 +324,56 @@ def _validate_selection(
             )
 
 
+def _duration_policy_for_facts(
+    facts: BoutSettlementFacts,
+    *,
+    ordinary_decision_duration: str,
+    ordinary_draw_duration: str,
+    technical_decision_duration: str,
+    technical_draw_duration: str,
+) -> str | None:
+    """Return the applicable totals duration policy, or None if unknown."""
+    if facts.method == "technical_draw" or (
+        facts.result_class == "draw" and facts.method == "technical_draw"
+    ):
+        return technical_draw_duration
+    if facts.method == "technical_decision" and facts.result_class == "decisive":
+        return technical_decision_duration
+    if facts.method == "decision" and facts.result_class == "decisive":
+        return ordinary_decision_duration
+    if facts.result_class == "draw" and facts.method in {None, "decision"}:
+        return ordinary_draw_duration
+    return None
+
+
 def resolve_total_elapsed_seconds(
     facts: BoutSettlementFacts,
     *,
     round_seconds: int,
-    decision_uses_full_scheduled_duration: bool,
+    ordinary_decision_duration: str,
+    ordinary_draw_duration: str,
+    technical_decision_duration: str,
+    technical_draw_duration: str,
 ) -> int | None:
     """Resolve fight duration in seconds, or None when clocks are insufficient."""
     if facts.total_elapsed_seconds is not None:
         return facts.total_elapsed_seconds
     if facts.ending_round is not None and facts.elapsed_seconds_in_round is not None:
         return (facts.ending_round - 1) * round_seconds + facts.elapsed_seconds_in_round
-    if decision_uses_full_scheduled_duration and not facts.cancelled:
-        if facts.result_class == "draw":
-            return facts.scheduled_rounds * round_seconds
-        if facts.method in {"decision", "technical_decision"} and facts.result_class == "decisive":
-            return facts.scheduled_rounds * round_seconds
+
+    if facts.cancelled:
+        return None
+
+    policy = _duration_policy_for_facts(
+        facts,
+        ordinary_decision_duration=ordinary_decision_duration,
+        ordinary_draw_duration=ordinary_draw_duration,
+        technical_decision_duration=technical_decision_duration,
+        technical_draw_duration=technical_draw_duration,
+    )
+    if policy == "full_scheduled":
+        return facts.scheduled_rounds * round_seconds
+    # stoppage_time (or unknown) without explicit clocks → unresolved upstream
     return None
 
 
@@ -341,6 +393,14 @@ def _settle_moneyline(
         return _decision(
             _side_effect_to_result(rules.no_contest),
             "no_contest",
+            rule_set,
+        )
+    if facts.method == "technical_draw" or (
+        facts.result_class == "draw" and facts.method == "technical_draw"
+    ):
+        return _decision(
+            _side_effect_to_result(rules.technical_draw),
+            "technical_draw",
             rule_set,
         )
     if facts.result_class == "draw":
@@ -370,11 +430,23 @@ def _distance_realized(
     rules = rule_set.goes_distance
     method = facts.method
     if method == "technical_decision":
-        return "goes_distance" if rules.technical_decision_counts_as_goes_distance else None
+        return (
+            "goes_distance"
+            if rules.technical_decision_counts_as_goes_distance
+            else "inside_distance"
+        )
+    if method == "technical_draw" or (
+        facts.result_class == "draw" and method == "technical_draw"
+    ):
+        return (
+            "goes_distance"
+            if rules.technical_draw_counts_as_goes_distance
+            else "inside_distance"
+        )
     if method == "decision":
-        return "goes_distance" if rules.decision_counts_as_goes_distance else None
+        return "goes_distance" if rules.decision_counts_as_goes_distance else "inside_distance"
     if facts.result_class == "draw":
-        return "goes_distance" if rules.draw_counts_as_goes_distance else None
+        return "goes_distance" if rules.draw_counts_as_goes_distance else "inside_distance"
     if method in {"ko_tko", "submission", "other_stoppage"}:
         return "inside_distance"
     return None
@@ -442,14 +514,17 @@ def _settle_totals(
     total_seconds = resolve_total_elapsed_seconds(
         facts,
         round_seconds=rules.round_seconds,
-        decision_uses_full_scheduled_duration=rules.decision_uses_full_scheduled_duration,
+        ordinary_decision_duration=rules.ordinary_decision_duration,
+        ordinary_draw_duration=rules.ordinary_draw_duration,
+        technical_decision_duration=rules.technical_decision_duration,
+        technical_draw_duration=rules.technical_draw_duration,
     )
     if total_seconds is None:
         return _decision(
             SettlementResult.UNRESOLVED,
             "missing fight duration for totals boundary "
             "(need ending_round+elapsed_seconds_in_round, total_elapsed_seconds, "
-            "or decision/draw full-distance duration)",
+            "or a full_scheduled ordinary decision/draw policy)",
             rule_set,
         )
 
@@ -519,6 +594,14 @@ def _settle_method_family(
             "no_contest",
             rule_set,
         )
+    if facts.method == "technical_draw" or (
+        facts.result_class == "draw" and facts.method == "technical_draw"
+    ):
+        return _decision(
+            _side_effect_to_result(rules.technical_draw),
+            "technical_draw",
+            rule_set,
+        )
     if facts.result_class == "draw":
         return _decision(_side_effect_to_result(rules.draw), "draw", rule_set)
     method = _normalize_method(
@@ -569,6 +652,14 @@ def _settle_exact_round(
         return _decision(
             _side_effect_to_result(rules.no_contest),
             "no_contest",
+            rule_set,
+        )
+    if facts.method == "technical_draw" or (
+        facts.result_class == "draw" and facts.method == "technical_draw"
+    ):
+        return _decision(
+            _side_effect_to_result(rules.technical_draw),
+            "technical_draw",
             rule_set,
         )
     if facts.result_class == "draw":

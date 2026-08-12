@@ -94,6 +94,8 @@ def test_goes_distance_and_inside_distance() -> None:
     assert settle(goes, draw).result is SettlementResult.WIN
     assert settle(inside, draw).result is SettlementResult.LOSS
 
+    # Early technical decision ends before scheduled rounds → inside_distance
+    # (Sky/Paddy/bet365/Bodog Yes requires full stated rounds).
     tech = BoutSettlementFacts(
         scheduled_rounds=3,
         result_class="decisive",
@@ -102,7 +104,44 @@ def test_goes_distance_and_inside_distance() -> None:
         ending_round=2,
         elapsed_seconds_in_round=90,
     )
-    assert settle(goes, tech).result is SettlementResult.WIN
+    assert settle(goes, tech).result is SettlementResult.LOSS
+    assert settle(inside, tech).result is SettlementResult.WIN
+
+
+def test_goes_distance_full_distance_decision_still_yes() -> None:
+    goes = MarketSelection(
+        family=MarketFamily.GOES_DISTANCE, outcome=OutcomeKey.GOES_DISTANCE
+    )
+    inside = MarketSelection(
+        family=MarketFamily.GOES_DISTANCE, outcome=OutcomeKey.INSIDE_DISTANCE
+    )
+    decision = BoutSettlementFacts(
+        scheduled_rounds=5,
+        result_class="decisive",
+        winner_side="b",
+        method="decision",
+        ending_round=5,
+    )
+    assert settle(goes, decision).result is SettlementResult.WIN
+    assert settle(inside, decision).result is SettlementResult.LOSS
+
+
+def test_goes_distance_early_technical_draw_is_inside() -> None:
+    goes = MarketSelection(
+        family=MarketFamily.GOES_DISTANCE, outcome=OutcomeKey.GOES_DISTANCE
+    )
+    inside = MarketSelection(
+        family=MarketFamily.GOES_DISTANCE, outcome=OutcomeKey.INSIDE_DISTANCE
+    )
+    tech_draw = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="draw",
+        method="technical_draw",
+        ending_round=1,
+        elapsed_seconds_in_round=200,
+    )
+    assert settle(goes, tech_draw).result is SettlementResult.LOSS
+    assert settle(inside, tech_draw).result is SettlementResult.WIN
 
 
 @pytest.mark.parametrize(
@@ -195,6 +234,74 @@ def test_totals_decision_settles_as_full_distance() -> None:
     )
     assert settle(over_25, decision).result is SettlementResult.WIN
     assert settle(under_25, decision).result is SettlementResult.LOSS
+
+
+def test_totals_ordinary_draw_settles_as_full_distance() -> None:
+    draw = BoutSettlementFacts(scheduled_rounds=3, result_class="draw")
+    over_25 = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=2.5
+    )
+    under_25 = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=2.5
+    )
+    assert settle(over_25, draw).result is SettlementResult.WIN
+    assert settle(under_25, draw).result is SettlementResult.LOSS
+
+
+def test_totals_technical_decision_without_clocks_unresolved() -> None:
+    """Tech decision must not inherit full_scheduled inventing stoppage time."""
+    facts = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="decisive",
+        winner_side="a",
+        method="technical_decision",
+    )
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    assert settle(over, facts).result is SettlementResult.UNRESOLVED
+
+
+def test_totals_early_technical_draw_uses_stoppage_clocks() -> None:
+    before = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="draw",
+        method="technical_draw",
+        ending_round=2,
+        elapsed_seconds_in_round=100,
+    )
+    after = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="draw",
+        method="technical_draw",
+        ending_round=2,
+        elapsed_seconds_in_round=200,
+    )
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
+    )
+    assert settle(over, before).result is SettlementResult.LOSS
+    assert settle(under, before).result is SettlementResult.WIN
+    assert settle(over, after).result is SettlementResult.WIN
+    assert settle(under, after).result is SettlementResult.LOSS
+
+
+def test_moneyline_and_method_technical_draw_void() -> None:
+    tech_draw = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="draw",
+        method="technical_draw",
+        ending_round=2,
+        elapsed_seconds_in_round=90,
+    )
+    assert settle(_ml(OutcomeKey.FIGHTER_A), tech_draw).result is SettlementResult.VOID
+    method = MarketSelection(family=MarketFamily.METHOD, outcome=OutcomeKey.DECISION)
+    assert settle(method, tech_draw).result is SettlementResult.VOID
+    exact = MarketSelection(family=MarketFamily.EXACT_ROUND, outcome=OutcomeKey.ROUND_2)
+    assert settle(exact, tech_draw).result is SettlementResult.LOSS
 
 
 def test_totals_missing_duration_unresolved() -> None:
@@ -395,7 +502,7 @@ def test_settlement_is_versioned_hashed_and_deterministic() -> None:
     second = settle(_ml(OutcomeKey.FIGHTER_A), facts)
     assert first == second
     assert first.rule_set_id == "mma_generic"
-    assert first.rule_set_version == "1.2.0"
+    assert first.rule_set_version == "1.3.0"
     assert first.content_hash == PINNED_SETTLEMENT_HASH
     assert first.reason
 
@@ -428,11 +535,11 @@ def test_provisional_bet365_requires_allow_flag() -> None:
 def test_default_rules_are_externally_sourced_public_house_rules() -> None:
     contract = load_settlement_rules()
     assert contract.contract_id == "dwcs_settlement"
-    assert contract.contract_version == "1.2.0"
+    assert contract.contract_version == "1.3.0"
     assert contract.default_rule_set_id == "mma_generic"
     generic = contract.rule_sets["mma_generic"]
     assert generic.status.value == "externally_sourced"
-    assert "not a claim of universal" in generic.source.citation.lower()
+    assert "not universal sportsbook rules" in generic.source.citation.lower()
     https_refs = [r for r in generic.source.references if r.locator.startswith("https://")]
     assert https_refs
     assert "bet365_mma" in contract.rule_sets

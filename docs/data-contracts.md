@@ -102,9 +102,9 @@ immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 | **Authoritative rules bytes** | Packaged `mma_model/markets/settlement_v1.yaml` |
 | **Plan-visible path** | `config/markets/settlement_v1.yaml` (symlink to packaged file) |
 | **Loader** | `mma_model.markets.rules.load_settlement_rules` / `get_rule_set` |
-| **Contract id / version** | `dwcs_settlement` / `1.2.0` |
+| **Contract id / version** | `dwcs_settlement` / `1.3.0` |
 | **Pinned digest** | `PINNED_SETTLEMENT_HASH` in `rules.py` (SHA-256 of canonical JSON) |
-| **Default rule set** | `mma_generic` `1.2.0` (`externally_sourced`) |
+| **Default rule set** | `mma_generic` `1.3.0` (`externally_sourced`) |
 | **Source notes** | `docs/research/mma-settlement-sources.md` |
 
 ### v1 market families and outcomes
@@ -144,14 +144,23 @@ rule-set id/version, and the contract `content_hash`.
 `elapsed_rounds > line`; under when `elapsed_rounds < line`; at exact equality
 the default (`mma_generic`) grades **under** per Sky Bet / Paddy Power public
 rules. Bodog’s exact-half **void** is the `bodog_mma` override. Duration comes
-from `ending_round` + `elapsed_seconds_in_round`, or `total_elapsed_seconds`, or
-full scheduled duration for decisions/draws. Partial clock fields are checked
-for consistency (including round-boundary dual forms); conflicts raise
-`SettlementFactsError`. Missing clocks → `unresolved` (never invent a grade).
-Whole-number totals lines are not offered in v1.
+from `ending_round` + `elapsed_seconds_in_round`, or `total_elapsed_seconds`.
+Ordinary full-distance `decision` / scorecard `draw` may omit clocks when
+policy is `full_scheduled`. Technical decision and technical draw use
+`stoppage_time` (Bodog explicit; generic refuses to invent scheduled
+duration). Represent technical draw as `result_class="draw"` +
+`method="technical_draw"`. Partial clock fields are checked for consistency
+(including round-boundary dual forms); conflicts raise `SettlementFactsError`.
+Missing required clocks → `unresolved` (never invent a grade). Whole-number
+totals lines are not offered in v1.
 
-**Moneyline draw:** default is `void` (Sky Bet / Paddy Power / Bodog “no
-action”), not push.
+**Moneyline draw / technical draw:** default is `void` (Sky Bet / Paddy Power /
+Bodog “no action”), not push.
+
+**Goes the distance:** ordinary decision and full-distance draw count as
+`goes_distance`. Early technical decision / technical draw count as
+`inside_distance` (Sky/Paddy “concluded before stated rounds”; bet365/Bodog
+require full scheduled rounds for Yes).
 
 **Governance:** `mma_generic` and `bodog_mma` are `externally_sourced` and must
 cite at least one public `https://` house-rules page with an access date.

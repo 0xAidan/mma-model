@@ -14,7 +14,7 @@ from mma_model.markets.rules import PINNED_SETTLEMENT_HASH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PINNED_DIGEST_LITERAL = (
-    "7403941cc821e340eaf4bb50e969a6882be19f72460e808038e1567a64993ff4"
+    "1a85424fba26526db471f213be6c822a35ff34bbbd2b67feb40af1d3d779016b"
 )
 
 

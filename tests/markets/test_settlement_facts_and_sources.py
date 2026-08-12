@@ -156,6 +156,75 @@ def test_bodog_override_voids_exact_half() -> None:
     assert settle(under, facts, rule_set=bodog).result is SettlementResult.VOID
 
 
+def test_bodog_technical_decision_totals_use_stoppage_not_schedule() -> None:
+    """Bodog: tech decision/draw totals settle from stoppage point."""
+    bodog = get_rule_set("bodog_mma")
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
+    )
+    before_half = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="decisive",
+        winner_side="a",
+        method="technical_decision",
+        ending_round=2,
+        elapsed_seconds_in_round=100,
+    )
+    after_half = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="decisive",
+        winner_side="a",
+        method="technical_decision",
+        ending_round=2,
+        elapsed_seconds_in_round=200,
+    )
+    # Must NOT invent full 3-round schedule (which would always be over 1.5).
+    assert settle(over, before_half, rule_set=bodog).result is SettlementResult.LOSS
+    assert settle(under, before_half, rule_set=bodog).result is SettlementResult.WIN
+    assert settle(over, after_half, rule_set=bodog).result is SettlementResult.WIN
+    assert settle(under, after_half, rule_set=bodog).result is SettlementResult.LOSS
+
+    # Ordinary full-distance decision still uses scheduled duration without clocks.
+    ordinary = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="decisive",
+        winner_side="b",
+        method="decision",
+    )
+    assert settle(over, ordinary, rule_set=bodog).result is SettlementResult.WIN
+
+
+def test_bodog_technical_draw_totals_use_stoppage_not_schedule() -> None:
+    bodog = get_rule_set("bodog_mma")
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
+    )
+    before_half = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="draw",
+        method="technical_draw",
+        ending_round=2,
+        elapsed_seconds_in_round=90,
+    )
+    after_half = BoutSettlementFacts(
+        scheduled_rounds=3,
+        result_class="draw",
+        method="technical_draw",
+        ending_round=2,
+        elapsed_seconds_in_round=180,
+    )
+    assert settle(over, before_half, rule_set=bodog).result is SettlementResult.LOSS
+    assert settle(under, before_half, rule_set=bodog).result is SettlementResult.WIN
+    assert settle(over, after_half, rule_set=bodog).result is SettlementResult.WIN
+    assert settle(under, after_half, rule_set=bodog).result is SettlementResult.LOSS
+
+
 def test_default_is_not_provisional() -> None:
     contract = default_settlement_rules()
     assert (

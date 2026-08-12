@@ -26,7 +26,7 @@ def test_visible_config_matches_packaged_bytes() -> None:
     assert packaged.is_file()
     assert visible.is_file()
     assert packaged.read_bytes() == visible.read_bytes()
-    assert EXPECTED_CONTRACT_VERSION == "1.2.0"
+    assert EXPECTED_CONTRACT_VERSION == "1.3.0"
 
 
 def test_pinned_digest_matches_packaged_payload() -> None:
