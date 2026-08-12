@@ -37,6 +37,7 @@ AccessStatus = Literal[
     "not_configured",
     "auth_failed",
     "entitlement_blocked",
+    "quota_exceeded",
     "ok",
     "request_failed",
 ]
@@ -151,6 +152,7 @@ def _as_access_status(value: Any) -> AccessStatus:
         "not_configured",
         "auth_failed",
         "entitlement_blocked",
+        "quota_exceeded",
         "ok",
         "request_failed",
     }
@@ -346,19 +348,160 @@ def classify_provider_access(
     api_key: str | None,
     http_status: int | None,
     body: Mapping[str, Any] | None,
+    authenticated_ok_prior: bool = False,
 ) -> AccessStatus:
     if not api_key:
         return "not_configured"
     if http_status is None:
         return "request_failed"
+    if http_status == 429:
+        return "quota_exceeded"
     if http_status in {401, 403}:
         text = json.dumps(body or {}).lower()
-        if "tier" in text or "entitlement" in text or "plan" in text or "access" in text:
+        if (
+            authenticated_ok_prior
+            or "tier" in text
+            or "entitlement" in text
+            or "plan" in text
+            or "access" in text
+        ):
             return "entitlement_blocked"
         return "auth_failed"
     if http_status >= 400:
         return "request_failed"
     return "ok"
+
+
+def is_dwcs_provider_event_name(name: str) -> bool:
+    """Strict DWCS event-name matcher; avoids generic 'contender' false positives."""
+    text = " ".join(str(name or "").lower().split())
+    if not text:
+        return False
+    if "dwcs" in text:
+        return True
+    if "contender series" in text:
+        return True
+    if "dana white" in text and "contender" in text:
+        return True
+    return False
+
+
+def extract_unique_bout_dates(bouts: Sequence[Mapping[str, Any]]) -> list[str]:
+    dates: set[str] = set()
+    for bout in bouts:
+        raw = bout.get("occurrence_timestamp") or bout.get("publication_timestamp")
+        if not raw:
+            continue
+        try:
+            dates.add(_parse_iso_utc(str(raw)).date().isoformat())
+        except ValueError:
+            continue
+    return sorted(dates)
+
+
+def _rate_limit_sleep_seconds(
+    headers: Mapping[str, str] | None,
+    *,
+    for_quota_backoff: bool = False,
+) -> float:
+    """Compute a polite delay from BALLDONTLIE rate-limit headers."""
+    if not headers:
+        return 0.0
+    lowered = {str(key).lower(): str(value) for key, value in headers.items()}
+    try:
+        limit = int(float(lowered.get("x-ratelimit-limit") or "0"))
+    except ValueError:
+        limit = 0
+    try:
+        remaining = int(float(lowered.get("x-ratelimit-remaining") or "0"))
+    except ValueError:
+        remaining = 0
+    if limit <= 0:
+        return 0.0
+    if remaining <= 0:
+        return 60.0 if for_quota_backoff else 0.0
+    return 60.0 / max(limit, 1)
+
+
+def call_with_quota_retries(
+    *,
+    request_get: Any,
+    path: str,
+    params: Mapping[str, Any] | None = None,
+    max_retries_on_quota: int = 6,
+    sleep_fn: Any = time.sleep,
+    quota_sleep_seconds: float = 60.0,
+) -> tuple[int, Any, dict[str, str]]:
+    """Invoke ``request_get`` with bounded backoff on HTTP 429."""
+    attempt = 0
+    while True:
+        status, body, headers = request_get(path=path, params=params)
+        if int(status or 0) != 429 or attempt >= max_retries_on_quota:
+            return status, body, headers if isinstance(headers, Mapping) else {}
+        attempt += 1
+        delay = _rate_limit_sleep_seconds(
+            headers if isinstance(headers, Mapping) else None,
+            for_quota_backoff=True,
+        )
+        sleep_fn(max(delay, quota_sleep_seconds))
+
+
+def paginate_balldontlie_get(
+    *,
+    request_get: Any,
+    path: str,
+    base_params: Mapping[str, Any],
+    max_pages: int = 50,
+    sleep_fn: Any = time.sleep,
+    max_retries_on_quota: int = 6,
+) -> tuple[list[dict[str, Any]], int | None, dict[str, Any]]:
+    """Follow BALLDONTLIE cursor pagination; return sanitized rows only.
+
+    ``request_get`` must return ``(http_status, body, headers)``. Access
+    classification stays with the caller so entitlement/quota semantics remain
+    consistent with prior successful auth in the same probe.
+    """
+    del max_retries_on_quota  # retries belong in request_get / call_with_quota_retries
+    rows: list[dict[str, Any]] = []
+    cursor: Any = None
+    page_count = 0
+    truncated = False
+    last_status: int | None = None
+    while page_count < max_pages:
+        params = dict(base_params)
+        if cursor is not None:
+            params["cursor"] = cursor
+        status, body, headers = request_get(path=path, params=params)
+        last_status = int(status) if status is not None else None
+        page_count += 1
+        if last_status != 200 or not isinstance(body, Mapping):
+            break
+        data = body.get("data")
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, Mapping):
+                    rows.append(dict(item))
+        meta = body.get("meta") if isinstance(body.get("meta"), Mapping) else {}
+        next_cursor = meta.get("next_cursor")
+        delay = _rate_limit_sleep_seconds(
+            headers if isinstance(headers, Mapping) else None
+        )
+        if delay and next_cursor:
+            sleep_fn(delay)
+        if not next_cursor or not isinstance(data, list) or not data:
+            break
+        cursor = next_cursor
+    else:
+        truncated = True
+    return (
+        rows,
+        last_status,
+        {
+            "page_count": page_count,
+            "truncated": truncated,
+            "row_count": len(rows),
+        },
+    )
 
 
 def classify_observation_status(
@@ -367,7 +510,12 @@ def classify_observation_status(
     matched: bool,
     request_failed: bool,
 ) -> ObservationStatus:
-    if access_status in {"not_configured", "auth_failed", "entitlement_blocked"}:
+    if access_status in {
+        "not_configured",
+        "auth_failed",
+        "entitlement_blocked",
+        "quota_exceeded",
+    }:
         return "unknown"
     if request_failed or access_status == "request_failed":
         return "request_failed"
@@ -1566,96 +1714,219 @@ def probe_balldontlie_live(
     difficult_identities: Sequence[Mapping[str, Any]],
     timeout_sec: float = 20.0,
     max_requests: int = 120,
+    sleep_fn: Any = time.sleep,
 ) -> dict[str, Any]:
     """Measured live probe. Returns sanitized metrics only (no full payloads)."""
     headers = {"Authorization": api_key}
     request_count = 0
     latencies: list[float] = []
-    events_by_year: dict[int, list[dict[str, Any]]] = {}
     access: AccessStatus = "ok"
     error: str | None = None
+    authenticated_ok_prior = False
+    last_headers: dict[str, str] = {}
 
-    def _get(path: str, params: Mapping[str, Any] | None = None) -> tuple[int, Any]:
-        nonlocal request_count, access, error
-        if request_count >= max_requests:
-            return 429, {"error": "local_max_requests"}
-        request_count += 1
-        started = time.perf_counter()
-        try:
-            with httpx.Client(timeout=timeout_sec) as client:
-                response = client.get(
-                    f"{BALLDONTLIE_BASE}{path}",
-                    headers=headers,
-                    params=dict(params or {}),
-                )
-            latencies.append((time.perf_counter() - started) * 1000.0)
-            try:
-                body = response.json()
-            except ValueError:
-                body = None
-            access = classify_provider_access(
-                api_key=api_key,
-                http_status=response.status_code,
-                body=body if isinstance(body, Mapping) else None,
-            )
-            if access != "ok":
-                error = f"http_{response.status_code}"
-            return response.status_code, body
-        except httpx.HTTPError as exc:
-            access = "request_failed"
-            error = type(exc).__name__
-            return 0, None
-
-    years = sorted(
-        {int(bout["calendar_year"]) for bout in bouts if bout.get("calendar_year") is not None}
-    )
-    for year in years:
-        _status, body = _get("/events", {"year": year, "per_page": 100})
-        if access != "ok":
-            break
-        data = body.get("data") if isinstance(body, Mapping) else None
-        if isinstance(data, list):
-            events_by_year[year] = [dict(item) for item in data if isinstance(item, Mapping)]
-
-    if access != "ok":
-        return {
+    def _blocked_payload(
+        *,
+        reason: str,
+        difficult_identity_results: Sequence[Mapping[str, Any]] | None = None,
+        provider_event_count: int = 0,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "access_status": access,
-            "error": error,
+            "error": error or reason,
             "request_count": request_count,
             "latencies_ms": latencies,
             "metrics_status": "blocked" if access != "not_configured" else "unknown",
+            "provider_dwcs_named_event_count": provider_event_count,
+            "probe_notes": {
+                "reason": reason,
+                "rate_limit_limit_header": last_headers.get("x-ratelimit-limit"),
+                "dwcs_event_name_filter": "strict_dana_white_contender_or_dwcs",
+                "event_discovery": "manifest_occurrence_dates_with_cursor_pagination",
+                "false_positive_rejected_example": "Full Contact Contender",
+            },
         }
+        if difficult_identity_results is not None:
+            payload["difficult_identity_coverage"] = summarize_difficult_identity_probe(
+                difficult_identity_results,
+                expected_size=DIFFICULT_IDENTITY_SAMPLE_SIZE,
+            )
+        return payload
 
-    provider_fights: list[dict[str, Any]] = []
-    years_with_dwcs_named = 0
-    for year, events in events_by_year.items():
-        year_had_dwcs_named = False
-        for event in events:
+    def _get(
+        path: str, params: Mapping[str, Any] | None = None
+    ) -> tuple[int, Any, dict[str, str]]:
+        nonlocal request_count, access, error, authenticated_ok_prior, last_headers
+
+        def _once(
+            *, path: str, params: Mapping[str, Any] | None = None
+        ) -> tuple[int, Any, dict[str, str]]:
+            nonlocal request_count, access, error, authenticated_ok_prior, last_headers
             if request_count >= max_requests:
-                break
+                access = "quota_exceeded"
+                error = "local_max_requests"
+                return 429, {"error": "local_max_requests"}, dict(last_headers)
+            pre_delay = _rate_limit_sleep_seconds(last_headers)
+            if pre_delay and request_count > 0:
+                sleep_fn(pre_delay)
+            request_count += 1
+            started = time.perf_counter()
+            try:
+                with httpx.Client(timeout=timeout_sec) as client:
+                    response = client.get(
+                        f"{BALLDONTLIE_BASE}{path}",
+                        headers=headers,
+                        params=dict(params or {}),
+                    )
+                latencies.append((time.perf_counter() - started) * 1000.0)
+                last_headers = {k.lower(): v for k, v in response.headers.items()}
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                access = classify_provider_access(
+                    api_key=api_key,
+                    http_status=response.status_code,
+                    body=body if isinstance(body, Mapping) else None,
+                    authenticated_ok_prior=authenticated_ok_prior,
+                )
+                if access == "ok":
+                    authenticated_ok_prior = True
+                else:
+                    error = f"http_{response.status_code}"
+                return response.status_code, body, last_headers
+            except httpx.HTTPError as exc:
+                access = "request_failed"
+                error = type(exc).__name__
+                return 0, None, dict(last_headers)
+
+        return call_with_quota_retries(
+            request_get=_once,
+            path=path,
+            params=params,
+            max_retries_on_quota=6,
+            sleep_fn=sleep_fn,
+        )
+
+    # Discover provider events on each frozen-manifest bout date, then keep
+    # only strict DWCS-named cards. Cursor-paginate when a date overflows.
+    provider_events: list[dict[str, Any]] = []
+    seen_event_ids: set[str] = set()
+    years_seen: set[int] = set()
+    for day in extract_unique_bout_dates(bouts):
+        if access != "ok" or request_count >= max_requests:
+            break
+        rows, _status, _meta = paginate_balldontlie_get(
+            request_get=lambda path, params=None: _get(path, params),
+            path="/events",
+            base_params={"date": day, "per_page": 100},
+            max_pages=5,
+            sleep_fn=sleep_fn,
+        )
+        if access != "ok":
+            break
+        for event in rows:
+            if not is_dwcs_provider_event_name(str(event.get("name") or "")):
+                continue
             event_id = event.get("id")
             if event_id is None:
                 continue
-            name = str(event.get("name") or "")
-            if "contender" not in name.lower() and "dwcs" not in name.lower():
+            key = str(event_id)
+            if key in seen_event_ids:
                 continue
-            year_had_dwcs_named = True
-            _status, body = _get("/fights", {"event_ids[]": event_id, "per_page": 100})
+            seen_event_ids.add(key)
+            provider_events.append(dict(event))
+            try:
+                years_seen.add(int(day[:4]))
+            except ValueError:
+                pass
+
+    years_with_dwcs_named = len(years_seen)
+    if access != "ok":
+        return _blocked_payload(
+            reason=str(access),
+            provider_event_count=len(provider_events),
+        )
+
+    provider_fights: list[dict[str, Any]] = []
+    fights_entitlement_blocked = False
+    for event in provider_events:
+        if request_count >= max_requests:
+            access = "quota_exceeded"
+            error = "local_max_requests"
+            break
+        if access != "ok":
+            break
+        event_id = event.get("id")
+        if event_id is None:
+            continue
+        rows, _status, _meta = paginate_balldontlie_get(
+            request_get=lambda path, params=None: _get(path, params),
+            path="/fights",
+            base_params={"event_ids[]": event_id, "per_page": 100},
+            max_pages=5,
+            sleep_fn=sleep_fn,
+        )
+        if access == "entitlement_blocked":
+            fights_entitlement_blocked = True
+            break
+        if access != "ok":
+            break
+        for item in rows:
+            row = dict(item)
+            row["_event_year"] = str(event.get("date") or "")[:4]
+            if "date" not in row and event.get("date"):
+                row["date"] = event.get("date")
+            provider_fights.append(row)
+
+    # Free-tier /fighters remains usable after a fights entitlement block.
+    if fights_entitlement_blocked or access == "entitlement_blocked":
+        fights_entitlement_blocked = True
+        access = "ok"
+        error = None
+    elif access != "ok":
+        return _blocked_payload(
+            reason=str(access),
+            provider_event_count=len(provider_events),
+        )
+
+    sample_stats: list[dict[str, Any]] | None = None
+    # Required-feature stat contract needs fight_stats (GOAT). Probe a small
+    # deterministic sample only when fights were retrieved.
+    if provider_fights and not fights_entitlement_blocked:
+        sample_stats = []
+        for fight in provider_fights[:3]:
+            if request_count >= max_requests or access != "ok":
+                break
+            fight_id = fight.get("id")
+            if fight_id is None:
+                continue
+            _status, body, _headers = _get(
+                "/fight_stats",
+                {"fight_ids[]": fight_id, "per_page": 100},
+            )
+            if access == "entitlement_blocked":
+                # Stats tier missing: keep measured fights but leave required
+                # features unknown via empty/None sample semantics below.
+                sample_stats = None
+                access = "ok"
+                error = None
+                break
             if access != "ok":
                 break
             data = body.get("data") if isinstance(body, Mapping) else None
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, Mapping):
-                        row = dict(item)
-                        row["_event_year"] = year
-                        if "date" not in row and event.get("date"):
-                            row["date"] = event.get("date")
-                        provider_fights.append(row)
-        if year_had_dwcs_named:
-            years_with_dwcs_named += 1
-        if access != "ok":
-            break
+                        sample_stats.append(
+                            {
+                                "significant_strikes_landed": item.get(
+                                    "significant_strikes_landed"
+                                ),
+                                "takedowns_landed": item.get("takedowns_landed"),
+                                "control_time_seconds": item.get("control_time_seconds"),
+                            }
+                        )
 
     difficult_results: list[dict[str, Any]] = []
     for entrant in difficult_identities:
@@ -1668,10 +1939,22 @@ def probe_balldontlie_live(
                 }
             )
             continue
-        _status, body = _get(
+        _status, body, _headers = _get(
             "/fighters",
             {"search": entrant["display_name"], "per_page": 5},
         )
+        if access == "quota_exceeded":
+            difficult_results.append(
+                {
+                    "entrant_key": entrant.get("entrant_key"),
+                    "status": "unknown",
+                    "reason": "quota_exceeded",
+                }
+            )
+            # Mark remaining as unknown without further HTTP until budget resets.
+            access = "ok"
+            error = None
+            continue
         if access != "ok":
             difficult_results.append(
                 {
@@ -1699,11 +1982,28 @@ def probe_balldontlie_live(
             }
         )
 
+    if fights_entitlement_blocked:
+        access = "entitlement_blocked"
+        error = "fights_endpoint_entitlement_blocked"
+        return _blocked_payload(
+            reason="fights_endpoint_entitlement_blocked",
+            difficult_identity_results=difficult_results,
+            provider_event_count=len(provider_events),
+        )
+    if access == "quota_exceeded" and not provider_fights:
+        return _blocked_payload(
+            reason="quota_exceeded_before_fight_measurement",
+            difficult_identity_results=difficult_results,
+            provider_event_count=len(provider_events),
+        )
+
+    # PIT: do not invent pass from HTTP success alone. Leave reconstruction /
+    # revision unknown unless a future probe supplies explicit evidence.
     measured = measure_balldontlie_from_observations(
         bouts=bouts,
         provider_fights=provider_fights,
         difficult_identity_results=difficult_results,
-        sample_stats=None,
+        sample_stats=sample_stats,
         latencies_ms=latencies,
         request_count=request_count,
         pre_fight_reconstruction_status=None,
@@ -1719,11 +2019,18 @@ def probe_balldontlie_live(
     measured["error"] = error
     measured["request_count"] = request_count
     measured["latencies_ms"] = latencies
+    measured["provider_dwcs_named_event_count"] = len(provider_events)
     measured["provider_dwcs_named_fight_count"] = len(provider_fights)
+    measured["rate_limit_limit_header"] = last_headers.get("x-ratelimit-limit")
     measured["crosswalk_note"] = (
         "Bout/event matches use normalized participant names + date only; "
         "no ESPN↔BALLDONTLIE id map is assumed."
     )
+    measured["probe_notes"] = {
+        "dwcs_event_name_filter": "strict_dana_white_contender_or_dwcs",
+        "event_discovery": "manifest_occurrence_dates_with_cursor_pagination",
+        "false_positive_rejected_example": "Full Contact Contender",
+    }
     return measured
 
 
@@ -1964,7 +2271,13 @@ def build_scorecard(
                 bdl_metrics[key]["reason"] = reason
                 bdl_metrics[key]["status"] = "unknown"
             bdl_metrics["outcome_agreement"]["reason"] = reason
-            bdl_metrics["difficult_identity_coverage"]["reason"] = reason
+            # Preserve sanitized identity-partition evidence when the live probe
+            # still completed the difficult-identity sample under a blocker.
+            live_identity = bdl_live.get("difficult_identity_coverage")
+            if isinstance(live_identity, Mapping) and live_identity.get("probed"):
+                bdl_metrics["difficult_identity_coverage"] = dict(live_identity)
+            else:
+                bdl_metrics["difficult_identity_coverage"]["reason"] = reason
             bdl_metrics_status = (
                 "blocked" if bdl_access not in {"not_configured", "ok"} else "unknown"
             )
@@ -2160,6 +2473,22 @@ def build_scorecard(
                 "coverage_doc_caveat": (
                     "Provider docs state only UFC coverage is comprehensive; DWCS/regional "
                     "must be measured, never inferred from league catalog listing."
+                ),
+                "probe_notes": (
+                    dict(bdl_live.get("probe_notes"))
+                    if isinstance(bdl_live, Mapping)
+                    and isinstance(bdl_live.get("probe_notes"), Mapping)
+                    else None
+                ),
+                "provider_dwcs_named_event_count": (
+                    bdl_live.get("provider_dwcs_named_event_count")
+                    if isinstance(bdl_live, Mapping)
+                    else None
+                ),
+                "rate_limit_limit_header": (
+                    bdl_live.get("rate_limit_limit_header")
+                    if isinstance(bdl_live, Mapping)
+                    else None
                 ),
             },
             "api_sports": {

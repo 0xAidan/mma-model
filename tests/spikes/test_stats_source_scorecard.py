@@ -245,6 +245,19 @@ def test_not_configured_distinct_from_absent_and_auth_failed(audit: Any) -> None
         == "entitlement_blocked"
     )
     assert (
+        audit.classify_provider_access(
+            api_key="k",
+            http_status=401,
+            body={},
+            authenticated_ok_prior=True,
+        )
+        == "entitlement_blocked"
+    )
+    assert (
+        audit.classify_provider_access(api_key="k", http_status=429, body=None)
+        == "quota_exceeded"
+    )
+    assert (
         audit.classify_observation_status(
             access_status="ok", matched=False, request_failed=False
         )
@@ -256,6 +269,100 @@ def test_not_configured_distinct_from_absent_and_auth_failed(audit: Any) -> None
         )
         == "unknown"
     )
+
+
+def test_dwcs_event_name_matcher_rejects_false_contender(audit: Any) -> None:
+    assert audit.is_dwcs_provider_event_name(
+        "Dana White's Contender Series: Season 7, Week 1"
+    )
+    assert audit.is_dwcs_provider_event_name("DWCS Season 8 Week 3")
+    assert audit.is_dwcs_provider_event_name("Contender Series Brazil")
+    assert not audit.is_dwcs_provider_event_name("FCC 36: Full Contact Contender 36")
+    assert not audit.is_dwcs_provider_event_name("UFC Fight Night: Contender vs Prospect")
+    assert not audit.is_dwcs_provider_event_name("")
+
+
+def test_extract_unique_bout_dates(audit: Any, sample_bouts: list[dict[str, Any]]) -> None:
+    dates = audit.extract_unique_bout_dates(sample_bouts)
+    assert dates == ["2019-08-01", "2023-08-01", "2024-08-01", "2025-08-01"]
+
+
+def test_retry_after_quota_then_succeeds(audit: Any) -> None:
+    calls = {"n": 0}
+
+    def fake_request(
+        *,
+        path: str,
+        params: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> tuple[int, Any, dict[str, str]]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 429, {"error": "rate limited"}, {"x-ratelimit-limit": "5", "x-ratelimit-remaining": "0"}
+        return (
+            200,
+            {"data": [{"id": 1, "name": "Dana White's Contender Series"}], "meta": {}},
+            {"x-ratelimit-limit": "5", "x-ratelimit-remaining": "4"},
+        )
+
+    sleeps: list[float] = []
+    status, body, _headers = audit.call_with_quota_retries(
+        request_get=fake_request,
+        path="/events",
+        params={"date": "2024-08-13", "per_page": 100},
+        max_retries_on_quota=2,
+        sleep_fn=sleeps.append,
+        quota_sleep_seconds=1.0,
+    )
+    assert status == 200
+    assert isinstance(body, dict)
+    assert len(body.get("data") or []) == 1
+    assert calls["n"] == 2
+    assert sleeps == [60.0]
+    pages = {
+        None: {
+            "status": 200,
+            "body": {
+                "data": [{"id": 1, "name": "Dana White's Contender Series Week 1"}],
+                "meta": {"next_cursor": 10, "per_page": 1},
+            },
+            "headers": {"x-ratelimit-limit": "600", "x-ratelimit-remaining": "599"},
+        },
+        10: {
+            "status": 200,
+            "body": {
+                "data": [{"id": 2, "name": "UFC 300"}],
+                "meta": {"next_cursor": None, "per_page": 1},
+            },
+            "headers": {"x-ratelimit-limit": "600", "x-ratelimit-remaining": "598"},
+        },
+    }
+    calls: list[dict[str, Any]] = []
+
+    def fake_request(
+        *,
+        path: str,
+        params: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> tuple[int, Any, dict[str, str]]:
+        params = dict(params or {})
+        cursor = params.get("cursor")
+        calls.append({"path": path, "cursor": cursor})
+        page = pages[cursor]
+        return page["status"], page["body"], page["headers"]
+
+    rows, last_status, meta = audit.paginate_balldontlie_get(
+        request_get=fake_request,
+        path="/events",
+        base_params={"year": 2024, "per_page": 1},
+        max_pages=5,
+        sleep_fn=lambda _s: None,
+    )
+    assert last_status == 200
+    assert [row["id"] for row in rows] == [1, 2]
+    assert [call["cursor"] for call in calls] == [None, 10]
+    assert meta["page_count"] == 2
+    assert meta["truncated"] is False
 
 
 def test_outcome_agreement_decisive_draw_nc_unmapped_boundaries(audit: Any) -> None:
@@ -882,6 +989,12 @@ def test_match_bout_to_event_by_participants_and_date(audit: Any) -> None:
 
 
 def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
+    """Lock the exact DWCS-003 refresh evidence snapshot committed in this PR.
+
+    Adoption-path decision logic is covered separately by
+    ``test_decision_thresholds_balldontlie_boundary`` (synthetic gates), not by
+    relaxing this artifact regression.
+    """
     path = ROOT / "output" / "research" / "stats-source-scorecard.json"
     if not path.is_file():
         pytest.skip("committed scorecard not generated yet")
@@ -897,14 +1010,48 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
         assert f"https://{host}" not in blob
         assert f"http://{host}" not in blob
     assert payload["decision"]["prohibited_scraping_selected"] is False
-    assert payload["capture_mode"] == "fixtures"
+    assert payload["capture_mode"] == "live"
     assert payload["live_measurements_claimed"] is False
-    assert payload["decision"]["hard_blocker"] is True
-    assert payload["decision"]["primary"] is None
-    event_metric = payload["providers"]["balldontlie"]["metrics"]["event_coverage"]
-    assert event_metric["numerator"] is None
-    assert event_metric["denominator"] == 30
     assert payload["budget_context"]["recurring_monthly"]["usd_cents"] == 6999
+
+    # Exact hard-blocker evidence for this PR (not an adopted-or-blocked union).
+    assert payload["decision"]["primary"] is None
+    assert payload["decision"]["hard_blocker"] is True
+    assert payload["decision"]["path"] == "hard_blocker"
+
+    balldontlie = payload["providers"]["balldontlie"]
+    assert balldontlie["access_status"] == "entitlement_blocked"
+    assert balldontlie["metrics_status"] == "blocked"
+    assert balldontlie["error"] == "fights_endpoint_entitlement_blocked"
+
+    metrics = balldontlie["metrics"]
+    event_metric = metrics["event_coverage"]
+    bout_metric = metrics["bout_coverage"]
+    outcome_metric = metrics["outcome_agreement"]
+    assert event_metric["denominator"] == 30
+    assert event_metric["numerator"] is None
+    assert event_metric["rate"] is None
+    assert event_metric["status"] == "unknown"
+    assert event_metric["reason"] == "entitlement_blocked"
+    assert bout_metric["denominator"] == 149
+    assert bout_metric["numerator"] is None
+    assert bout_metric["rate"] is None
+    assert bout_metric["status"] == "unknown"
+    assert bout_metric["reason"] == "entitlement_blocked"
+    assert outcome_metric["numerator"] is None
+    assert outcome_metric["rate"] is None
+    assert outcome_metric["status"] == "unknown"
+    assert outcome_metric["reason"] == "entitlement_blocked"
+    assert metrics["required_features"]["status"] == "unknown"
+    assert metrics["pit_fitness"]["status"] == "unknown"
+    assert metrics["stat_coverage"]["numerator"] is None
+    assert metrics["stat_coverage"]["status"] == "unknown"
+
+    gates = payload["decision"]["gates"]["balldontlie"]
+    assert gates["technical_pass"] is False
+    assert gates["rights_status"] == "pass"
+    assert gates["budget_status"] == "pass"
+    assert gates["adopt"] is False
 
 
 def test_decision_doc_exists_with_citations() -> None:
