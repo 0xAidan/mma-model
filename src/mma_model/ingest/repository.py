@@ -145,7 +145,7 @@ class IngestRepository:
         if run is None:
             raise KeyError(f"unknown ingest run {run_id}")
 
-        pending_apply: list[SourceObservationRecord] = []
+        pending_apply: list[tuple[SourceObservationRecord, RawObservation]] = []
         for obs in observations:
             self._validate_observation(obs)
             raw_ref = self._resolve_raw_ref(obs)
@@ -164,42 +164,46 @@ class IngestRepository:
                 skipped_identical += 1
                 continue
 
-            session.add(
-                RawObservation(
-                    ingest_run_id=run.id,
-                    source=obs.source,
-                    stream=obs.stream,
-                    scope=run.scope,
-                    checkpoint_version=checkpoint_version,
-                    external_id=obs.external_id,
-                    entity_kind=obs.entity_kind,
-                    observed_at=obs.observed_at,
-                    effective_at=obs.effective_at,
-                    source_published_at=obs.source_published_at,
-                    source_updated_at=obs.source_updated_at,
-                    proxy_published_at=obs.proxy_published_at,
-                    timestamp_quality=obs.timestamp_quality,
-                    timestamp_quality_source=obs.timestamp_quality_source,
-                    quality_tier=obs.quality_tier,
-                    attributes_json=_canonical_attributes_json(dict(obs.attributes)),
-                    payload_hash=obs.payload_hash,
-                    raw_ref=raw_ref,
-                    detail_level=str(obs.detail_level),
-                    version_kind=obs.version_kind,
-                    schema_version=obs.schema_version,
-                    subject_id=obs.subject_id,
-                )
+            raw_row = RawObservation(
+                ingest_run_id=run.id,
+                source=obs.source,
+                stream=obs.stream,
+                scope=run.scope,
+                checkpoint_version=checkpoint_version,
+                external_id=obs.external_id,
+                entity_kind=obs.entity_kind,
+                observed_at=obs.observed_at,
+                effective_at=obs.effective_at,
+                source_published_at=obs.source_published_at,
+                source_updated_at=obs.source_updated_at,
+                proxy_published_at=obs.proxy_published_at,
+                timestamp_quality=obs.timestamp_quality,
+                timestamp_quality_source=obs.timestamp_quality_source,
+                quality_tier=obs.quality_tier,
+                attributes_json=_canonical_attributes_json(dict(obs.attributes)),
+                payload_hash=obs.payload_hash,
+                raw_ref=raw_ref,
+                detail_level=str(obs.detail_level),
+                version_kind=obs.version_kind,
+                schema_version=obs.schema_version,
+                subject_id=obs.subject_id,
             )
+            session.add(raw_row)
             inserted += 1
-            pending_apply.append(obs)
+            pending_apply.append((obs, raw_row))
 
         if on_after_raw_observation is not None and pending_apply:
-            on_after_raw_observation(pending_apply[-1])
+            on_after_raw_observation(pending_apply[-1][0])
 
-        for obs in pending_apply:
+        if pending_apply:
+            session.flush()
+
+        for obs, raw_row in pending_apply:
             if on_before_result_version is not None and obs.entity_kind == "bout_result":
                 on_before_result_version(obs)
-            apply_result = self._apply_observation(session, obs)
+            apply_result = self._apply_observation(
+                session, obs, raw_observation_id=raw_row.id
+            )
             if apply_result == "downgrade":
                 skipped_downgrade += 1
             elif apply_result == "preserve_version":
@@ -380,7 +384,13 @@ class IngestRepository:
         row.last_ingest_run_id = run_id
         row.updated_at = _utc_now()
 
-    def _apply_observation(self, session: Session, obs: SourceObservationRecord) -> str | None:
+    def _apply_observation(
+        self,
+        session: Session,
+        obs: SourceObservationRecord,
+        *,
+        raw_observation_id: int | None = None,
+    ) -> str | None:
         if obs.entity_kind in HISTORY_ENTITY_KINDS:
             return apply_history_observation(session, obs)
         if obs.entity_kind != "bout_result" or not obs.subject_id or not obs.version_kind:
@@ -430,6 +440,8 @@ class IngestRepository:
                 time_str=attrs.get("time_str"),
                 effective_at=obs.effective_at,
                 observed_at=obs.observed_at,
+                raw_observation_id=raw_observation_id,
+                provenance_status="linked" if raw_observation_id is not None else "unknown",
             )
         )
         return None

@@ -356,6 +356,17 @@ def test_event_night_current_correction_preservation(env) -> None:
         assert night.observed_at.replace(tzinfo=UTC) > night.effective_at.replace(
             tzinfo=UTC
         )
+        assert night.raw_observation_id is not None
+        assert current.raw_observation_id is not None
+        assert night.raw_observation_id != current.raw_observation_id
+        night_obs = session.get(RawObservation, night.raw_observation_id)
+        current_obs = session.get(RawObservation, current.raw_observation_id)
+        assert night_obs is not None
+        assert current_obs is not None
+        assert night_obs.timestamp_quality == "publication_proxy"
+        assert night_obs.proxy_published_at is not None
+        assert current_obs.timestamp_quality == "unknown"
+        assert current_obs.proxy_published_at is None
 
 
 def test_duration_boundary_and_invalid_values() -> None:

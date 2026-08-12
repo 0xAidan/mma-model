@@ -1,0 +1,688 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mma-model.local/contracts/coverage.schema.json",
+  "title": "DWCS-106 coverage report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_id",
+    "contract_version",
+    "ticket",
+    "series",
+    "as_of",
+    "report_hash",
+    "config_hash",
+    "db_hash",
+    "policy_hash",
+    "evaluation_contract_hash",
+    "policy_mode",
+    "licensed_status",
+    "universe_cards",
+    "universe_bouts",
+    "standard",
+    "brazil",
+    "event_night",
+    "current",
+    "result_transitions",
+    "counts_events",
+    "counts_bouts",
+    "counts_fighters",
+    "counts_result_versions",
+    "counts_provenance",
+    "core_tiers",
+    "core_tier_sum",
+    "bouts",
+    "season_dimensions",
+    "source_class_dimensions",
+    "quality_tier_dimensions",
+    "source_rows",
+    "field_rows",
+    "identity",
+    "pit",
+    "raw_ref_integrity",
+    "checkpoint_run_state",
+    "source_failures",
+    "fixture_validation",
+    "regional_live",
+    "notes",
+    "gates"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "contract_id": { "type": "string", "const": "dwcs_coverage" },
+    "contract_version": { "type": "string", "minLength": 1 },
+    "ticket": { "type": "string", "const": "DWCS-106" },
+    "series": { "type": "string", "enum": ["dwcs"] },
+    "as_of": { "type": ["string", "null"] },
+    "report_hash": { "type": "string", "minLength": 64 },
+    "config_hash": { "type": "string", "minLength": 64 },
+    "db_hash": { "type": "string", "minLength": 64 },
+    "policy_hash": { "type": "string", "minLength": 64 },
+    "evaluation_contract_hash": { "type": "string", "minLength": 64 },
+    "policy_mode": { "type": "string", "minLength": 1 },
+    "licensed_status": { "$ref": "#/$defs/licensed_status" },
+    "universe_cards": { "type": "integer", "const": 89 },
+    "universe_bouts": { "type": "integer", "const": 440 },
+    "standard": { "$ref": "#/$defs/lane_counts" },
+    "brazil": { "$ref": "#/$defs/lane_counts" },
+    "event_night": { "$ref": "#/$defs/result_lane_counts" },
+    "current": { "$ref": "#/$defs/result_lane_counts" },
+    "result_transitions": { "$ref": "#/$defs/result_transitions" },
+    "counts_events": { "type": "integer", "minimum": 0 },
+    "counts_bouts": { "type": "integer", "minimum": 0 },
+    "counts_fighters": { "type": "integer", "minimum": 0 },
+    "counts_result_versions": { "type": "integer", "minimum": 0 },
+    "counts_provenance": { "type": "integer", "minimum": 0 },
+    "core_tiers": { "$ref": "#/$defs/tier_counts" },
+    "core_tier_sum": { "type": "integer", "const": 440 },
+    "bouts": {
+      "type": "array",
+      "minItems": 440,
+      "maxItems": 440,
+      "items": { "$ref": "#/$defs/bout_row" }
+    },
+    "season_dimensions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dimension_count" }
+    },
+    "source_class_dimensions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dimension_count" }
+    },
+    "quality_tier_dimensions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/dimension_count" }
+    },
+    "source_rows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/source_row" }
+    },
+    "field_rows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/field_row" }
+    },
+    "identity": { "$ref": "#/$defs/identity" },
+    "pit": { "$ref": "#/$defs/pit" },
+    "raw_ref_integrity": { "$ref": "#/$defs/raw_ref" },
+    "checkpoint_run_state": { "$ref": "#/$defs/checkpoint_run_state" },
+    "source_failures": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/source_failure" }
+    },
+    "fixture_validation": { "$ref": "#/$defs/coverage_fixture_validation" },
+    "regional_live": { "$ref": "#/$defs/regional_live" },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/gate" }
+    }
+  },
+  "$defs": {
+    "timestamp_quality": {
+      "type": "string",
+      "enum": [
+        "direct_source_timestamp",
+        "revision_snapshot",
+        "publication_proxy",
+        "unknown"
+      ]
+    },
+    "evidence_origin": {
+      "type": "string",
+      "enum": ["persisted", "frozen_fallback", "checkpoint", "none"]
+    },
+    "quality_tier": {
+      "type": "string",
+      "enum": ["gold", "silver", "bronze", "missing", "conflict"]
+    },
+    "source_class": {
+      "type": "string",
+      "enum": [
+        "internal_manifest",
+        "public_extraction",
+        "public_dataset",
+        "licensed_api",
+        "official_record"
+      ]
+    },
+    "source_status": {
+      "type": "string",
+      "enum": [
+        "present",
+        "source_killed",
+        "source_failed",
+        "accessibility_only",
+        "schema_drift",
+        "unmeasured",
+        "validation_only"
+      ]
+    },
+    "gate_status": {
+      "type": "string",
+      "enum": ["pass", "fail", "insufficient_sample", "unmeasured", "informational", "not_applicable"]
+    },
+    "series_variant": { "type": "string", "enum": ["standard", "brazil"] },
+    "result_class": {
+      "type": "string",
+      "enum": ["decisive", "draw", "no_contest", "missing"]
+    },
+    "lane_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cards", "bouts"],
+      "properties": {
+        "cards": { "type": "integer", "minimum": 0 },
+        "bouts": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "result_lane_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisive", "draw", "no_contest"],
+      "properties": {
+        "decisive": { "type": "integer", "minimum": 0 },
+        "draw": { "type": "integer", "minimum": 0 },
+        "no_contest": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "result_transitions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reversed_to_no_contest",
+        "both_lanes_no_contest",
+        "event_night_equals_current"
+      ],
+      "properties": {
+        "reversed_to_no_contest": { "type": "integer", "minimum": 0 },
+        "both_lanes_no_contest": { "type": "integer", "minimum": 0 },
+        "event_night_equals_current": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tier_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gold", "silver", "bronze", "missing", "conflict"],
+      "properties": {
+        "gold": { "type": "integer", "minimum": 0 },
+        "silver": { "type": "integer", "minimum": 0 },
+        "bronze": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 },
+        "conflict": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "licensed_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_primary",
+        "licensed_primary_unselected",
+        "licensed_adoption_not_selected",
+        "licensed_hard_blocker",
+        "phase1_global_blocker",
+        "note"
+      ],
+      "properties": {
+        "decision_primary": { "type": "null" },
+        "licensed_primary_unselected": { "type": "boolean" },
+        "licensed_adoption_not_selected": { "type": "boolean" },
+        "licensed_hard_blocker": { "type": "boolean" },
+        "phase1_global_blocker": { "type": "boolean", "const": false },
+        "note": { "type": "string" }
+      }
+    },
+    "bout_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bout_id",
+        "event_id",
+        "season",
+        "series_variant",
+        "overall_tier",
+        "event_night_result",
+        "current_result",
+        "timestamp_quality",
+        "source_class",
+        "notes"
+      ],
+      "properties": {
+        "bout_id": { "type": "string", "minLength": 1 },
+        "event_id": { "type": "string", "minLength": 1 },
+        "season": { "type": "integer" },
+        "series_variant": { "$ref": "#/$defs/series_variant" },
+        "overall_tier": { "$ref": "#/$defs/quality_tier" },
+        "event_night_result": { "$ref": "#/$defs/result_class" },
+        "current_result": { "$ref": "#/$defs/result_class" },
+        "timestamp_quality": { "$ref": "#/$defs/timestamp_quality" },
+        "source_class": { "$ref": "#/$defs/source_class" },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "dimension_count": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "gold", "silver", "bronze", "missing", "conflict", "total"],
+      "properties": {
+        "key": { "type": "string" },
+        "gold": { "type": "integer", "minimum": 0 },
+        "silver": { "type": "integer", "minimum": 0 },
+        "bronze": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 },
+        "conflict": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "source_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "source_class",
+        "status",
+        "reason",
+        "mapped_bouts",
+        "missing_bouts",
+        "conflict_bouts",
+        "gold",
+        "silver",
+        "bronze",
+        "validation_only",
+        "never_live_coverage",
+        "evidence_origin",
+        "evidence_hash",
+        "evidence_observed_at"
+      ],
+      "properties": {
+        "source": { "type": "string" },
+        "source_class": { "$ref": "#/$defs/source_class" },
+        "status": { "$ref": "#/$defs/source_status" },
+        "reason": { "type": ["string", "null"] },
+        "mapped_bouts": { "type": "integer", "minimum": 0 },
+        "missing_bouts": { "type": "integer", "minimum": 0 },
+        "conflict_bouts": { "type": "integer", "minimum": 0 },
+        "gold": { "type": "integer", "minimum": 0 },
+        "silver": { "type": "integer", "minimum": 0 },
+        "bronze": { "type": "integer", "minimum": 0 },
+        "validation_only": { "type": "boolean" },
+        "never_live_coverage": { "type": "boolean" },
+        "evidence_origin": { "$ref": "#/$defs/evidence_origin" },
+        "evidence_hash": { "type": ["string", "null"] },
+        "evidence_observed_at": { "type": ["string", "null"] }
+      }
+    },
+    "field_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "present", "missing", "unknown", "denominator", "status"],
+      "properties": {
+        "field": { "type": "string" },
+        "present": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 },
+        "unknown": { "type": "integer", "minimum": 0 },
+        "denominator": { "type": "integer", "minimum": 0 },
+        "status": {
+          "type": "string",
+          "enum": ["measured", "unmeasured", "insufficient_sample"]
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scoped_pending",
+        "scoped_unresolved_conflicts",
+        "unscoped_pending",
+        "unscoped_approved",
+        "unscoped_rejected",
+        "unscoped_pending_blocking",
+        "unmatched",
+        "unmatched_source_identities",
+        "upcoming_blocks",
+        "fixture_validation"
+      ],
+      "properties": {
+        "scoped_pending": { "type": "integer", "minimum": 0 },
+        "scoped_unresolved_conflicts": { "type": "integer", "minimum": 0 },
+        "unscoped_pending": { "type": "integer", "minimum": 0 },
+        "unscoped_approved": { "type": "integer", "minimum": 0 },
+        "unscoped_rejected": { "type": "integer", "minimum": 0 },
+        "unscoped_pending_blocking": { "type": "boolean" },
+        "unmatched": { "type": "integer", "minimum": 0 },
+        "unmatched_source_identities": { "type": "integer", "minimum": 0 },
+        "upcoming_blocks": { "type": "integer", "minimum": 0 },
+        "fixture_validation": { "$ref": "#/$defs/identity_fixture_validation" }
+      }
+    },
+    "pit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proxy_timestamps",
+        "unknown_timestamps",
+        "direct_timestamps",
+        "revision_snapshots",
+        "left_truncated_histories",
+        "future_row_leakage_failures",
+        "future_row_leakage_checks_executed",
+        "future_row_leakage_evidence_hash",
+        "mutable_current_leakage_failures",
+        "mutable_current_leakage_checks_executed",
+        "mutable_current_leakage_evidence_hash",
+        "mutable_current_rows_examined",
+        "mutable_current_applicable_rows",
+        "mutable_current_synthetic_guard_checks",
+        "mutable_current_leakage_status",
+        "conflicting_outcomes",
+        "missing_required_details"
+      ],
+      "properties": {
+        "proxy_timestamps": { "type": "integer", "minimum": 0 },
+        "unknown_timestamps": { "type": "integer", "minimum": 0 },
+        "direct_timestamps": { "type": "integer", "minimum": 0 },
+        "revision_snapshots": { "type": "integer", "minimum": 0 },
+        "left_truncated_histories": { "type": "integer", "minimum": 0 },
+        "future_row_leakage_failures": { "type": "integer", "minimum": 0 },
+        "future_row_leakage_checks_executed": { "type": "integer", "minimum": 0 },
+        "future_row_leakage_evidence_hash": { "type": "string" },
+        "mutable_current_leakage_failures": { "type": "integer", "minimum": 0 },
+        "mutable_current_leakage_checks_executed": { "type": "integer", "minimum": 0 },
+        "mutable_current_leakage_evidence_hash": { "type": "string" },
+        "mutable_current_rows_examined": { "type": "integer", "minimum": 0 },
+        "mutable_current_applicable_rows": { "type": "integer", "minimum": 0 },
+        "mutable_current_synthetic_guard_checks": { "type": "integer", "minimum": 0 },
+        "mutable_current_leakage_status": { "$ref": "#/$defs/gate_status" },
+        "conflicting_outcomes": { "type": "integer", "minimum": 0 },
+        "missing_required_details": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "raw_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ok",
+        "dangling_raw_refs",
+        "blob_absent_explicit",
+        "blob_present",
+        "malformed",
+        "unverifiable",
+        "missing_blobs",
+        "corrupt_blobs",
+        "store_provided"
+      ],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "dangling_raw_refs": { "type": "integer", "minimum": 0 },
+        "blob_absent_explicit": { "type": "integer", "minimum": 0 },
+        "blob_present": { "type": "integer", "minimum": 0 },
+        "malformed": { "type": "integer", "minimum": 0 },
+        "unverifiable": { "type": "integer", "minimum": 0 },
+        "missing_blobs": { "type": "integer", "minimum": 0 },
+        "corrupt_blobs": { "type": "integer", "minimum": 0 },
+        "store_provided": { "type": "boolean" }
+      }
+    },
+    "checkpoint_run_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ingest_runs",
+        "succeeded_runs",
+        "completed_runs",
+        "failed_runs",
+        "running_runs",
+        "checkpoints",
+        "run_fingerprints",
+        "checkpoint_fingerprints"
+      ],
+      "properties": {
+        "ingest_runs": { "type": "integer", "minimum": 0 },
+        "succeeded_runs": { "type": "integer", "minimum": 0 },
+        "completed_runs": { "type": "integer", "minimum": 0 },
+        "failed_runs": { "type": "integer", "minimum": 0 },
+        "running_runs": { "type": "integer", "minimum": 0 },
+        "checkpoints": { "type": "integer", "minimum": 0 },
+        "run_fingerprints": {
+          "type": "array",
+          "items": { "type": "array", "items": { "type": "string" } }
+        },
+        "checkpoint_fingerprints": {
+          "type": "array",
+          "items": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "source_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "reason",
+        "scope",
+        "subject",
+        "host",
+        "path_category",
+        "http_status",
+        "observed_at"
+      ],
+      "properties": {
+        "source": { "type": "string" },
+        "reason": { "type": "string" },
+        "scope": { "type": "string" },
+        "subject": { "type": "string" },
+        "host": { "type": ["string", "null"] },
+        "path_category": { "type": ["string", "null"] },
+        "http_status": { "type": ["integer", "null"] },
+        "observed_at": { "type": ["string", "null"] }
+      }
+    },
+    "identity_fixture_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "n",
+        "case_count",
+        "denominator_all",
+        "denominator_auto_eligible",
+        "auto_true_pos",
+        "auto_false_pos",
+        "auto_false_neg",
+        "precision",
+        "recall",
+        "queued",
+        "queue_rate",
+        "blocked",
+        "blocked_rate",
+        "coverage",
+        "same_name_conflations",
+        "fixture_status",
+        "statistical_confidence_claim",
+        "version",
+        "case_file_hash",
+        "label",
+        "never_live_coverage"
+      ],
+      "properties": {
+        "n": { "type": "integer", "minimum": 0 },
+        "case_count": { "type": "integer", "minimum": 0 },
+        "denominator_all": { "type": "integer", "minimum": 0 },
+        "denominator_auto_eligible": { "type": "integer", "minimum": 0 },
+        "auto_true_pos": { "type": "integer", "minimum": 0 },
+        "auto_false_pos": { "type": "integer", "minimum": 0 },
+        "auto_false_neg": { "type": "integer", "minimum": 0 },
+        "precision": { "type": "number" },
+        "recall": { "type": "number" },
+        "queued": { "type": "integer", "minimum": 0 },
+        "queue_rate": { "type": "number" },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "blocked_rate": { "type": "number" },
+        "coverage": { "type": "number" },
+        "same_name_conflations": { "type": "integer", "minimum": 0 },
+        "fixture_status": { "type": "string" },
+        "statistical_confidence_claim": { "type": "boolean" },
+        "version": { "type": "string" },
+        "case_file_hash": { "type": "string" },
+        "label": { "type": "string" },
+        "never_live_coverage": { "type": "boolean", "const": true }
+      }
+    },
+    "coverage_fixture_lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "found", "never_live_coverage"],
+      "properties": {
+        "n": { "type": ["integer", "null"], "minimum": 0 },
+        "found": { "type": ["integer", "null"], "minimum": 0 },
+        "never_live_coverage": { "type": "boolean", "const": true }
+      }
+    },
+    "coverage_fixture_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "regional_fixture_professional",
+        "regional_fixture_amateur",
+        "label",
+        "never_live_coverage"
+      ],
+      "properties": {
+        "identity": { "$ref": "#/$defs/identity_fixture_validation" },
+        "regional_fixture_professional": { "$ref": "#/$defs/coverage_fixture_lane" },
+        "regional_fixture_amateur": { "$ref": "#/$defs/coverage_fixture_lane" },
+        "label": { "type": "string" },
+        "never_live_coverage": { "type": "boolean", "const": true }
+      }
+    },
+    "regional_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "result", "reason", "http_status", "path_category"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "present",
+            "source_killed",
+            "source_failed",
+            "accessibility_only",
+            "accessible",
+            "schema_drift",
+            "unmeasured",
+            "validation_only"
+          ]
+        },
+        "result": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "http_status": { "type": ["integer", "string", "null"] },
+        "path_category": { "type": ["string", "null"] }
+      }
+    },
+    "regional_live": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_class",
+        "probe_evidence_source",
+        "professional_n",
+        "professional_found",
+        "professional_source_failed",
+        "professional_missing",
+        "amateur_n",
+        "amateur_found",
+        "amateur_source_failed",
+        "amateur_missing",
+        "pre_fight_agreement_n",
+        "pre_fight_agreement_d",
+        "pre_fight_agreement_rate",
+        "live_source_coverage",
+        "fixture_professional_n",
+        "fixture_professional_found",
+        "fixture_amateur_n",
+        "fixture_amateur_found",
+        "never_live_coverage_fixture",
+        "adjudicated_sample_professional_n",
+        "adjudicated_sample_amateur_n",
+        "left_truncated",
+        "unresolved_identities"
+      ],
+      "properties": {
+        "evidence_class": {
+          "type": "string",
+          "enum": ["fixture_validation", "live_source_coverage", "mixed"]
+        },
+        "probe_evidence_source": {
+          "type": "string",
+          "enum": ["persisted", "frozen_fallback", "checkpoint", "none"]
+        },
+        "professional_n": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fixed adjudicated professional live-sample universe; always 9, even with zero live evidence."
+        },
+        "professional_found": { "type": "integer", "minimum": 0 },
+        "professional_source_failed": { "type": "integer", "minimum": 0 },
+        "professional_missing": { "type": "integer", "minimum": 0 },
+        "amateur_n": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Fixed adjudicated amateur live-sample universe; always 2, even with zero live evidence."
+        },
+        "amateur_found": { "type": "integer", "minimum": 0 },
+        "amateur_source_failed": { "type": "integer", "minimum": 0 },
+        "amateur_missing": { "type": "integer", "minimum": 0 },
+        "pre_fight_agreement_n": { "type": "integer", "minimum": 0 },
+        "pre_fight_agreement_d": { "type": "integer", "minimum": 0 },
+        "pre_fight_agreement_rate": { "type": ["number", "null"] },
+        "live_source_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tapology_public", "sherdog_public", "combat_registry"],
+          "properties": {
+            "tapology_public": { "$ref": "#/$defs/regional_probe" },
+            "sherdog_public": { "$ref": "#/$defs/regional_probe" },
+            "combat_registry": { "$ref": "#/$defs/regional_probe" }
+          }
+        },
+        "fixture_professional_n": { "type": "integer", "minimum": 0 },
+        "fixture_professional_found": { "type": "integer", "minimum": 0 },
+        "fixture_amateur_n": { "type": "integer", "minimum": 0 },
+        "fixture_amateur_found": { "type": "integer", "minimum": 0 },
+        "never_live_coverage_fixture": { "type": "boolean", "const": true },
+        "adjudicated_sample_professional_n": { "type": "integer", "minimum": 0 },
+        "adjudicated_sample_amateur_n": { "type": "integer", "minimum": 0 },
+        "left_truncated": { "type": "integer", "minimum": 0 },
+        "unresolved_identities": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "segment",
+        "status",
+        "blocking",
+        "numerator",
+        "denominator",
+        "threshold",
+        "reason"
+      ],
+      "properties": {
+        "code": { "type": "string" },
+        "segment": { "type": "string" },
+        "status": { "$ref": "#/$defs/gate_status" },
+        "blocking": { "type": "boolean" },
+        "numerator": { "type": ["integer", "null"] },
+        "denominator": { "type": ["integer", "null"] },
+        "threshold": { "type": ["number", "null"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

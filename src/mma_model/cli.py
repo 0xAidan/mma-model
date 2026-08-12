@@ -36,6 +36,18 @@ from mma_model.identity.review import (
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.the_odds_api import fetch_mma_odds
+from mma_model.quality.constants import EXIT_INTERNAL
+from mma_model.quality.coverage import compute_coverage_report
+from mma_model.quality.gates import report_with_gates
+from mma_model.quality.readonly import (
+    CoverageDatabaseError,
+    is_prohibited_live_url,
+    open_readonly_sqlite_engine,
+    readonly_session_factory,
+)
+from mma_model.quality.report import dumps_report, human_report, write_coverage_evidence
+from mma_model.quality.schema import CoverageSchemaError
+from mma_model.sources.policy import load_source_policy
 from mma_model.predict.backtest import walk_forward_backtest
 from mma_model.predict.train import predict_fight_a_win_prob, train_and_save
 from mma_model.sources.combat_registry.client import CombatRegistryPublicClient
@@ -338,6 +350,41 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional markdown coverage path",
+    )
+
+    p_cov = sub.add_parser(
+        "coverage",
+        help="Publish DWCS coverage tiers and strict data-health gates",
+    )
+    p_cov.add_argument("--series", default="dwcs", choices=["dwcs"])
+    p_cov.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 2 when any affected blocking gate fails",
+    )
+    p_cov.add_argument("--json", action="store_true", help="Print JSON report")
+    p_cov.add_argument(
+        "--database-url",
+        required=True,
+        help="Explicit disposable SQLite URL (never implied live data/mma.db)",
+    )
+    p_cov.add_argument(
+        "--summary-out",
+        type=Path,
+        default=None,
+        help="Optional sanitized aggregate JSON path",
+    )
+    p_cov.add_argument(
+        "--coverage-doc",
+        type=Path,
+        default=None,
+        help="Optional markdown coverage path",
+    )
+    p_cov.add_argument(
+        "--raw-store",
+        type=Path,
+        default=None,
+        help="Optional content-addressed raw store for referenced blob verification",
     )
 
     args = p.parse_args(argv)
@@ -810,6 +857,77 @@ def main(argv: list[str] | None = None) -> int:
                         client.close()
                     if tmp_ctx is not None:
                         tmp_ctx.cleanup()
+        finally:
+            engine.dispose()
+
+    if args.cmd == "coverage":
+        db_url = str(args.database_url).strip()
+        if not db_url:
+            print("coverage configuration error: empty --database-url")
+            return EXIT_INTERNAL
+        default_url = get_settings().mma_database_url
+        if is_prohibited_live_url(db_url, default_url=default_url):
+            print(
+                "coverage configuration error: refusing default live data/mma.db; "
+                "pass an explicit disposable --database-url for DWCS-106 coverage"
+            )
+            return EXIT_INTERNAL
+        raw_store = None
+        if args.raw_store is not None:
+            raw_store = ContentAddressedRawStore(Path(args.raw_store))
+        try:
+            engine = open_readonly_sqlite_engine(db_url)
+        except CoverageDatabaseError as exc:
+            print(f"coverage configuration error: {exc}")
+            return EXIT_INTERNAL
+        Session = readonly_session_factory(engine)
+        try:
+            try:
+                policy = load_source_policy()
+                with Session() as session:
+                    report = compute_coverage_report(
+                        series=str(args.series),
+                        session=session,
+                        policy=policy,
+                        db_url=db_url,
+                        raw_store=raw_store,
+                    )
+                    report, gates = report_with_gates(report, policy)
+                if report.raw_ref_integrity.unverifiable > 0:
+                    print(
+                        "coverage configuration error: --raw-store required to verify "
+                        "referenced raw blobs"
+                    )
+                    return EXIT_INTERNAL
+                if args.summary_out is not None and args.coverage_doc is not None:
+                    write_coverage_evidence(
+                        report,
+                        gates,
+                        json_path=args.summary_out,
+                        markdown_path=args.coverage_doc,
+                    )
+                elif args.summary_out is not None or args.coverage_doc is not None:
+                    print("coverage evidence requires both --summary-out and --coverage-doc")
+                    return EXIT_INTERNAL
+                if args.json:
+                    print(dumps_report(report), end="")
+                else:
+                    print(human_report(report, gates, strict=bool(args.strict)))
+            except CoverageSchemaError as exc:
+                print(f"coverage schema error: {exc}")
+                return EXIT_INTERNAL
+            except CoverageDatabaseError as exc:
+                print(f"coverage configuration error: {exc}")
+                return EXIT_INTERNAL
+            except ValueError as exc:
+                print(f"coverage configuration error: {exc}")
+                return EXIT_INTERNAL
+            except Exception as exc:
+                print(f"coverage internal error: {exc}")
+                return EXIT_INTERNAL
+            if args.strict:
+                return int(gates.exit_code)
+            return 0
         finally:
             engine.dispose()
 

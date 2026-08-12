@@ -186,6 +186,20 @@ class BoutResultVersion(Base):
         ),
         CheckConstraint("fighter_a_id != fighter_b_id", name="ck_result_distinct_fighters"),
         CheckConstraint("revision >= 1", name="ck_bout_result_revision_positive"),
+        UniqueConstraint(
+            "raw_observation_id",
+            name="uq_bout_result_version_raw_observation",
+        ),
+        CheckConstraint(
+            "provenance_status IN ('linked', 'unknown', 'ambiguous')",
+            name="ck_bout_result_provenance_status",
+        ),
+        CheckConstraint(
+            "(provenance_status = 'linked' AND raw_observation_id IS NOT NULL) "
+            "OR (provenance_status IN ('unknown', 'ambiguous') "
+            "AND raw_observation_id IS NULL)",
+            name="ck_bout_result_provenance_link",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -209,6 +223,10 @@ class BoutResultVersion(Base):
     time_str: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    raw_observation_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("raw_observations.id"), nullable=True, index=True
+    )
+    provenance_status: Mapped[str] = mapped_column(String(32), default="unknown")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
