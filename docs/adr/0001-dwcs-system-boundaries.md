@@ -50,7 +50,16 @@ here in DWCS-001.
 3. Static React/TS/Tailwind dashboard reading versioned JSON.
 4. Host systemd timers + `docker compose run` under one `flock`.
 5. Typed source adapters; no provider-specific fields leaking through features.
-6. Production data rights: official/licensed APIs only; UFCStats stays compatibility/research.
+6. Production data rights (amended 2026-08-12, DWCS-003): personal-project
+   **public-first hybrid** per `config/sources/source_policy_v1.json`. Canonical
+   UFC/DWCS facts come from reproducible public UFCStats snapshots (optional
+   mma-ai raw/normalized bootstrap only after hash/count/schema reconciliation).
+   Regional breadth uses Tapology public pages where accessible, Sherdog as
+   selective secondary, and Combat Registry/commissions as authoritative
+   validation. Licensed providers remain validation/enrichment until a measured
+   audit sets `decision.primary`. Never bypass logins, paywalls, CAPTCHAs,
+   robots/access controls, or technical restrictions. Identity, leakage,
+   provenance, explicit-missingness, and coverage gates are **not** weakened.
 7. Pooled regularized competing-risks GLM with ridge logistic fallback.
 8. Bookmaker odds are **optional enrichment**. Missing Bet365 does not block core
    sportsbook-agnostic fair / actionable / strong-value guidance. Exact EV / ROI /

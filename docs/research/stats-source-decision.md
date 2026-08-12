@@ -5,6 +5,34 @@ measured coverage, written rights, cost, and point-in-time fitness. Sportsbook
 odds remain optional enrichment (DWCS-000); a missing Bet365 feed is **irrelevant**
 to this decision.
 
+## Policy amendment (2026-08-12) — public-first hybrid
+
+The user explicitly approved replacing the Phase 1 **licensed-provider-only**
+ingest rule with a personal-project **public-first hybrid**. Machine-readable
+contract: [`config/sources/source_policy_v1.json`](../../config/sources/source_policy_v1.json).
+Design: [`docs/superpowers/specs/2026-08-12-public-first-mma-history-design.md`](../superpowers/specs/2026-08-12-public-first-mma-history-design.md).
+Plan: [`docs/superpowers/plans/2026-08-12-public-first-mma-history.md`](../superpowers/plans/2026-08-12-public-first-mma-history.md).
+
+**Unchanged by the amendment:**
+
+- `decision.primary` remains `null` until a **measured** public-source (or later
+  licensed) audit passes all technical gates.
+- BALLDONTLIE and SportsDataIO scorecard rows stay **historical audit evidence**.
+- Gates remain: 89/440 universe; every exclusion categorized; ≥98% cross-source
+  reconciliation where comparable; ≥99% result agreement; zero unresolved
+  evaluated/upcoming identity conflicts; zero future-row leakage failures; no
+  mutable-current historical feature leakage.
+
+**Changed by the amendment:**
+
+- Phase 1 may implement labeled public observation adapters (UFCStats direct,
+  Tapology/Sherdog public pages where accessible, Combat Registry public
+  results, BestFightOdds archive) under access-ethics and PIT rules in the
+  source policy.
+- Silent “scrape anything to unblock licensed hard_blocker” remains rejected.
+- Licensed `hard_blocker` still means **no licensed primary adoption**; it does
+  not forbid the public-first Phase 1 path.
+
 This document records method, citations, gates, and the handoff contract. It does
 **not** invent provider coverage from catalogs or product pages.
 
@@ -30,10 +58,15 @@ HTTP success and identity hits do not auto-pass PIT or required features.
 
 ## Goal
 
-Choose exactly one primary licensed/official stats+identity source for DWCS
-production ingest, or record a hard production blocker with ranked lawful
-fallbacks. Never silently fall back to Tapology, Sherdog, FightMatrix, UFC.com
-HTML, UFCStats HTML, or Bet365 scraping.
+Originally: choose exactly one primary licensed/official stats+identity source
+for DWCS production ingest, or record a hard production blocker with ranked
+lawful fallbacks.
+
+Amended 2026-08-12: licensed primary selection may remain blocked (`primary=null`)
+while Phase 1 proceeds under the public-first hybrid policy. Never silently fall
+back to unrestricted scraping, Bet365 scraping, or access-control bypass. Public
+adapters must be explicit, labeled, rate-limited, and killable per
+`source_policy_v1.json`.
 
 ## Inputs
 
@@ -87,7 +120,8 @@ Money amounts are quantized to integer cents with decimal-safe USD strings
    Missing quote/credentials/entitlement ⇒ hard blocker (no silent selection).
 4. Keep API-Sports for one paid month only if non-overlap ≥10% **and** accuracy
    pass; else cancel.
-5. Never silently fall back to prohibited scraping.
+5. Never silently fall back to prohibited / access-bypassing scraping. Public-first
+   adapters are a separate, explicitly approved path (see policy amendment).
 
 ## Public evidence checked (citations)
 
@@ -248,9 +282,14 @@ ruff check scripts/spikes/audit_stats_sources.py tests/spikes/test_stats_source_
 
 ## Handoff contract (DWCS-102)
 
-1. Read `decision.primary` from the scorecard.
-2. If set, implement exactly that adapter.
-3. If `hard_blocker`, keep production stats ingest blocked; pursue ranked lawful
-   fallbacks; do not enable scrapers.
+1. Read `config/sources/source_policy_v1.json` (`policy_mode` must be
+   `public_first_hybrid_personal_project`).
+2. Read `decision.primary` from the scorecard. It remains `null` until a measured
+   audit passes; do **not** invent a licensed primary.
+3. Implement Phase 1 core ingest per the public-first plan (UFCStats public
+   snapshots first; mma-ai bootstrap only after reconciliation). Treat
+   SportsDataIO/BALLDONTLIE as validation/enrichment only under measured limits.
 4. Preserve DWCS-002 manifests as the universe seed.
 5. Missing bookmaker lines do not unblock or re-rank stats sources.
+6. Never bypass logins, paywalls, CAPTCHAs, robots/access controls, or technical
+   restrictions; stop on block signals and follow kill/fallback order.

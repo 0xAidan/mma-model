@@ -64,6 +64,21 @@ load the packaged resource via `importlib.resources`.
 event-block 90% UCB on delta log loss versus M1 is **strictly below** `+0.02`
 (`ucb < 0.02`). Equality at `0.02` fails.
 
+## Source policy contract (DWCS-003 amendment)
+
+| Field | Value |
+|-------|--------|
+| **Path** | `config/sources/source_policy_v1.json` |
+| **Loader** | `mma_model.sources.policy.load_source_policy` |
+| **Mode** | `public_first_hybrid_personal_project` |
+| **Licensed primary** | Remains `null` in the scorecard until a measured audit passes |
+| **Gates** | 89/440; exclusions categorized; ≥98% reconciliation; ≥99% result agreement; zero unresolved evaluated/upcoming identity conflicts; zero future-row leakage; no mutable-current historical features |
+| **Design / plan** | `docs/superpowers/specs/2026-08-12-public-first-mma-history-design.md`, `docs/superpowers/plans/2026-08-12-public-first-mma-history.md` |
+
+Public observations require source labels and quality tiers (`gold` / `silver` /
+`bronze` / `missing` / `conflict`). Odds stay a separate lane unless the
+evaluation contract explicitly enables a challenger.
+
 ## Existing prototype stores (retained, not yet DWCS-canonical)
 
 | Store | Module / table | Notes |
@@ -83,5 +98,6 @@ never receive synthetic betting performance.
 ## Related
 
 - [ADR 0001: DWCS system boundaries](adr/0001-dwcs-system-boundaries.md)
+- [Stats / identity source decision](research/stats-source-decision.md)
 - [Baseline command outputs](baseline/dwcs-001-command-outputs.md)
 - [Odds provider audit](research/odds-provider-audit.md)
