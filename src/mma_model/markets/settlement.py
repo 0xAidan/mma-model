@@ -311,11 +311,10 @@ def validate_settlement_facts(
             raise SettlementFactsError("technical_draw cannot have winner_side")
         return
 
-    if facts.method in DECISIVE_METHODS:
-        if facts.result_class != "decisive":
-            raise SettlementFactsError(
-                f"method {facts.method!r} requires result_class='decisive'"
-            )
+    if facts.method in DECISIVE_METHODS and facts.result_class != "decisive":
+        raise SettlementFactsError(
+            f"method {facts.method!r} requires result_class='decisive'"
+        )
 
     if facts.result_class == "draw":
         if facts.winner_side is not None:
