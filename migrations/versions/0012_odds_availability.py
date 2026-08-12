@@ -17,14 +17,11 @@ from alembic import op
 from sqlalchemy import inspect
 
 from mma_model.db.odds_guards import drop_odds_sqlite_guards, install_odds_sqlite_guards
-from mma_model.domain.markets import MarketFamily
 
 revision: str = "0012_odds_availability"
 down_revision: Union[str, Sequence[str], None] = "0011_odds_quotes"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
-
-_MARKET_FAMILY_SQL = ", ".join(repr(member.value) for member in MarketFamily)
 
 
 def _existing_tables() -> set[str]:
@@ -52,8 +49,13 @@ def upgrade() -> None:
             sa.Column("snapshot_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.CheckConstraint(
-                f"market_family IN ({_MARKET_FAMILY_SQL})",
-                name="ck_odds_availability_market_family",
+                "(provider_market_key = 'h2h' AND market_family = 'moneyline') OR "
+                "(provider_market_key = 'totals' AND market_family = 'totals')",
+                name="ck_odds_availability_provider_market_family",
+            ),
+            sa.CheckConstraint(
+                "availability = 'unknown'",
+                name="ck_odds_availability_availability",
             ),
             sa.ForeignKeyConstraint(["event_id"], ["odds_events.id"]),
             sa.PrimaryKeyConstraint("id"),

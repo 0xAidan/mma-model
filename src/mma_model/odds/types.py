@@ -46,9 +46,9 @@ PROVIDER_MARKET_TO_FAMILY: Final[Mapping[str, MarketFamily]] = {
     OddsMarketKey.TOTALS.value: MarketFamily.TOTALS,
 }
 
-# DWCS-200 families allowed on persisted availability rows (DB CHECK + Python).
+# Families persisted by DWCS-201 (supported provider mappings only).
 PERSISTED_MARKET_FAMILY_VALUES: Final[tuple[str, ...]] = tuple(
-    member.value for member in MarketFamily
+    sorted({family.value for family in PROVIDER_MARKET_TO_FAMILY.values()})
 )
 
 REQUESTS_LAST_SOURCE_PROVIDER: Final[str] = "provider"
@@ -61,6 +61,33 @@ REQUESTS_LAST_SOURCES: Final[frozenset[str]] = frozenset(
         REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
     }
 )
+
+QUOTE_AVAILABILITY_VALUES: Final[frozenset[str]] = frozenset(
+    member.value for member in QuoteAvailability
+)
+
+
+def assert_supported_provider_market_pair(
+    provider_market_key: str,
+    market_family: MarketFamily | str,
+) -> None:
+    """Reject unknown provider keys and mismatched DWCS-201 family pairs."""
+    expected = PROVIDER_MARKET_TO_FAMILY.get(provider_market_key)
+    if expected is None:
+        raise ValueError(
+            f"unsupported provider_market_key for persistence: {provider_market_key!r}"
+        )
+    family_value = (
+        market_family.value
+        if isinstance(market_family, MarketFamily)
+        else str(market_family)
+    )
+    if family_value != expected.value:
+        raise ValueError(
+            "mismatched provider_market_key/market_family pair: "
+            f"{provider_market_key!r} -> {family_value!r} "
+            f"(expected {expected.value!r})"
+        )
 
 
 @dataclass(frozen=True)
@@ -78,6 +105,40 @@ class QuotaHeaders:
     requests_last: int | None
     requests_last_inferred: int | None = None
     requests_last_source: str = REQUESTS_LAST_SOURCE_MISSING
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("requests_remaining", self.requests_remaining),
+            ("requests_used", self.requests_used),
+            ("requests_last", self.requests_last),
+            ("requests_last_inferred", self.requests_last_inferred),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be nonnegative (got {value!r})")
+
+        source = self.requests_last_source
+        if source == REQUESTS_LAST_SOURCE_PROVIDER:
+            if self.requests_last is None or self.requests_last_inferred is not None:
+                raise ValueError(
+                    "provider quota source requires non-null requests_last "
+                    "and null requests_last_inferred"
+                )
+            return
+        if source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY:
+            if self.requests_last is not None or self.requests_last_inferred != 0:
+                raise ValueError(
+                    "inferred_empty_zero requires null requests_last and "
+                    "requests_last_inferred=0"
+                )
+            return
+        if source == REQUESTS_LAST_SOURCE_MISSING:
+            if self.requests_last is not None or self.requests_last_inferred is not None:
+                raise ValueError(
+                    "missing quota source requires null requests_last and "
+                    "null requests_last_inferred"
+                )
+            return
+        raise ValueError(f"unsupported requests_last_source: {source!r}")
 
     @classmethod
     def from_headers(
@@ -175,6 +236,17 @@ class NormalizedQuote:
     raw_ref: str
     dedupe_key: str
 
+    def __post_init__(self) -> None:
+        assert_supported_provider_market_pair(
+            self.provider_market_key, self.market_family
+        )
+        if self.availability.value not in QUOTE_AVAILABILITY_VALUES:
+            raise ValueError(f"unsupported quote availability: {self.availability!r}")
+        if self.price_decimal <= 1.0:
+            raise ValueError(
+                f"price_decimal must be > 1.0 for reference quotes (got {self.price_decimal!r})"
+            )
+
 
 @dataclass(frozen=True)
 class UnknownMarketObservation:
@@ -205,10 +277,9 @@ class UnknownMarketObservation:
             raise TypeError(
                 f"market_family must be MarketFamily, got {type(self.market_family)!r}"
             )
-        if self.market_family.value not in PERSISTED_MARKET_FAMILY_VALUES:
-            raise ValueError(
-                f"unsupported market_family for availability: {self.market_family!r}"
-            )
+        assert_supported_provider_market_pair(
+            self.provider_market_key, self.market_family
+        )
         if self.availability is not QuoteAvailability.UNKNOWN:
             raise ValueError(
                 "UnknownMarketObservation.availability must be UNKNOWN "

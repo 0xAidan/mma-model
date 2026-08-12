@@ -23,7 +23,7 @@ from mma_model.db.tables.odds import (
     OddsQuotaObservation,
     OddsQuote,
 )
-from mma_model.domain.markets import OutcomeKey
+from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.normalize import (
     OddsTimestampError,
     american_to_decimal,
@@ -46,9 +46,11 @@ from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, TheOddsApiClient
 from mma_model.odds.types import (
     REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+    REQUESTS_LAST_SOURCE_MISSING,
     REQUESTS_LAST_SOURCE_PROVIDER,
     QuotaHeaders,
     QuoteAvailability,
+    assert_supported_provider_market_pair,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "odds"
@@ -559,6 +561,48 @@ def test_unsupported_series_rejected() -> None:
         validate_requested_series("ufc-only")
 
 
+def test_provider_market_family_pair_and_quota_invariants() -> None:
+    assert_supported_provider_market_pair("h2h", MarketFamily.MONEYLINE)
+    assert_supported_provider_market_pair("totals", MarketFamily.TOTALS)
+    with pytest.raises(ValueError, match="unsupported provider_market_key"):
+        assert_supported_provider_market_pair("method_of_victory", MarketFamily.METHOD)
+    with pytest.raises(ValueError, match="mismatched"):
+        assert_supported_provider_market_pair("h2h", MarketFamily.METHOD)
+
+    with pytest.raises(ValueError, match="non-null requests_last"):
+        QuotaHeaders(
+            requests_remaining=1,
+            requests_used=1,
+            requests_last=None,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+        )
+    with pytest.raises(ValueError, match="inferred_empty_zero"):
+        QuotaHeaders(
+            requests_remaining=1,
+            requests_used=1,
+            requests_last=None,
+            requests_last_inferred=1,
+            requests_last_source=REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+        )
+    with pytest.raises(ValueError, match="missing quota source"):
+        QuotaHeaders(
+            requests_remaining=1,
+            requests_used=1,
+            requests_last=0,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_MISSING,
+        )
+    with pytest.raises(ValueError, match="nonnegative"):
+        QuotaHeaders(
+            requests_remaining=-1,
+            requests_used=1,
+            requests_last=1,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+        )
+
+
 def test_empty_quota_explicit_zero_vs_missing_header(tmp_path: Path) -> None:
     explicit = QuotaHeaders.from_headers(
         {
@@ -661,6 +705,15 @@ def test_empty_quota_explicit_zero_vs_missing_header(tmp_path: Path) -> None:
     assert rows[1].requests_last is None
     assert rows[1].requests_last_inferred == 0
     assert rows[1].requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY
+
+    with pytest.raises(ValueError, match="empty_response=True"):
+        store.record_quota(
+            provider="the_odds_api",
+            endpoint="current_odds",
+            observed_at=OBSERVED + timedelta(minutes=2),
+            quota=missing_resp.quota,
+            empty_response=False,
+        )
     session.close()
 
 

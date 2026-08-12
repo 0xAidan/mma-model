@@ -17,11 +17,12 @@ from mma_model.db.tables.odds import (
     OddsQuote,
 )
 from mma_model.odds.types import (
-    PERSISTED_MARKET_FAMILY_VALUES,
+    REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
     NormalizedQuote,
     OddsEvent,
     QuotaHeaders,
     UnknownMarketObservation,
+    assert_supported_provider_market_pair,
 )
 
 
@@ -79,6 +80,14 @@ class OddsQuoteStore:
         quota: QuotaHeaders,
         empty_response: bool,
     ) -> OddsQuotaObservation:
+        # QuotaHeaders.__post_init__ already enforces source/value pairing.
+        if (
+            quota.requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY
+            and not empty_response
+        ):
+            raise ValueError(
+                "inferred_empty_zero quota provenance requires empty_response=True"
+            )
         row = OddsQuotaObservation(
             provider=provider,
             endpoint=endpoint,
@@ -107,6 +116,13 @@ class OddsQuoteStore:
         event_upserts = 0
 
         for quote in quotes:
+            assert_supported_provider_market_pair(
+                quote.provider_market_key, quote.market_family
+            )
+            if quote.price_decimal <= 1.0:
+                raise ValueError(
+                    f"refusing quote with price_decimal <= 1.0: {quote.price_decimal!r}"
+                )
             event_row = event_map.get(quote.event_id)
             if event_row is None:
                 event_row = self.upsert_event(
@@ -174,11 +190,9 @@ class OddsQuoteStore:
         event_upserts = 0
 
         for obs in observations:
-            if obs.market_family.value not in PERSISTED_MARKET_FAMILY_VALUES:
-                raise ValueError(
-                    f"refusing availability row with unsupported market_family "
-                    f"{obs.market_family!r}"
-                )
+            assert_supported_provider_market_pair(
+                obs.provider_market_key, obs.market_family
+            )
             event_row = event_map.get(obs.event_id)
             if event_row is None:
                 event_row = self.upsert_event(

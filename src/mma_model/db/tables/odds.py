@@ -17,16 +17,30 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from mma_model.db.base import Base
-from mma_model.domain.markets import MarketFamily
 
-# Keep in sync with QuotaHeaders request-last provenance sources.
-_QUOTA_REQUESTS_LAST_SOURCES = (
-    "inferred_empty_zero",
-    "missing",
-    "provider",
+# Keep SQL literals in sync with mma_model.odds.types supported mappings.
+_PROVIDER_MARKET_FAMILY_PAIR_SQL = (
+    "(provider_market_key = 'h2h' AND market_family = 'moneyline') OR "
+    "(provider_market_key = 'totals' AND market_family = 'totals')"
 )
-_MARKET_FAMILY_SQL = ", ".join(repr(member.value) for member in MarketFamily)
-_QUOTA_SOURCE_SQL = ", ".join(repr(value) for value in _QUOTA_REQUESTS_LAST_SOURCES)
+_QUOTE_AVAILABILITY_SQL = "'available', 'suspended', 'unknown'"
+_QUOTA_SOURCE_SQL = "'inferred_empty_zero', 'missing', 'provider'"
+_QUOTA_PROVENANCE_SQL = (
+    "("
+    "requests_last_source = 'provider' "
+    "AND requests_last IS NOT NULL "
+    "AND requests_last_inferred IS NULL"
+    ") OR ("
+    "requests_last_source = 'inferred_empty_zero' "
+    "AND requests_last IS NULL "
+    "AND requests_last_inferred = 0 "
+    "AND empty_response = 1"
+    ") OR ("
+    "requests_last_source = 'missing' "
+    "AND requests_last IS NULL "
+    "AND requests_last_inferred IS NULL"
+    ")"
+)
 
 
 def _utc_now() -> datetime:
@@ -72,6 +86,21 @@ class OddsQuotaObservation(Base):
             f"requests_last_source IN ({_QUOTA_SOURCE_SQL})",
             name="ck_odds_quota_requests_last_source",
         ),
+        CheckConstraint(
+            _QUOTA_PROVENANCE_SQL,
+            name="ck_odds_quota_requests_last_provenance",
+        ),
+        CheckConstraint(
+            "(requests_remaining IS NULL OR requests_remaining >= 0) AND "
+            "(requests_used IS NULL OR requests_used >= 0) AND "
+            "(requests_last IS NULL OR requests_last >= 0) AND "
+            "(requests_last_inferred IS NULL OR requests_last_inferred >= 0)",
+            name="ck_odds_quota_nonnegative",
+        ),
+        CheckConstraint(
+            "empty_response IN (0, 1)",
+            name="ck_odds_quota_empty_response",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -93,6 +122,18 @@ class OddsQuote(Base):
     __tablename__ = "odds_quotes"
     __table_args__ = (
         UniqueConstraint("dedupe_key", name="uq_odds_quotes_dedupe_key"),
+        CheckConstraint(
+            _PROVIDER_MARKET_FAMILY_PAIR_SQL,
+            name="ck_odds_quotes_provider_market_family",
+        ),
+        CheckConstraint(
+            f"availability IN ({_QUOTE_AVAILABILITY_SQL})",
+            name="ck_odds_quotes_availability",
+        ),
+        CheckConstraint(
+            "price_decimal > 1.0",
+            name="ck_odds_quotes_price_decimal",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -127,17 +168,22 @@ class OddsQuote(Base):
 class OddsAvailabilityObservation(Base):
     """Append-only unknown/missing market observations with event/book identity.
 
-    Supported DWCS-200 families only (never unsupported-by-normalizer).
-    ``snapshot_at`` set marks a historical provider snapshot; null marks a
-    current poll. Availability is ``unknown`` (missing), never implied suspension.
+    Supported DWCS-201 provider mappings only (`h2h`↔`moneyline`,
+    `totals`↔`totals`). ``snapshot_at`` set marks a historical provider
+    snapshot; null marks a current poll. Availability is ``unknown``
+    (missing), never implied suspension.
     """
 
     __tablename__ = "odds_availability_observations"
     __table_args__ = (
         UniqueConstraint("dedupe_key", name="uq_odds_availability_dedupe_key"),
         CheckConstraint(
-            f"market_family IN ({_MARKET_FAMILY_SQL})",
-            name="ck_odds_availability_market_family",
+            _PROVIDER_MARKET_FAMILY_PAIR_SQL,
+            name="ck_odds_availability_provider_market_family",
+        ),
+        CheckConstraint(
+            "availability = 'unknown'",
+            name="ck_odds_availability_availability",
         ),
     )
 

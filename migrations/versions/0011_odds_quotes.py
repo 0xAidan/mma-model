@@ -87,6 +87,34 @@ def upgrade() -> None:
                 "('inferred_empty_zero', 'missing', 'provider')",
                 name="ck_odds_quota_requests_last_source",
             ),
+            sa.CheckConstraint(
+                "("
+                "requests_last_source = 'provider' "
+                "AND requests_last IS NOT NULL "
+                "AND requests_last_inferred IS NULL"
+                ") OR ("
+                "requests_last_source = 'inferred_empty_zero' "
+                "AND requests_last IS NULL "
+                "AND requests_last_inferred = 0 "
+                "AND empty_response = 1"
+                ") OR ("
+                "requests_last_source = 'missing' "
+                "AND requests_last IS NULL "
+                "AND requests_last_inferred IS NULL"
+                ")",
+                name="ck_odds_quota_requests_last_provenance",
+            ),
+            sa.CheckConstraint(
+                "(requests_remaining IS NULL OR requests_remaining >= 0) AND "
+                "(requests_used IS NULL OR requests_used >= 0) AND "
+                "(requests_last IS NULL OR requests_last >= 0) AND "
+                "(requests_last_inferred IS NULL OR requests_last_inferred >= 0)",
+                name="ck_odds_quota_nonnegative",
+            ),
+            sa.CheckConstraint(
+                "empty_response IN (0, 1)",
+                name="ck_odds_quota_empty_response",
+            ),
             sa.PrimaryKeyConstraint("id"),
         )
         op.create_index(
@@ -129,6 +157,19 @@ def upgrade() -> None:
             sa.Column("snapshot_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("raw_ref", sa.String(length=64), nullable=False),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.CheckConstraint(
+                "(provider_market_key = 'h2h' AND market_family = 'moneyline') OR "
+                "(provider_market_key = 'totals' AND market_family = 'totals')",
+                name="ck_odds_quotes_provider_market_family",
+            ),
+            sa.CheckConstraint(
+                "availability IN ('available', 'suspended', 'unknown')",
+                name="ck_odds_quotes_availability",
+            ),
+            sa.CheckConstraint(
+                "price_decimal > 1.0",
+                name="ck_odds_quotes_price_decimal",
+            ),
             sa.ForeignKeyConstraint(["event_id"], ["odds_events.id"]),
             sa.PrimaryKeyConstraint("id"),
             sa.UniqueConstraint("dedupe_key", name="uq_odds_quotes_dedupe_key"),
