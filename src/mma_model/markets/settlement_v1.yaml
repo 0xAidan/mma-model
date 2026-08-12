@@ -9,44 +9,46 @@
 # mma_model.markets.rules.PINNED_SETTLEMENT_HASH. Any byte/semantic change must
 # bump contract_version + rule-set version and update the pinned digest together.
 #
-# Default rule set status is internal_contract (repo-governed grading rules),
-# NOT an approved external sportsbook house-rules source.
+# Source research: docs/research/mma-settlement-sources.md (accessed 2026-08-12).
+# Sportsbook-agnostic price guidance does not depend on this rule set.
 
 schema_version: 1
 contract_id: dwcs_settlement
-contract_version: "1.1.0"
+contract_version: "1.2.0"
 default_rule_set_id: mma_generic
 
 rule_sets:
   mma_generic:
-    version: "1.1.0"
-    status: internal_contract
+    version: "1.2.0"
+    status: externally_sourced
     source:
-      id: dwcs_internal_settlement_contract_v1
+      id: mma_generic_public_house_rules_v1
       citation: >
-        Internally governed DWCS settlement contract for deterministic grading
-        across moneyline, totals, distance, method, and exact-round markets.
-        These rules are repository policy for consistent evaluation — they are
-        not an approved external sportsbook house-rules source and must not be
-        described as universal sportsbook rules. Sportsbook-agnostic fair /
-        actionable / strong-value price guidance remains the required product
-        fallback and does not depend on this rule set.
+        Generic DWCS settlement defaults reconciled to publicly accessible
+        regulated sportsbook UFC/MMA house-rule pages (Sky Bet, Paddy Power)
+        accessed 2026-08-12. Not a claim of universal sportsbook rules.
+        Documented disagreements (notably Bodog exact-half void) live in
+        versioned overrides. See docs/research/mma-settlement-sources.md.
       references:
-        - id: dwcs_evaluation_terminal_atoms
-          locator: packaged:mma_model/evaluation/dwcs_v1.json
-          role: terminal label taxonomy (KO/TKO, submission, decision, other
-            stoppage, draw; NC/void settlement-only)
+        - id: skybet_ufc_mma_rules
+          locator: https://support.skybet.com/app/answers/detail/ufc-mma-rules
+          role: >
+            Moneyline draw void when draw not offered; NC/cancel void; totals
+            half-round at 2:30; exact 2:30 grades under; technical decision as
+            decision/points
           accessed: "2026-08-12"
-        - id: dwcs_data_contracts
-          locator: docs/data-contracts.md
-          role: repository governing product and settlement documentation
+        - id: paddypower_ufc_mma_rules
+          locator: https://helpcenter.paddypower.com/app/answers/detail/ufc-mma-rules
+          role: >
+            Match-bet draw void; NC void; totals half-round at 2:30; exact 2:30
+            grades under; technical decision as points/decision
           accessed: "2026-08-12"
-        - id: dwcs_adr_0001_boundaries
-          locator: docs/adr/0001-dwcs-system-boundaries.md
-          role: system boundary that bookmaker odds are optional enrichment
+        - id: dwcs_settlement_source_notes
+          locator: docs/research/mma-settlement-sources.md
+          role: reconciliation table, disagreements, and override map
           accessed: "2026-08-12"
     moneyline:
-      draw: push
+      draw: void
       no_contest: void
       cancellation: void
       technical_decision: settle_as_decision
@@ -57,14 +59,13 @@ rule_sets:
       no_contest: void
       cancellation: void
     totals:
-      # v1 offers half-round lines only. Boundary uses fight duration in rounds
-      # (ending_round + elapsed_seconds_in_round, or total_elapsed_seconds).
+      # Half-round lines only. Duration boundary uses elapsed_rounds.
       # Over wins when elapsed_rounds > line; under when elapsed_rounds < line;
-      # exact equality (e.g. 2:30 of round 2 for 1.5) is push.
+      # at exact equality Sky Bet / Paddy Power grade under as the winner.
       half_round_lines: [1.5, 2.5]
       half_round_boundary: elapsed_rounds
       round_seconds: 300
-      exact_half_result: push
+      exact_half_result: under
       decision_uses_full_scheduled_duration: true
       no_contest: void
       cancellation: void
@@ -79,15 +80,32 @@ rule_sets:
       no_contest: void
       cancellation: void
     exact_round:
-      # Decision / draw at distance is not a round finish → loss
       decision: loss
       draw: loss
       technical_decision: loss
       no_contest: void
       cancellation: void
 
+  bodog_mma:
+    version: "1.2.0"
+    status: externally_sourced
+    extends: mma_generic
+    source:
+      id: bodog_mma_exact_half_void
+      citation: >
+        Bodog Boxing/MMA rules: at exactly 2:30 of a 5-minute round, total-rounds
+        bets are void (disagreement vs Sky Bet / Paddy Power under-at-exact).
+      references:
+        - id: bodog_boxing_mma_betting_rules
+          locator: https://www.bodog.eu/help/common-faq/boxing-mma-betting-rules
+          role: totals exact 2:30 void for 5-minute rounds; moneyline draw no action
+          accessed: "2026-08-12"
+    overrides:
+      totals:
+        exact_half_result: void
+
   bet365_mma:
-    version: "1.1.0"
+    version: "1.2.0"
     status: provisional_pending_approved_source
     extends: mma_generic
     source:

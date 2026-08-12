@@ -26,7 +26,7 @@ def test_visible_config_matches_packaged_bytes() -> None:
     assert packaged.is_file()
     assert visible.is_file()
     assert packaged.read_bytes() == visible.read_bytes()
-    assert EXPECTED_CONTRACT_VERSION == "1.1.0"
+    assert EXPECTED_CONTRACT_VERSION == "1.2.0"
 
 
 def test_pinned_digest_matches_packaged_payload() -> None:
@@ -39,7 +39,7 @@ def test_content_hash_mismatch_fail_closed(tmp_path: Path) -> None:
     packaged = package_settlement_resource_path()
     payload = yaml.safe_load(packaged.read_text(encoding="utf-8"))
     # Silent semantic drift under the same version string.
-    payload["rule_sets"]["mma_generic"]["moneyline"]["draw"] = "void"
+    payload["rule_sets"]["mma_generic"]["moneyline"]["draw"] = "push"
     drifted = tmp_path / "settlement_drift.yaml"
     drifted.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     assert compute_settlement_hash(payload) != PINNED_SETTLEMENT_HASH

@@ -48,7 +48,7 @@ def test_moneyline_win_loss_draw_nc_cancel() -> None:
     assert settle(_ml(OutcomeKey.FIGHTER_B), facts_a).result is SettlementResult.LOSS
 
     draw = BoutSettlementFacts(scheduled_rounds=3, result_class="draw", ending_round=3)
-    assert settle(_ml(OutcomeKey.FIGHTER_A), draw).result is SettlementResult.PUSH
+    assert settle(_ml(OutcomeKey.FIGHTER_A), draw).result is SettlementResult.VOID
 
     nc = BoutSettlementFacts(scheduled_rounds=3, result_class="no_contest")
     assert settle(_ml(OutcomeKey.FIGHTER_A), nc).result is SettlementResult.VOID
@@ -109,7 +109,7 @@ def test_goes_distance_and_inside_distance() -> None:
     ("ending_round", "elapsed", "over_15", "under_15"),
     [
         (2, 149, SettlementResult.LOSS, SettlementResult.WIN),  # 2:29 — under
-        (2, 150, SettlementResult.PUSH, SettlementResult.PUSH),  # 2:30 — exact 1.5
+        (2, 150, SettlementResult.LOSS, SettlementResult.WIN),  # 2:30 — under (Sky/PP)
         (2, 151, SettlementResult.WIN, SettlementResult.LOSS),  # 2:31 — over
     ],
 )
@@ -134,7 +134,7 @@ def test_totals_1_5_boundary_before_at_after(
     ("ending_round", "elapsed", "over_25", "under_25"),
     [
         (3, 149, SettlementResult.LOSS, SettlementResult.WIN),  # 2:29 of R3 — under 2.5
-        (3, 150, SettlementResult.PUSH, SettlementResult.PUSH),  # 2:30 of R3 — exact 2.5
+        (3, 150, SettlementResult.LOSS, SettlementResult.WIN),  # 2:30 of R3 — under
         (3, 151, SettlementResult.WIN, SettlementResult.LOSS),  # 2:31 of R3 — over 2.5
     ],
 )
@@ -322,6 +322,7 @@ def test_ending_round_beyond_schedule_is_invalid_fact() -> None:
 
 
 def test_pending_and_missing_facts_unresolved() -> None:
+    # Clean pending (no completed result fields) is a valid transitional state.
     pending = BoutSettlementFacts(scheduled_rounds=3, pending=True)
     assert (
         settle(_ml(OutcomeKey.FIGHTER_A), pending).result is SettlementResult.UNRESOLVED
@@ -365,7 +366,7 @@ def test_invalid_fact_combinations_raise() -> None:
             ),
         )
 
-    with pytest.raises(SettlementFactsError, match="disagrees"):
+    with pytest.raises(SettlementFactsError, match="clock fields disagree"):
         settle(
             MarketSelection(
                 family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
@@ -394,7 +395,7 @@ def test_settlement_is_versioned_hashed_and_deterministic() -> None:
     second = settle(_ml(OutcomeKey.FIGHTER_A), facts)
     assert first == second
     assert first.rule_set_id == "mma_generic"
-    assert first.rule_set_version == "1.1.0"
+    assert first.rule_set_version == "1.2.0"
     assert first.content_hash == PINNED_SETTLEMENT_HASH
     assert first.reason
 
@@ -420,17 +421,19 @@ def test_provisional_bet365_requires_allow_flag() -> None:
         rule_set_id="bet365_mma",
         allow_provisional=True,
     )
-    assert decision.result is SettlementResult.PUSH
+    assert decision.result is SettlementResult.VOID
     assert decision.rule_set_id == "bet365_mma"
 
 
-def test_default_rules_are_internal_contract_not_approved_sportsbook() -> None:
+def test_default_rules_are_externally_sourced_public_house_rules() -> None:
     contract = load_settlement_rules()
     assert contract.contract_id == "dwcs_settlement"
-    assert contract.contract_version == "1.1.0"
+    assert contract.contract_version == "1.2.0"
     assert contract.default_rule_set_id == "mma_generic"
     generic = contract.rule_sets["mma_generic"]
-    assert generic.status.value == "internal_contract"
-    assert "not an approved external sportsbook" in generic.source.citation.lower()
-    assert generic.source.references
+    assert generic.status.value == "externally_sourced"
+    assert "not a claim of universal" in generic.source.citation.lower()
+    https_refs = [r for r in generic.source.references if r.locator.startswith("https://")]
+    assert https_refs
     assert "bet365_mma" in contract.rule_sets
+    assert "bodog_mma" in contract.rule_sets

@@ -102,9 +102,10 @@ immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 | **Authoritative rules bytes** | Packaged `mma_model/markets/settlement_v1.yaml` |
 | **Plan-visible path** | `config/markets/settlement_v1.yaml` (symlink to packaged file) |
 | **Loader** | `mma_model.markets.rules.load_settlement_rules` / `get_rule_set` |
-| **Contract id / version** | `dwcs_settlement` / `1.1.0` |
+| **Contract id / version** | `dwcs_settlement` / `1.2.0` |
 | **Pinned digest** | `PINNED_SETTLEMENT_HASH` in `rules.py` (SHA-256 of canonical JSON) |
-| **Default rule set** | `mma_generic` `1.1.0` (`internal_contract`) |
+| **Default rule set** | `mma_generic` `1.2.0` (`externally_sourced`) |
+| **Source notes** | `docs/research/mma-settlement-sources.md` |
 
 ### v1 market families and outcomes
 
@@ -140,18 +141,28 @@ rule-set id/version, and the contract `content_hash`.
 
 **Totals boundary (v1):** half-round lines use fight duration in rounds
 (`elapsed_rounds = total_elapsed_seconds / 300`). Over wins when
-`elapsed_rounds > line`; under when `elapsed_rounds < line`; exact equality
-(e.g. 2:30 of round 2 for 1.5) is `push`. Duration comes from
-`ending_round` + `elapsed_seconds_in_round`, or `total_elapsed_seconds`, or
-full scheduled duration for decisions/draws. Missing clocks → `unresolved`
-(never invent a grade). Whole-number totals lines are not offered in v1.
+`elapsed_rounds > line`; under when `elapsed_rounds < line`; at exact equality
+the default (`mma_generic`) grades **under** per Sky Bet / Paddy Power public
+rules. Bodog’s exact-half **void** is the `bodog_mma` override. Duration comes
+from `ending_round` + `elapsed_seconds_in_round`, or `total_elapsed_seconds`, or
+full scheduled duration for decisions/draws. Partial clock fields are checked
+for consistency (including round-boundary dual forms); conflicts raise
+`SettlementFactsError`. Missing clocks → `unresolved` (never invent a grade).
+Whole-number totals lines are not offered in v1.
 
-**Governance:** `mma_generic` is `internal_contract` — repository-governed grading
-policy with durable internal references (evaluation terminal atoms, data-contracts,
-ADR 0001). It is **not** an approved external sportsbook house-rules source and
-must not be described as universal sportsbook rules. The `bet365_mma` override
+**Moneyline draw:** default is `void` (Sky Bet / Paddy Power / Bodog “no
+action”), not push.
+
+**Governance:** `mma_generic` and `bodog_mma` are `externally_sourced` and must
+cite at least one public `https://` house-rules page with an access date.
+Disagreements are documented in `docs/research/mma-settlement-sources.md` and
+captured as versioned overrides — never claimed as universal. The `bet365_mma`
 lane is `provisional_pending_approved_source` and hard-fails unless
-`allow_provisional=True` after an approved citation exists.
+`allow_provisional=True`. Price guidance does not depend on settlement status.
+
+**Pending facts:** `pending=True` is a valid transitional pre-result state only
+when no completed `result_class` / winner / method is present. Pending combined
+with completed result fields or `cancelled=True` raises `SettlementFactsError`.
 
 **Pinned digest bump procedure:** edit packaged `settlement_v1.yaml` → bump
 `contract_version` and affected rule-set `version` → recompute

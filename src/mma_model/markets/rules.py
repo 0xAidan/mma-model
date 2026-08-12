@@ -31,14 +31,14 @@ from pydantic import (
 SETTLEMENT_FILENAME: Final = "settlement_v1.yaml"
 CONTRACT_ID: Final = "dwcs_settlement"
 EXPECTED_SCHEMA_VERSION: Final = 1
-EXPECTED_CONTRACT_VERSION: Final = "1.1.0"
+EXPECTED_CONTRACT_VERSION: Final = "1.2.0"
 DEFAULT_RULE_SET_ID: Final = "mma_generic"
 # Canonical digest: SHA-256 of json.dumps(..., sort_keys=True,
 # separators=(",", ":"), ensure_ascii=True) over the authoritative YAML document
 # parsed as a plain mapping (packaged mma_model/markets/settlement_v1.yaml).
 # Update only together with an intentional contract_version bump.
 PINNED_SETTLEMENT_HASH: Final = (
-    "af4772d54a5528e8972b1747096b4c8cfd1beeed1bc225f5b074743f38186e7c"
+    "7403941cc821e340eaf4bb50e969a6882be19f72460e808038e1567a64993ff4"
 )
 
 
@@ -69,14 +69,15 @@ class ProvisionalRuleSetError(SettlementRulesError):
 class RuleSetStatus(StrEnum):
     """Governance status for a settlement rule set.
 
-    ``internal_contract`` — repository-governed grading rules (default path).
-    Not an approved external sportsbook source.
+    ``externally_sourced`` — defaults/overrides reconciled to durable public
+    sportsbook house-rule pages (https citations + access dates required).
 
     ``provisional_pending_approved_source`` — sportsbook override lane that
     requires ``allow_provisional=True`` until a durable approved citation exists.
+    Must not be the contract default.
     """
 
-    INTERNAL_CONTRACT = "internal_contract"
+    EXTERNALLY_SOURCED = "externally_sourced"
     PROVISIONAL_PENDING_APPROVED_SOURCE = "provisional_pending_approved_source"
 
 
@@ -129,12 +130,16 @@ class GoesDistanceRules(_FrozenModel):
 
 
 class TotalsRules(_FrozenModel):
-    """v1 totals: half-round lines only, elapsed-rounds boundary, push at exact half."""
+    """v1 totals: half-round lines only with elapsed-rounds boundary.
+
+    ``exact_half_result`` encodes the disputed exact-mark policy:
+    ``under`` (Sky Bet / Paddy Power), ``void`` (Bodog), or ``push`` / ``over``.
+    """
 
     half_round_lines: tuple[float, ...]
     half_round_boundary: Literal["elapsed_rounds"]
     round_seconds: int
-    exact_half_result: Literal["push"]
+    exact_half_result: Literal["under", "void", "push", "over"]
     decision_uses_full_scheduled_duration: bool
     no_contest: SideEffect
     cancellation: SideEffect
@@ -189,6 +194,33 @@ class SettlementRuleSet(_FrozenModel):
     extends: str | None = None
     contract_content_hash: str = Field(min_length=64, max_length=64)
 
+    @model_validator(mode="after")
+    def _validate_governance(self) -> SettlementRuleSet:
+        https_refs = tuple(
+            ref
+            for ref in self.source.references
+            if ref.locator.startswith("https://")
+        )
+        if self.status is RuleSetStatus.EXTERNALLY_SOURCED:
+            if not https_refs:
+                raise ValueError(
+                    f"externally_sourced rule set {self.rule_set_id!r} requires at "
+                    "least one https:// public reference with an access date"
+                )
+            for ref in https_refs:
+                if not str(ref.accessed).strip():
+                    raise ValueError(
+                        f"reference {ref.id!r} on {self.rule_set_id!r} missing accessed date"
+                    )
+        if self.status is RuleSetStatus.PROVISIONAL_PENDING_APPROVED_SOURCE:
+            citation_l = self.source.citation.lower()
+            if "approved external" in citation_l and "not" not in citation_l:
+                raise ValueError(
+                    f"provisional rule set {self.rule_set_id!r} must not claim "
+                    "approved external status"
+                )
+        return self
+
 
 class SettlementRulesContract(_FrozenModel):
     schema_version: int
@@ -210,6 +242,11 @@ class SettlementRulesContract(_FrozenModel):
         if self.default_rule_set_id not in self.rule_sets:
             raise ValueError(
                 f"default_rule_set_id {self.default_rule_set_id!r} missing from rule_sets"
+            )
+        default = self.rule_sets[self.default_rule_set_id]
+        if default.status is RuleSetStatus.PROVISIONAL_PENDING_APPROVED_SOURCE:
+            raise ValueError(
+                "default_rule_set_id must not be provisional_pending_approved_source"
             )
         return self
 
@@ -403,4 +440,3 @@ def get_rule_set(
             "pass allow_provisional=True only after an approved source citation exists"
         )
     return rule_set
-

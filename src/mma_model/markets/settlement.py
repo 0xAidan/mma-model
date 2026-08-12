@@ -126,6 +126,110 @@ def _normalize_method(
     return method
 
 
+def clock_pairs_for_total(
+    total: int,
+    *,
+    scheduled_rounds: int,
+    round_seconds: int,
+) -> frozenset[tuple[int, int]]:
+    """Canonical (ending_round, elapsed_in_round) pairs for a total duration.
+
+    Round-boundary equivalence: end of round ``r`` at ``round_seconds`` is also
+    representable as start of round ``r+1`` at ``0`` when ``r < scheduled_rounds``.
+    """
+    if total < 0 or total > scheduled_rounds * round_seconds:
+        return frozenset()
+    if total == 0:
+        return frozenset({(1, 0)})
+    full, rem = divmod(total, round_seconds)
+    pairs: set[tuple[int, int]] = set()
+    if rem == 0:
+        # Exactly at end of round ``full``.
+        pairs.add((full, round_seconds))
+        if full < scheduled_rounds:
+            pairs.add((full + 1, 0))
+    else:
+        ending = full + 1
+        if 1 <= ending <= scheduled_rounds:
+            pairs.add((ending, rem))
+    return frozenset(
+        (er, es)
+        for er, es in pairs
+        if 1 <= er <= scheduled_rounds and 0 <= es <= round_seconds
+    )
+
+
+def _validate_clock_consistency(
+    facts: BoutSettlementFacts,
+    *,
+    round_seconds: int,
+) -> None:
+    """Fail closed when any provided clock fields contradict each other."""
+    ending = facts.ending_round
+    in_round = facts.elapsed_seconds_in_round
+    total = facts.total_elapsed_seconds
+
+    if ending is not None and (
+        ending < 1 or ending > facts.scheduled_rounds
+    ):
+        raise SettlementFactsError(
+            f"ending_round {ending} outside schedule 1..{facts.scheduled_rounds}"
+        )
+    if in_round is not None and (in_round < 0 or in_round > round_seconds):
+        raise SettlementFactsError(
+            f"elapsed_seconds_in_round {in_round} outside 0..{round_seconds}"
+        )
+    if total is not None:
+        max_total = facts.scheduled_rounds * round_seconds
+        if total < 0 or total > max_total:
+            raise SettlementFactsError(
+                f"total_elapsed_seconds {total} outside 0..{max_total}"
+            )
+
+    if ending is not None and in_round is not None and total is not None:
+        allowed = clock_pairs_for_total(
+            total,
+            scheduled_rounds=facts.scheduled_rounds,
+            round_seconds=round_seconds,
+        )
+        if (ending, in_round) not in allowed:
+            raise SettlementFactsError(
+                "clock fields disagree: ending_round="
+                f"{ending}, elapsed_seconds_in_round={in_round}, "
+                f"total_elapsed_seconds={total}"
+            )
+        return
+
+    if ending is not None and in_round is not None:
+        # Unique derived total — always consistent once bounds pass.
+        return
+
+    if ending is not None and total is not None:
+        allowed = clock_pairs_for_total(
+            total,
+            scheduled_rounds=facts.scheduled_rounds,
+            round_seconds=round_seconds,
+        )
+        if not any(er == ending for er, _es in allowed):
+            raise SettlementFactsError(
+                f"ending_round={ending} inconsistent with "
+                f"total_elapsed_seconds={total}"
+            )
+        return
+
+    if in_round is not None and total is not None:
+        allowed = clock_pairs_for_total(
+            total,
+            scheduled_rounds=facts.scheduled_rounds,
+            round_seconds=round_seconds,
+        )
+        if not any(es == in_round for _er, es in allowed):
+            raise SettlementFactsError(
+                f"elapsed_seconds_in_round={in_round} inconsistent with "
+                f"total_elapsed_seconds={total}"
+            )
+
+
 def validate_settlement_facts(
     facts: BoutSettlementFacts,
     *,
@@ -140,40 +244,22 @@ def validate_settlement_facts(
     if round_seconds <= 0:
         raise SettlementFactsError(f"round_seconds must be positive, got {round_seconds}")
 
-    if facts.ending_round is not None and (
-        facts.ending_round < 1 or facts.ending_round > facts.scheduled_rounds
-    ):
-        raise SettlementFactsError(
-            f"ending_round {facts.ending_round} outside schedule "
-            f"1..{facts.scheduled_rounds}"
-        )
-    if facts.elapsed_seconds_in_round is not None and (
-        facts.elapsed_seconds_in_round < 0
-        or facts.elapsed_seconds_in_round > round_seconds
-    ):
-        raise SettlementFactsError(
-            f"elapsed_seconds_in_round {facts.elapsed_seconds_in_round} "
-            f"outside 0..{round_seconds}"
-        )
-    if facts.total_elapsed_seconds is not None:
-        max_total = facts.scheduled_rounds * round_seconds
-        if facts.total_elapsed_seconds < 0 or facts.total_elapsed_seconds > max_total:
-            raise SettlementFactsError(
-                f"total_elapsed_seconds {facts.total_elapsed_seconds} "
-                f"outside 0..{max_total}"
-            )
+    _validate_clock_consistency(facts, round_seconds=round_seconds)
 
-    if (
-        facts.ending_round is not None
-        and facts.elapsed_seconds_in_round is not None
-        and facts.total_elapsed_seconds is not None
-    ):
-        derived = (facts.ending_round - 1) * round_seconds + facts.elapsed_seconds_in_round
-        if derived != facts.total_elapsed_seconds:
+    if facts.pending and facts.cancelled:
+        raise SettlementFactsError("pending bout cannot also be cancelled")
+
+    if facts.pending:
+        # Pending is a pre-result state. Completed result fields are contradictory.
+        if facts.result_class is not None:
             raise SettlementFactsError(
-                "total_elapsed_seconds disagrees with ending_round + "
-                f"elapsed_seconds_in_round ({facts.total_elapsed_seconds} != {derived})"
+                f"pending bout cannot have result_class={facts.result_class!r}"
             )
+        if facts.winner_side is not None:
+            raise SettlementFactsError("pending bout cannot have winner_side")
+        if facts.method is not None:
+            raise SettlementFactsError("pending bout cannot have method")
+        return
 
     if facts.cancelled:
         if facts.result_class in {"decisive", "draw", "no_contest"}:
@@ -184,9 +270,6 @@ def validate_settlement_facts(
             raise SettlementFactsError("cancelled bout cannot have winner_side")
         if facts.method is not None:
             raise SettlementFactsError("cancelled bout cannot have method")
-        return
-
-    if facts.pending:
         return
 
     if facts.result_class == "draw":
@@ -372,15 +455,40 @@ def _settle_totals(
 
     elapsed_rounds = total_seconds / float(rules.round_seconds)
     threshold = float(line)
-    # v1 schema fixes exact_half_result to push (encoded in TotalsRules).
-    _ = rules.exact_half_result
     if elapsed_rounds == threshold:
-        return _decision(
-            SettlementResult.PUSH,
-            f"elapsed_rounds={elapsed_rounds} equals line={line} "
-            f"(total_elapsed_seconds={total_seconds})",
-            rule_set,
-        )
+        exact = rules.exact_half_result
+        if exact == "push":
+            return _decision(
+                SettlementResult.PUSH,
+                f"elapsed_rounds={elapsed_rounds} equals line={line} "
+                f"(exact_half_result=push, total_elapsed_seconds={total_seconds})",
+                rule_set,
+            )
+        if exact == "void":
+            return _decision(
+                SettlementResult.VOID,
+                f"elapsed_rounds={elapsed_rounds} equals line={line} "
+                f"(exact_half_result=void, total_elapsed_seconds={total_seconds})",
+                rule_set,
+            )
+        if exact == "under":
+            won = selection.outcome is OutcomeKey.UNDER
+            return _decision(
+                SettlementResult.WIN if won else SettlementResult.LOSS,
+                f"elapsed_rounds={elapsed_rounds} equals line={line} "
+                f"(exact_half_result=under, total_elapsed_seconds={total_seconds})",
+                rule_set,
+            )
+        if exact == "over":
+            won = selection.outcome is OutcomeKey.OVER
+            return _decision(
+                SettlementResult.WIN if won else SettlementResult.LOSS,
+                f"elapsed_rounds={elapsed_rounds} equals line={line} "
+                f"(exact_half_result=over, total_elapsed_seconds={total_seconds})",
+                rule_set,
+            )
+        never_exact: Never = exact
+        raise ValueError(f"unhandled exact_half_result: {never_exact!r}")
     over_wins = elapsed_rounds > threshold
     won = over_wins if selection.outcome is OutcomeKey.OVER else not over_wins
     return _decision(
