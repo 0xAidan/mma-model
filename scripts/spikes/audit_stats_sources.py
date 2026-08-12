@@ -60,6 +60,9 @@ DIFFICULT_IDENTITY_SAMPLE_SIZE = 50
 EVENT_COVERAGE_MIN = 0.98
 BOUT_COVERAGE_MIN = 0.98
 OUTCOME_AGREEMENT_MIN = 0.99
+# Universe-wide required-feature support (fight fields + fight_stats fields).
+# A small sample must never clear this gate.
+REQUIRED_FEATURE_COVERAGE_MIN = 0.98
 API_SPORTS_NON_OVERLAP_MIN = 0.10
 MONTHLY_BUDGET_CAP_CENTS = 10000
 THE_ODDS_API_CENTS = 3000
@@ -1137,53 +1140,209 @@ def compute_api_sports_accuracy(
     }
 
 
+def _field_present(row: Mapping[str, Any], field: str) -> bool:
+    return field in row and row.get(field) not in (None, "", [])
+
+
 def evaluate_required_features(
-    sample_fights: Sequence[Mapping[str, Any]],
-    sample_stats: Sequence[Mapping[str, Any]] | None = None,
+    matched_fights: Sequence[Mapping[str, Any]],
+    bout_stat_observations: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    coverage_min: float = REQUIRED_FEATURE_COVERAGE_MIN,
 ) -> dict[str, Any]:
-    if not sample_fights:
+    """Universe-wide required-feature gate for matched bouts.
+
+    Fight-level fields and fight_stats fields are scored separately. Denominator
+    for every required field is ``len(matched_fights)``. A partial stat sample
+    can never produce ``status=pass`` — probing must cover the full matched
+    universe, and each field rate must be >= ``coverage_min``.
+    """
+    denominator = len(matched_fights)
+    empty_fight_fields = {
+        field: {
+            "numerator": None,
+            "denominator": denominator,
+            "rate": None,
+            "status": "unknown",
+        }
+        for field in REQUIRED_FIGHT_FIELDS
+    }
+    empty_stat_fields = {
+        field: {
+            "numerator": None,
+            "denominator": denominator,
+            "rate": None,
+            "status": "unknown",
+        }
+        for field in REQUIRED_STAT_FIELDS
+    }
+    if denominator == 0:
         return {
             "status": "unknown",
-            "reason": "no_sample_fights",
+            "reason": "no_matched_fights",
+            "coverage_min": coverage_min,
+            "fight_fields": {
+                "status": "unknown",
+                "denominator": 0,
+                "fields": empty_fight_fields,
+            },
+            "stat_fields": {
+                "status": "unknown",
+                "denominator": 0,
+                "probed": 0,
+                "fields": empty_stat_fields,
+            },
             "missing_fight_fields": list(REQUIRED_FIGHT_FIELDS),
             "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
         }
-    missing_fight: set[str] = set()
-    for fight in sample_fights:
-        for field in REQUIRED_FIGHT_FIELDS:
-            if field not in fight or fight.get(field) in (None, "", []):
-                missing_fight.add(field)
-    missing_stat: set[str] = set()
-    if sample_stats is None:
+
+    fight_field_metrics: dict[str, Any] = {}
+    missing_fight: list[str] = []
+    for field in REQUIRED_FIGHT_FIELDS:
+        numerator = sum(1 for fight in matched_fights if _field_present(fight, field))
+        rate = numerator / denominator
+        fight_field_metrics[field] = {
+            "numerator": numerator,
+            "denominator": denominator,
+            "rate": rate,
+            "status": "measured",
+        }
+        if rate < coverage_min:
+            missing_fight.append(field)
+    fight_status: GateStatus = "pass" if not missing_fight else "fail"
+
+    if bout_stat_observations is None:
         return {
             "status": "unknown",
             "reason": "stat_samples_not_probed",
-            "missing_fight_fields": sorted(missing_fight),
+            "coverage_min": coverage_min,
+            "fight_fields": {
+                "status": fight_status,
+                "denominator": denominator,
+                "fields": fight_field_metrics,
+            },
+            "stat_fields": {
+                "status": "unknown",
+                "denominator": denominator,
+                "probed": 0,
+                "fields": empty_stat_fields,
+            },
+            "missing_fight_fields": missing_fight,
             "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
         }
-    if not sample_stats:
+
+    obs_by_fight = {
+        str(item.get("fight_id")): dict(item)
+        for item in bout_stat_observations
+        if item.get("fight_id") is not None
+    }
+    matched_fight_ids = [
+        str(fight.get("id")) for fight in matched_fights if fight.get("id") is not None
+    ]
+    probed_ids = [
+        fight_id
+        for fight_id in matched_fight_ids
+        if fight_id in obs_by_fight
+        and str(obs_by_fight[fight_id].get("status") or "") != "not_probed"
+    ]
+    probed = len(probed_ids)
+    complete = probed == denominator and len(matched_fight_ids) == denominator
+
+    stat_field_metrics: dict[str, Any] = {}
+    missing_stat: list[str] = []
+    for field in REQUIRED_STAT_FIELDS:
+        numerator = 0
+        for fight_id in matched_fight_ids:
+            obs = obs_by_fight.get(fight_id)
+            if obs is None:
+                continue
+            if str(obs.get("status") or "") != "present":
+                continue
+            fields = obs.get("fields") if isinstance(obs.get("fields"), Mapping) else {}
+            if fields.get(field) is True:
+                numerator += 1
+        rate = numerator / denominator
+        stat_field_metrics[field] = {
+            "numerator": numerator,
+            "denominator": denominator,
+            "rate": rate,
+            "status": "measured" if complete else "unknown",
+        }
+        if complete and rate < coverage_min:
+            missing_stat.append(field)
+
+    if not bout_stat_observations:
         return {
             "status": "fail",
             "reason": "stat_samples_empty",
-            "missing_fight_fields": sorted(missing_fight),
+            "coverage_min": coverage_min,
+            "fight_fields": {
+                "status": fight_status,
+                "denominator": denominator,
+                "fields": fight_field_metrics,
+            },
+            "stat_fields": {
+                "status": "fail",
+                "denominator": denominator,
+                "probed": 0,
+                "fields": {
+                    field: {
+                        "numerator": 0,
+                        "denominator": denominator,
+                        "rate": 0.0,
+                        "status": "measured",
+                    }
+                    for field in REQUIRED_STAT_FIELDS
+                },
+            },
+            "missing_fight_fields": missing_fight,
             "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
         }
-    for stat in sample_stats:
-        for field in REQUIRED_STAT_FIELDS:
-            if field not in stat or stat.get(field) is None:
-                missing_stat.add(field)
-    if missing_fight or missing_stat:
+
+    if not complete:
         return {
-            "status": "fail",
-            "reason": "required_fields_missing",
-            "missing_fight_fields": sorted(missing_fight),
-            "missing_stat_fields": sorted(missing_stat),
+            "status": "unknown",
+            "reason": "stat_probe_incomplete",
+            "coverage_min": coverage_min,
+            "fight_fields": {
+                "status": fight_status,
+                "denominator": denominator,
+                "fields": fight_field_metrics,
+            },
+            "stat_fields": {
+                "status": "unknown",
+                "denominator": denominator,
+                "probed": probed,
+                "fields": stat_field_metrics,
+            },
+            "missing_fight_fields": missing_fight,
+            "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
         }
+
+    stat_status: GateStatus = "pass" if not missing_stat else "fail"
+    if fight_status == "pass" and stat_status == "pass":
+        overall: GateStatus = "pass"
+        reason: str | None = None
+    else:
+        overall = "fail"
+        reason = "required_feature_coverage_below_min"
     return {
-        "status": "pass",
-        "reason": None,
-        "missing_fight_fields": [],
-        "missing_stat_fields": [],
+        "status": overall,
+        "reason": reason,
+        "coverage_min": coverage_min,
+        "fight_fields": {
+            "status": fight_status,
+            "denominator": denominator,
+            "fields": fight_field_metrics,
+        },
+        "stat_fields": {
+            "status": stat_status,
+            "denominator": denominator,
+            "probed": probed,
+            "fields": stat_field_metrics,
+        },
+        "missing_fight_fields": missing_fight,
+        "missing_stat_fields": missing_stat,
     }
 
 
@@ -1571,6 +1730,18 @@ def _empty_provider_metrics(
         "required_features": {
             "status": "unknown",
             "reason": unknown,
+            "coverage_min": REQUIRED_FEATURE_COVERAGE_MIN,
+            "fight_fields": {
+                "status": "unknown",
+                "denominator": denominator_bouts,
+                "fields": {},
+            },
+            "stat_fields": {
+                "status": "unknown",
+                "denominator": denominator_bouts,
+                "probed": 0,
+                "fields": {},
+            },
             "missing_fight_fields": [],
             "missing_stat_fields": [],
         },
@@ -1622,7 +1793,7 @@ def measure_balldontlie_from_observations(
     bouts: Sequence[Mapping[str, Any]],
     provider_fights: Sequence[Mapping[str, Any]],
     difficult_identity_results: Sequence[Mapping[str, Any]],
-    sample_stats: Sequence[Mapping[str, Any]] | None = None,
+    bout_stat_observations: Sequence[Mapping[str, Any]] | None = None,
     latencies_ms: Sequence[float] | None = None,
     request_count: int | None = None,
     pre_fight_reconstruction_status: str | None = None,
@@ -1652,7 +1823,10 @@ def measure_balldontlie_from_observations(
         difficult_identity_results,
         expected_size=DIFFICULT_IDENTITY_SAMPLE_SIZE,
     )
-    required = evaluate_required_features(matched_fights, sample_stats)
+    required = evaluate_required_features(
+        matched_fights,
+        bout_stat_observations=bout_stat_observations,
+    )
     pit = evaluate_pit_fitness(
         {
             "latencies_ms": list(latencies_ms or []),
@@ -1662,6 +1836,13 @@ def measure_balldontlie_from_observations(
             "field_null_rates": field_null_rates,
         }
     )
+    present_stats = 0
+    if bout_stat_observations is not None:
+        present_stats = sum(
+            1
+            for item in bout_stat_observations
+            if str(item.get("status") or "") == "present"
+        )
     return {
         "access_status": "ok",
         "metrics_status": "measured",
@@ -1682,10 +1863,18 @@ def measure_balldontlie_from_observations(
             reason=difficult.get("reason"),
         ),
         "stat_coverage": make_rate_metric(
-            numerator=len(sample_stats) if sample_stats is not None else None,
-            denominator=len(matched_bout_ids) if sample_stats is not None else len(bout_ids),
-            status="measured" if sample_stats is not None else "unknown",
-            reason=None if sample_stats is not None else "stat_samples_not_probed",
+            numerator=present_stats if bout_stat_observations is not None else None,
+            denominator=(
+                len(matched_bout_ids)
+                if bout_stat_observations is not None
+                else len(bout_ids)
+            ),
+            status="measured" if bout_stat_observations is not None else "unknown",
+            reason=(
+                None
+                if bout_stat_observations is not None
+                else "stat_samples_not_probed"
+            ),
         ),
         "required_features": required,
         "pit_fitness": pit,
@@ -1707,6 +1896,72 @@ def measure_balldontlie_from_observations(
     }
 
 
+def _summarize_fight_stat_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, bool]:
+    """Sanitize fight_stats rows to per-required-field presence flags only."""
+    present = {field: False for field in REQUIRED_STAT_FIELDS}
+    for row in rows:
+        for field in REQUIRED_STAT_FIELDS:
+            if _field_present(row, field):
+                present[field] = True
+    return present
+
+
+def _load_stat_probe_checkpoint(path: Path | None) -> dict[str, dict[str, Any]]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    probed = payload.get("probed") if isinstance(payload, Mapping) else None
+    if not isinstance(probed, Mapping):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for fight_id, item in probed.items():
+        if not isinstance(item, Mapping):
+            continue
+        status = str(item.get("status") or "")
+        if status not in {"present", "absent", "request_failed", "entitlement_blocked"}:
+            continue
+        fields = item.get("fields") if isinstance(item.get("fields"), Mapping) else {}
+        out[str(fight_id)] = {
+            "fight_id": str(fight_id),
+            "status": status,
+            "fields": {
+                field: bool(fields.get(field) is True) for field in REQUIRED_STAT_FIELDS
+            },
+        }
+    return out
+
+
+def _write_stat_probe_checkpoint(
+    path: Path | None,
+    probed: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sanitized = {
+        "schema": "balldontlie_stat_probe_checkpoint_v1",
+        "probed": {
+            fight_id: {
+                "status": item.get("status"),
+                "fields": {
+                    field: bool((item.get("fields") or {}).get(field) is True)
+                    for field in REQUIRED_STAT_FIELDS
+                },
+            }
+            for fight_id, item in probed.items()
+        },
+    }
+    path.write_text(
+        json.dumps(sanitized, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def probe_balldontlie_live(
     *,
     api_key: str,
@@ -1715,6 +1970,7 @@ def probe_balldontlie_live(
     timeout_sec: float = 20.0,
     max_requests: int = 120,
     sleep_fn: Any = time.sleep,
+    stat_checkpoint_path: Path | None = None,
 ) -> dict[str, Any]:
     """Measured live probe. Returns sanitized metrics only (no full payloads)."""
     headers = {"Authorization": api_key}
@@ -1724,7 +1980,6 @@ def probe_balldontlie_live(
     error: str | None = None
     authenticated_ok_prior = False
     last_headers: dict[str, str] = {}
-
     def _blocked_payload(
         *,
         reason: str,
@@ -1890,43 +2145,109 @@ def probe_balldontlie_live(
             provider_event_count=len(provider_events),
         )
 
-    sample_stats: list[dict[str, Any]] | None = None
-    # Required-feature stat contract needs fight_stats (GOAT). Probe a small
-    # deterministic sample only when fights were retrieved.
+    # Required-feature stat contract needs fight_stats across the full matched
+    # universe. Never clear the gate from a small sample.
+    bout_stat_observations: list[dict[str, Any]] | None = None
     if provider_fights and not fights_entitlement_blocked:
-        sample_stats = []
-        for fight in provider_fights[:3]:
-            if request_count >= max_requests or access != "ok":
-                break
-            fight_id = fight.get("id")
-            if fight_id is None:
+        matched_for_stats: list[dict[str, Any]] = []
+        seen_fight_ids: set[str] = set()
+        for bout in bouts:
+            matched = match_bout_to_provider_fight(bout, provider_fights)
+            if matched is None or matched.get("id") is None:
                 continue
+            fight_key = str(matched["id"])
+            if fight_key in seen_fight_ids:
+                continue
+            seen_fight_ids.add(fight_key)
+            matched_for_stats.append(dict(matched))
+
+        checkpoint = _load_stat_probe_checkpoint(stat_checkpoint_path)
+        observations: dict[str, dict[str, Any]] = dict(checkpoint)
+        stats_entitlement_blocked = False
+        for fight in matched_for_stats:
+            fight_key = str(fight["id"])
+            if fight_key in observations:
+                continue
+            if request_count >= max_requests:
+                access = "quota_exceeded"
+                error = "local_max_requests"
+                break
+            if access != "ok":
+                break
             _status, body, _headers = _get(
                 "/fight_stats",
-                {"fight_ids[]": fight_id, "per_page": 100},
+                {"fight_ids[]": fight["id"], "per_page": 100},
             )
             if access == "entitlement_blocked":
-                # Stats tier missing: keep measured fights but leave required
-                # features unknown via empty/None sample semantics below.
-                sample_stats = None
+                stats_entitlement_blocked = True
+                access = "ok"
+                error = None
+                break
+            if access == "quota_exceeded":
+                observations[fight_key] = {
+                    "fight_id": fight_key,
+                    "status": "request_failed",
+                    "fields": {field: False for field in REQUIRED_STAT_FIELDS},
+                }
                 access = "ok"
                 error = None
                 break
             if access != "ok":
-                break
+                observations[fight_key] = {
+                    "fight_id": fight_key,
+                    "status": "request_failed",
+                    "fields": {field: False for field in REQUIRED_STAT_FIELDS},
+                }
+                access = "ok"
+                error = None
+                continue
             data = body.get("data") if isinstance(body, Mapping) else None
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, Mapping):
-                        sample_stats.append(
-                            {
-                                "significant_strikes_landed": item.get(
-                                    "significant_strikes_landed"
-                                ),
-                                "takedowns_landed": item.get("takedowns_landed"),
-                                "control_time_seconds": item.get("control_time_seconds"),
-                            }
-                        )
+            rows = [
+                dict(item)
+                for item in (data or [])
+                if isinstance(item, Mapping)
+            ] if isinstance(data, list) else []
+            if rows:
+                observations[fight_key] = {
+                    "fight_id": fight_key,
+                    "status": "present",
+                    "fields": _summarize_fight_stat_rows(rows),
+                }
+            else:
+                observations[fight_key] = {
+                    "fight_id": fight_key,
+                    "status": "absent",
+                    "fields": {field: False for field in REQUIRED_STAT_FIELDS},
+                }
+            _write_stat_probe_checkpoint(stat_checkpoint_path, observations)
+
+        if stats_entitlement_blocked:
+            bout_stat_observations = None
+        else:
+            # Preserve explicit not_probed slots so incomplete coverage is visible.
+            bout_stat_observations = []
+            for fight in matched_for_stats:
+                fight_key = str(fight["id"])
+                if fight_key in observations:
+                    bout_stat_observations.append(observations[fight_key])
+                else:
+                    bout_stat_observations.append(
+                        {
+                            "fight_id": fight_key,
+                            "status": "not_probed",
+                            "fields": {
+                                field: False for field in REQUIRED_STAT_FIELDS
+                            },
+                        }
+                    )
+            _write_stat_probe_checkpoint(
+                stat_checkpoint_path,
+                {
+                    str(item["fight_id"]): item
+                    for item in bout_stat_observations
+                    if item.get("status") != "not_probed"
+                },
+            )
 
     difficult_results: list[dict[str, Any]] = []
     for entrant in difficult_identities:
@@ -2003,7 +2324,7 @@ def probe_balldontlie_live(
         bouts=bouts,
         provider_fights=provider_fights,
         difficult_identity_results=difficult_results,
-        sample_stats=sample_stats,
+        bout_stat_observations=bout_stat_observations,
         latencies_ms=latencies,
         request_count=request_count,
         pre_fight_reconstruction_status=None,
@@ -2656,12 +2977,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-live-requests-balldontlie",
         type=int,
-        default=120,
+        default=300,
+        help=(
+            "Bounded live request budget. Full matched-bout fight_stats probing "
+            "needs headroom beyond event/fight/identity discovery."
+        ),
     )
     parser.add_argument(
         "--max-live-requests-api-sports",
         type=int,
         default=30,
+    )
+    parser.add_argument(
+        "--stat-checkpoint",
+        type=Path,
+        default=Path("output/research/.balldontlie-stat-probe-checkpoint.json"),
+        help=(
+            "Sanitized fight_stats progress checkpoint (field presence only; "
+            "never commit raw licensed payloads)"
+        ),
     )
     return parser
 
@@ -2715,6 +3049,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bouts=filtered,
                 difficult_identities=difficult,
                 max_requests=args.max_live_requests_balldontlie,
+                stat_checkpoint_path=args.stat_checkpoint,
             )
         if api_key:
             live_observations["api_sports"] = probe_api_sports_live(

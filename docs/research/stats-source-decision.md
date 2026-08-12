@@ -11,22 +11,22 @@ This document records method, citations, gates, and the handoff contract. It doe
 ## Phase 0 acceptance posture (important)
 
 Phase 0 **permits** an explicit hard blocker when any required gate fails or
-remains unknown (credentials, entitlements, PIT fitness, or written vendor
-quotes). That is a documented risk, not a silent pass.
+remains unknown (credentials, entitlements, required features, PIT fitness, or
+written vendor quotes). That is a documented risk, not a silent pass.
 
 For this post-entitlement-upgrade revalidation capture, acceptance evidence is:
 
 1. A reproducible committed scorecard in `capture_mode=live` with
    `live_measurements_claimed=true`, `providers.balldontlie.access_status=ok`,
-   measured event/bout/outcome aggregates, and
-   `decision.path=hard_blocker` / `primary=null` because **PIT fitness remains
-   unknown** (pre-fight reconstruction + revision support unproven).
+   measured event/bout/outcome aggregates, **universe-wide** required-feature
+   scoring (fight fields vs fight_stats fields reported separately), and
+   `decision.path=hard_blocker` / `primary=null`.
 2. Sanitized aggregate metrics only (no raw licensed payloads).
-3. Difficult-identity hits alone do **not** qualify adoption; every required gate
-   must pass through the committed decision tree.
+3. A small fight_stats sample must never produce a global required-features pass.
+4. Difficult-identity hits alone do **not** qualify adoption.
 
 It is **not** adoption. Coverage was measured, not invented. HTTP success and
-identity hits do not auto-pass PIT.
+identity hits do not auto-pass PIT or required features.
 
 ## Goal
 
@@ -72,7 +72,8 @@ entrant slice as the identity metric.
 | Bout coverage | Unique matched bouts / unique frozen bouts. |
 | Outcome agreement | Comparable mapped pairs only: provider winner/result vs manifest **event-night** result. Unmapped/ambiguous excluded (`denominator_policy=comparable_mapped_pairs_only`). |
 | Difficult identities | Partition of probed sample into hit / miss / unknown. |
-| PIT / required features / nulls / revisions / latency / request cost | Measured when evidenced; otherwise `unknown` with reason. HTTP success alone does **not** auto-fail or auto-pass. |
+| Required features | Fight-level fields and fight_stats fields scored **separately**. Denominator for every required field is the matched-bout universe (149). Pass requires full-universe stat probing and each field rate ≥ **0.98**. Partial samples ⇒ `unknown` (`stat_probe_incomplete`), never pass. |
+| PIT / nulls / revisions / latency / request cost | Measured when evidenced; otherwise `unknown` with reason. HTTP success alone does **not** auto-fail or auto-pass. |
 | API-Sports non-overlap | Fingerprinted provider pre-DWCS history bouts not present in the DWCS universe / total fingerprintable history. |
 | Year diagnostics | Informational only (`years_with_any_provider_dwcs_named_events`); never used as event coverage. |
 
@@ -125,16 +126,17 @@ blockers** until answered in writing
 ## Live credential outcomes (this PR capture)
 
 Committed scorecard: **`live`**,
-`captured_at=2026-08-12T02:05:00+00:00`,
+`captured_at=2026-08-12T02:20:00+00:00`,
 `live_measurements_claimed=true`,
 `acceptance_evidence_mode=measured_or_blocked_probe`.
 
 Minimal entitlement probe (sanitized): `/fights` → `access_status=ok`,
-`http_status=200`, observed `x-ratelimit-limit=600`.
+observed `x-ratelimit-limit=600`. Full matched-universe `/fight_stats` probe:
+**149/149** bouts probed (checkpointed sanitized field-presence only).
 
 | Provider | Credential / access | Outcome |
 |----------|---------------------|---------|
-| BALLDONTLIE | Key present; fights entitlement ok (600 RPM) | Measured: event **30/30 (1.0)**, bout **149/149 (1.0)**, outcome agreement **149/149 (1.0)**, required_features **pass**, difficult-identity **50/50 hit**. PIT fitness **unknown** (`pre_fight_reconstruction_unproven,revision_support_unproven`). Field null rates not probed. |
+| BALLDONTLIE | Key present; fights+stats entitled (600 RPM) | event **30/30 (1.0)**; bout **149/149 (1.0)**; outcome **149/149 (1.0)**; fight fields **pass** (149/149 each); stat fields: `significant_strikes_landed` **149/149**, `takedowns_landed` **149/149**, `control_time_seconds` **98/149 (≈0.658)** → required_features **fail**; PIT **unknown**; identity **50/50 hit** |
 | API-Sports | `API_SPORTS_KEY` absent | `not_configured`; non-overlap/accuracy **unknown** |
 | SportsDataIO / Combat Registry | No written quote on file | `quote_pending` blockers |
 
@@ -145,10 +147,11 @@ python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
   --capture-mode live \
-  --capture-time 2026-08-12T02:05:00+00:00 \
+  --capture-time 2026-08-12T02:20:00+00:00 \
   --env-file /path/to/.env \
   --redact \
-  --max-live-requests-balldontlie 180
+  --max-live-requests-balldontlie 300 \
+  --stat-checkpoint output/research/.balldontlie-stat-probe-checkpoint.json
 ```
 
 Synthetic unit fixtures under
@@ -166,7 +169,7 @@ Technical gate snapshot (BALLDONTLIE):
 | event_coverage | 30/30 = 1.0 (≥0.98) |
 | bout_coverage | 149/149 = 1.0 (≥0.98) |
 | outcome_agreement | 149/149 = 1.0 (≥0.99) |
-| required_features | pass |
+| required_features | **fail** (`control_time_seconds` 98/149 < 0.98) |
 | pit_fitness | **unknown** (reconstruction + revision unproven) |
 | rights | pass |
 | budget | pass (6999¢ ≤ 10000¢) |
@@ -174,17 +177,17 @@ Technical gate snapshot (BALLDONTLIE):
 
 Reasons:
 
-1. BALLDONTLIE clears coverage, outcome agreement, required features, rights, and
-   budget, but **PIT fitness remains unknown**. The live probe does not invent a
-   PIT pass from HTTP success; pre-fight reconstruction and revision support stay
-   unproven. Decision tree therefore keeps `primary=null`.
+1. BALLDONTLIE clears coverage and outcome agreement, but required features fail
+   under the universe-wide fight_stats contract (`control_time_seconds` coverage
+   below 0.98). PIT fitness also remains unknown. Decision tree keeps
+   `primary=null`.
 2. SportsDataIO / Combat Registry lack complete written quotes with measured
    thresholds.
 3. API-Sports probe cannot be kept without measured ≥10% non-overlap + accuracy.
 4. Prohibited scraping was not selected.
 
 Identity probe note (sanitized): difficult-identity sample completed at 50/50
-hits, but identity success does **not** clear the PIT gate.
+hits, but identity success does **not** clear required-features or PIT gates.
 
 ### Rights / budget conclusion
 
@@ -201,10 +204,10 @@ hits, but identity success does **not** clear the PIT gate.
 3. API-Sports — one-month probe only after credentials exist and non-overlap≥10%
    + accuracy pass; otherwise cancel.
 
-Next evidence needed for BALLDONTLIE adoption (not claimed here): explicit
-pass/fail measurement of pre-fight reconstruction and revision support (and
-field-null probing as applicable), then re-run the decision tree without
-relaxing thresholds.
+Next evidence needed for BALLDONTLIE adoption (not claimed here): raise
+`control_time_seconds` universe support to ≥98% (or document an explicit
+contract change with new thresholds + regressions), plus explicit pass/fail
+measurement of pre-fight reconstruction and revision support.
 
 ## Commands
 
@@ -213,10 +216,10 @@ python scripts/spikes/audit_stats_sources.py \
   --manifest data/manifests/dwcs_bouts_v1.jsonl \
   --out output/research/stats-source-scorecard.json \
   --capture-mode live \
-  --capture-time 2026-08-12T02:05:00+00:00 \
+  --capture-time 2026-08-12T02:20:00+00:00 \
   --env-file /path/to/.env \
   --redact \
-  --max-live-requests-balldontlie 180
+  --max-live-requests-balldontlie 300
 
 pytest tests/spikes/test_stats_source_scorecard.py -q
 ruff check scripts/spikes/audit_stats_sources.py tests/spikes/test_stats_source_scorecard.py

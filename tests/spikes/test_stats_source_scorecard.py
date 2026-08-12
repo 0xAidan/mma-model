@@ -791,10 +791,126 @@ def test_pit_and_required_features_unknown_not_auto_fail(audit: Any) -> None:
 
     required = audit.evaluate_required_features(
         [{"id": 1, "fighter1": {}, "fighter2": {}, "status": "completed", "date": "2024-01-01"}],
-        sample_stats=None,
+        bout_stat_observations=None,
     )
     assert required["status"] == "unknown"
     assert required["reason"] == "stat_samples_not_probed"
+
+
+def test_sampled_stats_cannot_produce_global_required_features_pass(audit: Any) -> None:
+    """Regression: provider_fights[:3] / 6 rows must never yield universe pass."""
+    matched = [
+        {
+            "id": i,
+            "fighter1": {"name": "A"},
+            "fighter2": {"name": "B"},
+            "status": "completed",
+            "date": "2024-08-13",
+        }
+        for i in range(1, 150)
+    ]
+    # Only three fights probed — mirrors the defective live sample size.
+    tiny_obs = [
+        {
+            "fight_id": i,
+            "status": "present",
+            "fields": {
+                "significant_strikes_landed": True,
+                "takedowns_landed": True,
+                "control_time_seconds": True,
+            },
+        }
+        for i in (1, 2, 3)
+    ]
+    required = audit.evaluate_required_features(
+        matched,
+        bout_stat_observations=tiny_obs,
+    )
+    assert required["status"] != "pass"
+    assert required["status"] == "unknown"
+    assert required["reason"] == "stat_probe_incomplete"
+    assert required["stat_fields"]["denominator"] == 149
+    assert required["stat_fields"]["probed"] == 3
+    for field in audit.REQUIRED_STAT_FIELDS:
+        metric = required["stat_fields"]["fields"][field]
+        assert metric["denominator"] == 149
+        assert metric["numerator"] == 3
+        assert metric["rate"] == pytest.approx(3 / 149)
+    # Fight fields are separate and may still clear on the matched universe.
+    assert required["fight_fields"]["denominator"] == 149
+    assert required["fight_fields"]["status"] == "pass"
+
+
+def test_required_features_pass_needs_full_universe_stat_coverage(audit: Any) -> None:
+    matched = [
+        {
+            "id": i,
+            "fighter1": {"name": "A"},
+            "fighter2": {"name": "B"},
+            "status": "completed",
+            "date": "2024-08-13",
+        }
+        for i in range(1, 4)
+    ]
+    complete = [
+        {
+            "fight_id": i,
+            "status": "present",
+            "fields": {
+                "significant_strikes_landed": True,
+                "takedowns_landed": True,
+                "control_time_seconds": True,
+            },
+        }
+        for i in (1, 2, 3)
+    ]
+    required = audit.evaluate_required_features(
+        matched,
+        bout_stat_observations=complete,
+    )
+    assert required["status"] == "pass"
+    assert required["coverage_min"] == audit.REQUIRED_FEATURE_COVERAGE_MIN
+    for field in audit.REQUIRED_STAT_FIELDS:
+        assert required["stat_fields"]["fields"][field]["numerator"] == 3
+        assert required["stat_fields"]["fields"][field]["denominator"] == 3
+        assert required["stat_fields"]["fields"][field]["rate"] == pytest.approx(1.0)
+
+    incomplete_coverage = [
+        {
+            "fight_id": 1,
+            "status": "present",
+            "fields": {
+                "significant_strikes_landed": True,
+                "takedowns_landed": True,
+                "control_time_seconds": True,
+            },
+        },
+        {
+            "fight_id": 2,
+            "status": "absent",
+            "fields": {
+                "significant_strikes_landed": False,
+                "takedowns_landed": False,
+                "control_time_seconds": False,
+            },
+        },
+        {
+            "fight_id": 3,
+            "status": "present",
+            "fields": {
+                "significant_strikes_landed": True,
+                "takedowns_landed": False,
+                "control_time_seconds": True,
+            },
+        },
+    ]
+    failed = audit.evaluate_required_features(
+        matched,
+        bout_stat_observations=incomplete_coverage,
+    )
+    assert failed["status"] == "fail"
+    assert failed["stat_fields"]["fields"]["takedowns_landed"]["numerator"] == 1
+    assert failed["stat_fields"]["fields"]["takedowns_landed"]["denominator"] == 3
 
 
 def test_difficult_identity_probe_summary_partition(audit: Any) -> None:
@@ -873,17 +989,25 @@ def test_vendor_checklist_marks_unanswered_as_blockers(audit: Any) -> None:
 def test_synthetic_measured_path_metric_math(
     audit: Any, synthetic: dict[str, Any]
 ) -> None:
+    # Full matched-universe bout_stat_observations (3/3) required for a pass.
+    bout_stat_observations = []
+    for fight in synthetic["provider_fights"]:
+        bout_stat_observations.append(
+            {
+                "fight_id": fight["id"],
+                "status": "present",
+                "fields": {
+                    "significant_strikes_landed": True,
+                    "takedowns_landed": True,
+                    "control_time_seconds": True,
+                },
+            }
+        )
     measured = audit.measure_balldontlie_from_observations(
         bouts=synthetic["manifest_bouts"],
         provider_fights=synthetic["provider_fights"],
         difficult_identity_results=synthetic["difficult_identity_results"],
-        sample_stats=[
-            {
-                "significant_strikes_landed": 10,
-                "takedowns_landed": 1,
-                "control_time_seconds": 30,
-            }
-        ],
+        bout_stat_observations=bout_stat_observations,
         latencies_ms=[11.0, 22.0, 33.0],
         request_count=9,
         pre_fight_reconstruction_status="pass",
@@ -901,6 +1025,7 @@ def test_synthetic_measured_path_metric_math(
     assert measured["difficult_identity_coverage"]["miss"] == 1
     assert measured["difficult_identity_coverage"]["unknown"] == 1
     assert measured["required_features"]["status"] == "pass"
+    assert measured["required_features"]["stat_fields"]["probed"] == 3
     assert measured["pit_fitness"]["status"] == "pass"
     assert measured["year_diagnostics"]["years_with_any_provider_dwcs_named_events"] == 2
     # Year diagnostics are informational and must not drive event_coverage.
@@ -989,12 +1114,12 @@ def test_match_bout_to_event_by_participants_and_date(audit: Any) -> None:
 
 
 def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
-    """Lock the exact post-entitlement-upgrade evidence snapshot in this PR.
+    """Lock the exact post-entitlement revalidation evidence in this PR.
 
-    Coverage/outcome/features measured pass, but PIT remains explicitly unknown
-    (reconstruction/revision unproven), so primary stays null. Adoption-path
-    decision logic with a synthetic PIT pass is covered by
-    ``test_decision_thresholds_balldontlie_boundary``, not by inventing PIT here.
+    Coverage/outcome measured pass; required_features fails honestly on
+    universe-wide fight_stats (control_time_seconds below min); PIT remains
+    unknown. Primary stays null. Synthetic adoption-path coverage lives in
+    ``test_decision_thresholds_balldontlie_boundary``.
     """
     path = ROOT / "output" / "research" / "stats-source-scorecard.json"
     if not path.is_file():
@@ -1013,7 +1138,7 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert payload["decision"]["prohibited_scraping_selected"] is False
     assert payload["capture_mode"] == "live"
     assert payload["live_measurements_claimed"] is True
-    assert payload["captured_at"] == "2026-08-12T02:05:00+00:00"
+    assert payload["captured_at"] == "2026-08-12T02:20:00+00:00"
     assert payload["budget_context"]["recurring_monthly"]["usd_cents"] == 6999
 
     # Exact hard-blocker evidence for this PR (not an adopted-or-blocked union).
@@ -1043,7 +1168,35 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert outcome_metric["numerator"] == 149
     assert outcome_metric["rate"] == pytest.approx(1.0)
     assert outcome_metric["status"] == "measured"
-    assert metrics["required_features"]["status"] == "pass"
+
+    required = metrics["required_features"]
+    assert required["status"] == "fail"
+    assert required["reason"] == "required_feature_coverage_below_min"
+    assert required["coverage_min"] == audit.REQUIRED_FEATURE_COVERAGE_MIN
+    assert required["fight_fields"]["status"] == "pass"
+    assert required["fight_fields"]["denominator"] == 149
+    assert required["stat_fields"]["status"] == "fail"
+    assert required["stat_fields"]["denominator"] == 149
+    assert required["stat_fields"]["probed"] == 149
+    assert required["stat_fields"]["fields"]["significant_strikes_landed"] == {
+        "denominator": 149,
+        "numerator": 149,
+        "rate": 1.0,
+        "status": "measured",
+    }
+    assert required["stat_fields"]["fields"]["takedowns_landed"] == {
+        "denominator": 149,
+        "numerator": 149,
+        "rate": 1.0,
+        "status": "measured",
+    }
+    control = required["stat_fields"]["fields"]["control_time_seconds"]
+    assert control["denominator"] == 149
+    assert control["numerator"] == 98
+    assert control["rate"] == pytest.approx(98 / 149)
+    assert control["status"] == "measured"
+    assert control["rate"] < audit.REQUIRED_FEATURE_COVERAGE_MIN
+
     assert metrics["pit_fitness"]["status"] == "unknown"
     assert "pre_fight_reconstruction_unproven" in str(
         metrics["pit_fitness"].get("reason") or ""
@@ -1061,7 +1214,7 @@ def test_committed_scorecard_sanitized_and_schema_valid(audit: Any) -> None:
     assert gates["event_coverage_rate"] == pytest.approx(1.0)
     assert gates["bout_coverage_rate"] == pytest.approx(1.0)
     assert gates["outcome_agreement_rate"] == pytest.approx(1.0)
-    assert gates["required_features_status"] == "pass"
+    assert gates["required_features_status"] == "fail"
     assert gates["pit_fitness_status"] == "unknown"
     assert gates["technical_pass"] is False
     assert gates["rights_status"] == "pass"
