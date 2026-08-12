@@ -232,6 +232,23 @@ combinations). Genuinely incomplete/pending facts settle as `unresolved`.
 
 Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 
+## Reference odds (DWCS-201)
+
+| Field | Value |
+|-------|--------|
+| **Provider** | `the_odds_api` (CLI label `the-odds-api`) |
+| **Client** | `mma_model.odds.the_odds_api.TheOddsApiClient` |
+| **Normalize** | `mma_model.odds.normalize.normalize_odds_payload` |
+| **Storage** | `odds_events`, `odds_quotes` (append-only + dedupe), `odds_quota_observations` |
+| **Migration** | `0011_odds_quotes` |
+| **CLI** | `mma-model odds` (legacy fetch); `mma-model odds snapshot …`; `mma-model odds audit …` |
+| **Markets** | Supported provider keys: `h2h` → `moneyline`, `totals` → `totals` (DWCS-200 enums). Unsupported props are skipped, never fabricated. |
+| **Availability** | Missing requested markets → `unknown`. Never `suspended` without provider evidence. |
+| **Offline** | When `ODDS_API_KEY` is absent, snapshot/audit use deterministic fixtures under `tests/fixtures/odds/`. |
+| **Product rule** | Exact bookmaker lines remain optional enrichment. Reference quotes are never labeled Bet365. |
+
+Quota headers persisted: `x-requests-remaining`, `x-requests-used`, `x-requests-last`. Empty odds responses are recorded with `requests_last=0` when the provider does not bill.
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core

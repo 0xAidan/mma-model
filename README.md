@@ -68,6 +68,18 @@ With `ODDS_API_KEY` set:
 mma-model odds
 ```
 
+Normalize and store append-only reference quotes (uses fixtures when the key is
+absent):
+
+```bash
+mma-model odds snapshot --series dwcs --provider the-odds-api --markets h2h
+mma-model odds audit --series dwcs --provider the-odds-api --markets h2h
+```
+
+Exact bookmaker lines are optional enrichment. Missing Bet365 does not block
+sportsbook-agnostic actionable price guidance. Reference odds are never labeled
+as Bet365.
+
 ## What I need from you
 
 | Item | Required? | Notes |

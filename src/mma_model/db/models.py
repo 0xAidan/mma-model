@@ -45,6 +45,7 @@ from mma_model.db.tables.provenance import (
     RawObservation,
     SourceCheckpoint,
 )
+from mma_model.db.tables.odds import OddsEventRow, OddsQuotaObservation, OddsQuote
 
 
 def _utc_now() -> datetime:
@@ -198,6 +199,9 @@ __all__ = [
     "IdentityScoringBlock",
     "IngestCursor",
     "IngestRun",
+    "OddsEventRow",
+    "OddsQuotaObservation",
+    "OddsQuote",
     "OddsSnapshot",
     "RawObservation",
     "SourceCheckpoint",

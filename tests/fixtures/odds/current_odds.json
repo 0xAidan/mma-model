@@ -1,0 +1,49 @@
+{
+  "headers": {
+    "x-requests-remaining": "480",
+    "x-requests-used": "20",
+    "x-requests-last": "1"
+  },
+  "data": [
+    {
+      "id": "evt-dwcs-ref-001",
+      "sport_key": "mma_mixed_martial_arts",
+      "sport_title": "MMA",
+      "commence_time": "2026-08-12T00:00:00Z",
+      "home_team": "Jon Kunneman",
+      "away_team": "Nick Kropschot",
+      "bookmakers": [
+        {
+          "key": "fanduel",
+          "title": "FanDuel",
+          "last_update": "2026-08-11T21:00:00Z",
+          "markets": [
+            {
+              "key": "h2h",
+              "last_update": "2026-08-11T21:00:00Z",
+              "outcomes": [
+                {"name": "Jon Kunneman", "price": 1.74},
+                {"name": "Nick Kropschot", "price": 2.15}
+              ]
+            },
+            {
+              "key": "totals",
+              "last_update": "2026-08-11T21:00:00Z",
+              "outcomes": [
+                {"name": "Over", "price": 1.9, "point": 2.5},
+                {"name": "Under", "price": 1.9, "point": 2.5}
+              ]
+            },
+            {
+              "key": "method_of_victory",
+              "last_update": "2026-08-11T21:00:00Z",
+              "outcomes": [
+                {"name": "KO/TKO", "price": 3.5}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

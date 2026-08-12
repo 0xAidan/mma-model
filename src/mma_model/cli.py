@@ -35,6 +35,7 @@ from mma_model.identity.review import (
 )
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
+from mma_model.odds.snapshot import run_odds_audit, run_odds_snapshot
 from mma_model.odds.the_odds_api import fetch_mma_odds
 from mma_model.quality.constants import EXIT_INTERNAL
 from mma_model.quality.coverage import compute_coverage_report
@@ -102,8 +103,61 @@ def main(argv: list[str] | None = None) -> int:
         help="Reset paginated ingest cursor to page 1 before this run",
     )
 
-    p_odds = sub.add_parser("odds", help="Fetch current MMA odds (needs ODDS_API_KEY)")
-    p_odds.add_argument("--json", action="store_true", help="Print raw JSON")
+    p_odds = sub.add_parser(
+        "odds",
+        help=(
+            "Fetch current MMA odds (legacy) or run snapshot/audit "
+            "(DWCS-201; fixtures when ODDS_API_KEY is absent)"
+        ),
+    )
+    p_odds.add_argument(
+        "--json",
+        action="store_true",
+        help="Print raw JSON (legacy fetch when no subcommand)",
+    )
+    odds_sub = p_odds.add_subparsers(dest="odds_cmd", required=False)
+    p_odds_snap = odds_sub.add_parser(
+        "snapshot",
+        help="Normalize and append-only store The Odds API reference quotes",
+    )
+    p_odds_snap.add_argument("--series", default="dwcs", help="Series label for report")
+    p_odds_snap.add_argument(
+        "--provider",
+        default="the-odds-api",
+        help="Odds provider id (DWCS-201: the-odds-api)",
+    )
+    p_odds_snap.add_argument(
+        "--markets",
+        default="h2h",
+        help="Comma-separated provider markets (supported: h2h,totals)",
+    )
+    p_odds_snap.add_argument("--regions", default="us", help="Odds API regions")
+    p_odds_snap.add_argument(
+        "--historical-date",
+        default=None,
+        help="ISO timestamp for historical snapshot (omit for current odds)",
+    )
+    p_odds_snap.add_argument(
+        "--fixture-dir",
+        type=Path,
+        default=None,
+        help="Offline fixture directory when ODDS_API_KEY is unset",
+    )
+    p_odds_snap.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional SQLite URL (defaults to MMA_DATABASE_URL / init-db path)",
+    )
+    p_odds_audit = odds_sub.add_parser(
+        "audit",
+        help="Sanitized events/market-discovery/quota audit (no prices)",
+    )
+    p_odds_audit.add_argument("--series", default="dwcs")
+    p_odds_audit.add_argument("--provider", default="the-odds-api")
+    p_odds_audit.add_argument("--markets", default="h2h")
+    p_odds_audit.add_argument("--regions", default="us")
+    p_odds_audit.add_argument("--fixture-dir", type=Path, default=None)
+    p_odds_audit.add_argument("--database-url", default=None)
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
     p_train.add_argument(
@@ -412,11 +466,86 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "odds":
-        data = fetch_mma_odds()
-        if args.json:
-            print(json.dumps(data, indent=2))
-        else:
-            print(f"Events with odds: {len(data)}")
+        odds_cmd = getattr(args, "odds_cmd", None)
+        if odds_cmd is None:
+            data = fetch_mma_odds()
+            if args.json:
+                print(json.dumps(data, indent=2))
+            else:
+                print(f"Events with odds: {len(data)}")
+            return 0
+
+        database_url = getattr(args, "database_url", None)
+        if database_url:
+            db_url = str(database_url).strip()
+            if not db_url:
+                print("refusing empty --database-url")
+                return 2
+            engine = create_engine(db_url, future=True)
+            _attach_sqlite_listeners(engine)
+            root = get_settings().project_root
+            cfg = Config(str(root / "alembic.ini"))
+            cfg.set_main_option("script_location", str(root / "migrations"))
+            cfg.set_main_option("sqlalchemy.url", db_url)
+            command.upgrade(cfg, "head")
+            Session = sessionmaker(bind=engine, future=True)
+            with Session() as session:
+                if odds_cmd == "snapshot":
+                    result = run_odds_snapshot(
+                        session,
+                        series=args.series,
+                        provider=args.provider,
+                        markets=args.markets,
+                        regions=args.regions,
+                        historical_date=args.historical_date,
+                        fixture_dir=args.fixture_dir,
+                    )
+                    session.commit()
+                    print(json.dumps(result.as_dict(), indent=2))
+                elif odds_cmd == "audit":
+                    report = run_odds_audit(
+                        session,
+                        series=args.series,
+                        provider=args.provider,
+                        markets=args.markets,
+                        regions=args.regions,
+                        fixture_dir=args.fixture_dir,
+                    )
+                    session.commit()
+                    print(json.dumps(report, indent=2))
+                else:
+                    print(f"unsupported odds command: {odds_cmd}")
+                    engine.dispose()
+                    return 1
+            engine.dispose()
+            return 0
+
+        init_db()
+        with session_scope() as session:
+            if odds_cmd == "snapshot":
+                result = run_odds_snapshot(
+                    session,
+                    series=args.series,
+                    provider=args.provider,
+                    markets=args.markets,
+                    regions=args.regions,
+                    historical_date=args.historical_date,
+                    fixture_dir=args.fixture_dir,
+                )
+                print(json.dumps(result.as_dict(), indent=2))
+            elif odds_cmd == "audit":
+                report = run_odds_audit(
+                    session,
+                    series=args.series,
+                    provider=args.provider,
+                    markets=args.markets,
+                    regions=args.regions,
+                    fixture_dir=args.fixture_dir,
+                )
+                print(json.dumps(report, indent=2))
+            else:
+                print(f"unsupported odds command: {odds_cmd}")
+                return 1
         return 0
 
     if args.cmd == "train":
