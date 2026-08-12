@@ -70,9 +70,14 @@ given inputs for every later task:
 - Design/plan/ADR/scorecard handoff updates
 
 Canonical source IDs (exhaustive; no aliases): `ufcstats_public`, `mma_ai_bootstrap`,
-`tapology_public`, `sherdog_public`, `combat_registry`, `wikidata`,
+`dwcs_manifest`, `tapology_public`, `sherdog_public`, `combat_registry`, `wikidata`,
 `bestfightodds_archive`, `the_odds_api`, `sportsdataio`, `balldontlie`,
 `explicit_missing`.
+
+`dwcs_manifest` is the frozen internal universe/result seed (role
+`frozen_internal_universe_and_result_seed`). It is not an external observation
+source, must not appear in `deterministic_fallback_order`, and must not use
+`explicit_missing` for manifest facts (DWCS-103).
 
 ---
 

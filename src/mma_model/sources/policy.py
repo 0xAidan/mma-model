@@ -22,6 +22,7 @@ class SourcePolicyError(ValueError):
 class SourceId(StrEnum):
     UFCSTATS_PUBLIC = "ufcstats_public"
     MMA_AI_BOOTSTRAP = "mma_ai_bootstrap"
+    DWCS_MANIFEST = "dwcs_manifest"
     TAPOLOGY_PUBLIC = "tapology_public"
     SHERDOG_PUBLIC = "sherdog_public"
     COMBAT_REGISTRY = "combat_registry"
@@ -370,6 +371,11 @@ class SourcePolicy(BaseModel):
         if self.deterministic_fallback_order[-1] != SourceId.EXPLICIT_MISSING.value:
             raise SourcePolicyError(
                 "deterministic_fallback_order must end with explicit_missing"
+            )
+        if SourceId.DWCS_MANIFEST.value in self.deterministic_fallback_order:
+            raise SourcePolicyError(
+                "dwcs_manifest is a frozen internal universe/result seed and must "
+                "not appear in deterministic_fallback_order"
             )
         if len(set(self.deterministic_fallback_order)) != len(
             self.deterministic_fallback_order

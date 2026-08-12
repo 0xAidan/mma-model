@@ -62,6 +62,7 @@ def test_canonical_source_ids_are_exhaustive_and_consistent() -> None:
     for required_id in (
         "ufcstats_public",
         "mma_ai_bootstrap",
+        "dwcs_manifest",
         "tapology_public",
         "sherdog_public",
         "combat_registry",
@@ -74,6 +75,16 @@ def test_canonical_source_ids_are_exhaustive_and_consistent() -> None:
     ):
         assert required_id in policy.source_ids
         assert required_id in policy.roles
+    assert policy.roles["dwcs_manifest"].role == (
+        "frozen_internal_universe_and_result_seed"
+    )
+    assert "dwcs_manifest" not in policy.deterministic_fallback_order
+    assert "use_explicit_missing_for_manifest_facts" in policy.roles[
+        "dwcs_manifest"
+    ].forbidden
+    assert "treat_as_external_observation_source" in policy.roles[
+        "dwcs_manifest"
+    ].forbidden
 
 
 def test_no_alias_source_ids_in_committed_policy() -> None:

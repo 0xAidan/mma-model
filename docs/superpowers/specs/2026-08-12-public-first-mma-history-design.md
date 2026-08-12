@@ -229,11 +229,16 @@ All roles, kill criteria keys, fallback entries, scorecard
 `approved_labeled_public_roles`, docs, and tests MUST use this exhaustive ID set
 (no aliases):
 
-`ufcstats_public`, `mma_ai_bootstrap`, `tapology_public`, `sherdog_public`,
+`ufcstats_public`, `mma_ai_bootstrap`, `dwcs_manifest`, `tapology_public`, `sherdog_public`,
 `combat_registry`, `wikidata`, `bestfightodds_archive`, `the_odds_api`,
 `sportsdataio`, `balldontlie`, `explicit_missing`.
 
-Deterministic fallback order (canonical IDs):
+`dwcs_manifest` is the frozen internal DWCS universe/result seed (committed
+JSONL). It is **not** an external observation source and must **not** appear in
+`deterministic_fallback_order`. Manifest facts must not be labeled
+`explicit_missing`.
+
+Deterministic fallback order (canonical IDs; excludes `dwcs_manifest`):
 
 1. `ufcstats_public`
 2. `mma_ai_bootstrap`

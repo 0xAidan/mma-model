@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract_id": "dwcs_source_policy",
-  "contract_version": "1.1.1",
+  "contract_version": "1.2.0",
   "effective_date": "2026-08-12",
   "ticket": "DWCS-003",
   "decision_recorded_by": "user_explicit_approval",
@@ -9,6 +9,7 @@
   "source_ids": [
     "ufcstats_public",
     "mma_ai_bootstrap",
+    "dwcs_manifest",
     "tapology_public",
     "sherdog_public",
     "combat_registry",
@@ -55,6 +56,15 @@
     "mma_ai_bootstrap": {
       "role": "optional_raw_normalized_bootstrap_only_after_reconciliation",
       "forbidden": ["opaque_precomputed_feature_csvs_as_training_inputs"]
+    },
+    "dwcs_manifest": {
+      "role": "frozen_internal_universe_and_result_seed",
+      "acquisition": "committed_jsonl_manifests_not_live_observation",
+      "forbidden": [
+        "treat_as_external_observation_source",
+        "use_explicit_missing_for_manifest_facts",
+        "name_based_fighter_merge"
+      ]
     },
     "tapology_public": {
       "role": "primary_regional_pre_ufc_breadth",
