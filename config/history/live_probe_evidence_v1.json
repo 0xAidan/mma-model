@@ -1,0 +1,67 @@
+{
+  "label": "dwcs-105-bounded-live-probes",
+  "note": "Sanitized robots-then-one-page probes. No raw HTML, cookies, or secrets. Blocks were not bypassed.",
+  "probes": {
+    "combat_registry": {
+      "block_reason": "login_wall",
+      "client_version": "0.1.0",
+      "host": "combatreg.com",
+      "http_status": 200,
+      "observed_at": "2026-08-12T19:33:21.491431+00:00",
+      "parser_version": "combat_registry_parser@1",
+      "path_category": "/",
+      "response_content_hash": "39ea433f78e00517afb363e7da7562d3af1b175e2703a0f5d2be02b128eac97f",
+      "result": "BLOCKED",
+      "robots": {
+        "allowed": true,
+        "matched_user_agent_group": null,
+        "policy_decision": "rfc9309_parsed_allow",
+        "response_content_hash": "2f15987e4606501202b9d337085439339e53a374e3d194847192c12f85ba78f8",
+        "robots_status_code": 200,
+        "standard": "RFC9309"
+      },
+      "source": "combat_registry"
+    },
+    "sherdog_public": {
+      "block_reason": null,
+      "client_version": "0.1.0",
+      "host": "sherdog.com",
+      "http_status": 200,
+      "observed_at": "2026-08-12T19:33:15.812092+00:00",
+      "parser_version": "sherdog_public_parser@1",
+      "path_category": "/events/",
+      "response_content_hash": "963a293388a72a23fe9c600bf4b4b83e9d18a391949caa8179072fd1a7ca67de",
+      "result": "OK",
+      "robots": {
+        "allowed": true,
+        "matched_user_agent_group": "*",
+        "policy_decision": "rfc9309_parsed_allow",
+        "response_content_hash": "1d5d870c7c3244f9e53591da22877a05d8956cee6c78e20988692b925892a15c",
+        "robots_status_code": 200,
+        "standard": "RFC9309"
+      },
+      "source": "sherdog_public"
+    },
+    "tapology_public": {
+      "block_reason": "http_403",
+      "client_version": "0.1.0",
+      "host": "tapology.com",
+      "http_status": 403,
+      "observed_at": "2026-08-12T19:33:14.656458+00:00",
+      "parser_version": "tapology_public_parser@1",
+      "path_category": "/rankings/",
+      "response_content_hash": null,
+      "result": "BLOCKED",
+      "robots": {
+        "allowed": true,
+        "matched_user_agent_group": "*",
+        "policy_decision": "rfc9309_parsed_allow",
+        "response_content_hash": "842b34303164ead41bccb7c05d1707422e98d108753b397b6dcc19683eb02101",
+        "robots_status_code": 200,
+        "standard": "RFC9309"
+      },
+      "source": "tapology_public"
+    }
+  },
+  "schema_version": 1
+}

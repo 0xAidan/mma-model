@@ -27,6 +27,14 @@ from mma_model.db.tables.core import (
     FighterSourceId,
     FighterStatObservation,
 )
+from mma_model.db.tables.history import (
+    HistoryConflict,
+    HistoryExplicitRecord,
+    HistoryFrontier,
+    HistoryReconstruction,
+    HistorySourceBout,
+    HistorySourceFailure,
+)
 from mma_model.db.tables.identity import (
     IdentityMatchEvidence,
     IdentityReviewQueue,
@@ -179,6 +187,12 @@ __all__ = [
     "FighterProfileObservation",
     "FighterSourceId",
     "FighterStatObservation",
+    "HistoryConflict",
+    "HistoryExplicitRecord",
+    "HistoryFrontier",
+    "HistoryReconstruction",
+    "HistorySourceBout",
+    "HistorySourceFailure",
     "IdentityMatchEvidence",
     "IdentityReviewQueue",
     "IdentityScoringBlock",

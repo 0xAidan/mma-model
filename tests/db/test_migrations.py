@@ -47,6 +47,14 @@ IDENTITY_TABLES = {
     "identity_match_evidence",
     "identity_scoring_blocks",
 }
+HISTORY_TABLES = {
+    "history_source_bouts",
+    "history_conflicts",
+    "history_source_failures",
+    "history_frontier",
+    "history_reconstructions",
+    "history_explicit_records",
+}
 
 
 def _alembic_config(db_path: Path) -> Config:
@@ -81,6 +89,7 @@ def test_clean_upgrade_creates_baseline_and_canonical_tables(tmp_path: Path) -> 
     assert CANONICAL_TABLES.issubset(names)
     assert PROVENANCE_TABLES.issubset(names)
     assert IDENTITY_TABLES.issubset(names)
+    assert HISTORY_TABLES.issubset(names)
 
 
 def _seed_legacy_schema(db_path: Path) -> None:

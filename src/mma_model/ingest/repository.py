@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from mma_model.db.tables.core import BoutResultVersion
 from mma_model.db.tables.provenance import IngestRun, RawObservation, SourceCheckpoint
+from mma_model.history.apply import HISTORY_ENTITY_KINDS, apply_history_observation
 from mma_model.ingest.raw_store import ContentAddressedRawStore, PayloadCorruptionError
 from mma_model.sources.contracts import (
     DETAIL_LEVEL_RANK,
@@ -380,6 +381,8 @@ class IngestRepository:
         row.updated_at = _utc_now()
 
     def _apply_observation(self, session: Session, obs: SourceObservationRecord) -> str | None:
+        if obs.entity_kind in HISTORY_ENTITY_KINDS:
+            return apply_history_observation(session, obs)
         if obs.entity_kind != "bout_result" or not obs.subject_id or not obs.version_kind:
             return None
 
