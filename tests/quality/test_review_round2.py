@@ -269,6 +269,7 @@ def test_future_observed_correction_without_past_clock_does_not_leak(populated) 
             cutoff=CUTOFF_2018,
             timestamp_quality="unknown",
             observed_at=FUTURE,
+            provenance_status="unknown",
         )
         is False
     )
@@ -285,17 +286,8 @@ def test_later_adjudication_clock_hides_correction_until_published(populated) ->
         )
         bout = session.get(CanonicalBout, bout_id)
         assert bout is not None
-        append_correction(
-            session,
-            bout_id=bout_id,
-            fighter_a_id=bout.fighter_a_id,
-            fighter_b_id=bout.fighter_b_id,
-            effective_at=BACKDATED,
-            observed_at=FUTURE,
-            result_type="no_contest",
-        )
         run = add_ingest_run(session, source="dwcs_manifest")
-        add_observation(
+        later_obs = add_observation(
             session,
             run.id,
             source="dwcs_manifest",
@@ -308,6 +300,17 @@ def test_later_adjudication_clock_hides_correction_until_published(populated) ->
             timestamp_quality="revision_snapshot",
             quality_tier="gold",
             attributes_json=_attrs("no_contest", ""),
+        )
+        session.flush()
+        append_correction(
+            session,
+            bout_id=bout_id,
+            fighter_a_id=bout.fighter_a_id,
+            fighter_b_id=bout.fighter_b_id,
+            effective_at=BACKDATED,
+            observed_at=FUTURE,
+            result_type="no_contest",
+            raw_observation_id=later_obs.id,
         )
         session.flush()
         at_2018 = compute_coverage_report(
@@ -343,6 +346,8 @@ def test_matching_raw_proxy_keeps_event_night_visible_at_historical_cutoff(
             timestamp_quality="publication_proxy",
             proxy_published_at=PAST,
             observed_at=NOW,
+            provenance_status="linked",
+            raw_observation_id=1,
         )
         is True
     )
@@ -552,7 +557,10 @@ def test_no_subject_evidence_is_missing_not_global_kill_failure(tmp_path) -> Non
         regional = report.regional_live
         assert regional["professional_found"] == 0
         assert regional["professional_source_failed"] == 0
+        assert regional["professional_missing"] == 9
+        assert regional["amateur_n"] == 2
+        assert regional["amateur_missing"] == 2
         assert regional["evidence_class"] == "fixture_validation"
-        assert regional["professional_n"] == 0
+        assert regional["professional_n"] == 9
     finally:
         env["engine"].dispose()

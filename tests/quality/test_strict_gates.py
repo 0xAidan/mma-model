@@ -61,13 +61,16 @@ def test_zero_denominator_required_live_sample_is_insufficient_not_pass(tmp_path
         result = evaluate_strict_gates(report, policy)
         regional = [row for row in result.gates if row.code == "regional_professional_sample"]
         assert regional
-        assert regional[0].status == "insufficient_sample"
+        assert regional[0].status == "fail"
         assert regional[0].blocking is True
-        assert regional[0].denominator == 0
+        assert regional[0].numerator == 0
+        assert regional[0].denominator == 9
         assert result.ok is False
         assert result.exit_code == 2
         amateur = [row for row in result.gates if row.code == "regional_amateur_sample"]
-        assert amateur[0].status == "insufficient_sample"
+        assert amateur[0].status == "fail"
+        assert amateur[0].numerator == 0
+        assert amateur[0].denominator == 2
         agree = [row for row in result.gates if row.code == "pre_fight_agreement"]
         assert agree[0].status == "insufficient_sample"
         recon = [row for row in result.gates if row.code == "cross_source_reconciliation"]

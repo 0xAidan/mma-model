@@ -266,7 +266,8 @@ def test_no_raw_blob_dangling_on_manifest_ingest(populated) -> None:
     assert report.checkpoint_run_state.ingest_runs >= 1
     assert report.checkpoint_run_state.succeeded_runs == 1
     assert report.checkpoint_run_state.completed_runs == 0
-    assert report.pit.proxy_timestamps == 880
+    assert report.pit.proxy_timestamps == 873
+    assert report.pit.unknown_timestamps == 7
     assert report.pit.missing_required_details == 440
     assert report.pit.future_row_leakage_checks_executed > 0
     assert report.pit.mutable_current_leakage_checks_executed > 0
