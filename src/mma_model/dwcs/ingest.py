@@ -663,6 +663,11 @@ def sync_dwcs_history(
                                 or effective_night
                             )
 
+                        current_proxy = (
+                            None
+                            if bout.version_state == "reversed_to_no_contest"
+                            else proxy_published_at
+                        )
                         observations.append(
                             _build_result_observation(
                                 row=bout,
@@ -690,7 +695,7 @@ def sync_dwcs_history(
                                 result_type=bout.current_result.class_,
                                 effective_at=current_effective,
                                 observed_at=observed,
-                                proxy_published_at=proxy_published_at,
+                                proxy_published_at=current_proxy,
                                 classification=classification,
                                 duration_status=duration.status.value,
                             )

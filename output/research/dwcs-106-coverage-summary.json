@@ -1,0 +1,326 @@
+{
+  "brazil": {
+    "bouts": 15,
+    "cards": 3
+  },
+  "checkpoint_run_state": {
+    "checkpoints": 1,
+    "completed_runs": 0,
+    "failed_runs": 0,
+    "ingest_runs": 1,
+    "running_runs": 0,
+    "succeeded_runs": 1
+  },
+  "config_hash": "497eb548fca8ad1e550dc5a6f712c4227f03b5a4fedbd185a4bbb0066d6a467e",
+  "core_tier_sum": 440,
+  "core_tiers": {
+    "bronze": 440,
+    "conflict": 0,
+    "gold": 0,
+    "missing": 0,
+    "silver": 0
+  },
+  "counts": {
+    "bouts": 440,
+    "events": 89,
+    "fighters": 796,
+    "provenance": 880,
+    "result_versions": 880
+  },
+  "current": {
+    "decisive": 431,
+    "draw": 1,
+    "no_contest": 8
+  },
+  "db_hash": "0efe0dabc8a9fb7733aef4b7442d9bfe6e002329e255784cdddf6c1ea4265746",
+  "event_night": {
+    "decisive": 438,
+    "draw": 1,
+    "no_contest": 1
+  },
+  "fields": [
+    {
+      "denominator": 440,
+      "field": "result_type",
+      "missing": 0,
+      "present": 440,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "winner_fighter_id",
+      "missing": 7,
+      "present": 433,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "method",
+      "missing": 440,
+      "present": 0,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "ending_round",
+      "missing": 440,
+      "present": 0,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "time_str",
+      "missing": 440,
+      "present": 0,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "quality_tier",
+      "missing": 0,
+      "present": 440,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "timestamp_quality",
+      "missing": 0,
+      "present": 440,
+      "status": "measured",
+      "unknown": 0
+    },
+    {
+      "denominator": 440,
+      "field": "payload_hash",
+      "missing": 0,
+      "present": 440,
+      "status": "measured",
+      "unknown": 0
+    }
+  ],
+  "gates_blocked": [
+    "pre_fight_agreement",
+    "live_source_killed:combat_registry",
+    "regional_amateur_sample",
+    "regional_professional_sample",
+    "live_accessibility_only:sherdog_public",
+    "live_source_killed:tapology_public",
+    "missing_required_details",
+    "result_agreement",
+    "ufcstats_public_live",
+    "cross_source_reconciliation"
+  ],
+  "gates_passed": [
+    "core_denominator",
+    "identity_conflict",
+    "manifest_representation",
+    "future_row_leakage",
+    "raw_ref_integrity"
+  ],
+  "identity": {
+    "fixture_never_live_coverage": true,
+    "scoped_pending": 0,
+    "unmatched": 0,
+    "unmatched_source_identities": 0,
+    "unscoped_pending": 0,
+    "upcoming_blocks": 0
+  },
+  "licensed_status": {
+    "decision_primary": null,
+    "licensed_adoption_not_selected": true,
+    "licensed_hard_blocker": true,
+    "licensed_primary_unselected": true,
+    "note": "historical Phase 0 evidence only; never a Phase 1 pipeline stop",
+    "phase1_global_blocker": false
+  },
+  "notes": [
+    "public accessibility is not accuracy, PIT, or rights proof",
+    "fixture metrics are validation only and never live coverage",
+    "licensed_primary_unselected is not a Phase 1 global blocker",
+    "event_night vs current is a same-source revision ledger, not independent conflict",
+    "global db_hash includes mutable_current and other influencing rows; coverage features exclude mutable_current; cutoff fingerprints drop future-clock rows",
+    "mma_ai_bootstrap is derived from ufcstats_public and is not an independent source family"
+  ],
+  "pit": {
+    "conflicting_outcomes": 0,
+    "direct_timestamps": 0,
+    "future_row_leakage_checks_executed": 4,
+    "future_row_leakage_evidence_hash": "807f360a42d81009cf0673889b5e60efc4e245b4e2b72f41268b106c612ecaf8",
+    "future_row_leakage_failures": 0,
+    "left_truncated_histories": 0,
+    "missing_required_details": 440,
+    "mutable_current_applicable_rows": 0,
+    "mutable_current_leakage_checks_executed": 1,
+    "mutable_current_leakage_evidence_hash": "f3fc8831c3e804c81a95030f57d3c9c553d331545fc495f634394aec7462c66a",
+    "mutable_current_leakage_failures": 0,
+    "mutable_current_leakage_status": "not_applicable",
+    "mutable_current_rows_examined": 0,
+    "mutable_current_synthetic_guard_checks": 1,
+    "proxy_timestamps": 873,
+    "revision_snapshots": 0,
+    "unknown_timestamps": 7
+  },
+  "raw_ref_integrity": {
+    "blob_absent_explicit": 880,
+    "blob_present": 0,
+    "corrupt_blobs": 0,
+    "dangling_raw_refs": 0,
+    "malformed": 0,
+    "missing_blobs": 0,
+    "ok": true,
+    "store_provided": true,
+    "unverifiable": 0
+  },
+  "regional_live": {
+    "amateur_found": 0,
+    "amateur_missing": 2,
+    "amateur_n": 2,
+    "amateur_source_failed": 0,
+    "evidence_class": "fixture_validation",
+    "professional_found": 0,
+    "professional_missing": 9,
+    "professional_n": 9,
+    "professional_source_failed": 0
+  },
+  "report_hash": "7b18feb23aa48a53188926331244068de30fcfffd78da77ef7a5051e2d1bd8e5",
+  "result_transitions": {
+    "both_lanes_no_contest": 1,
+    "event_night_equals_current": 433,
+    "reversed_to_no_contest": 7
+  },
+  "series": "dwcs",
+  "source_failures": [],
+  "sources": [
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": "9b36ab4fd30a7eb9db71e058717187167c6215acd97777094245d3bdec7251de",
+      "evidence_origin": "checkpoint",
+      "mapped_bouts": 440,
+      "missing_bouts": 0,
+      "never_live_coverage": false,
+      "reason": null,
+      "source": "dwcs_manifest",
+      "source_class": "internal_manifest",
+      "status": "present",
+      "validation_only": false
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": "aa6351fdc3865606db85f51eec5a46a3bb618d836dc8ca139d1bdfda26188cf3",
+      "evidence_origin": "frozen_fallback",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "cloudflare_challenge",
+      "source": "ufcstats_public",
+      "source_class": "public_extraction",
+      "status": "source_killed",
+      "validation_only": false
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "no_observations",
+      "source": "mma_ai_bootstrap",
+      "source_class": "public_dataset",
+      "status": "unmeasured",
+      "validation_only": false
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": "86779ef51356b02c0fbe076d4c1c8bbc68d08717691227d8c276645eef826de8",
+      "evidence_origin": "frozen_fallback",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "http_403",
+      "source": "tapology_public",
+      "source_class": "public_extraction",
+      "status": "source_killed",
+      "validation_only": false
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": "86779ef51356b02c0fbe076d4c1c8bbc68d08717691227d8c276645eef826de8",
+      "evidence_origin": "frozen_fallback",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "listing_only_not_fighter_history",
+      "source": "sherdog_public",
+      "source_class": "public_extraction",
+      "status": "accessibility_only",
+      "validation_only": false
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": "86779ef51356b02c0fbe076d4c1c8bbc68d08717691227d8c276645eef826de8",
+      "evidence_origin": "frozen_fallback",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "login_wall",
+      "source": "combat_registry",
+      "source_class": "official_record",
+      "status": "source_killed",
+      "validation_only": false
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "licensed_validation_only_not_live_coverage",
+      "source": "sportsdataio",
+      "source_class": "licensed_api",
+      "status": "validation_only",
+      "validation_only": true
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "licensed_validation_only_not_live_coverage",
+      "source": "balldontlie",
+      "source_class": "licensed_api",
+      "status": "validation_only",
+      "validation_only": true
+    },
+    {
+      "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
+      "mapped_bouts": 0,
+      "missing_bouts": 440,
+      "never_live_coverage": true,
+      "reason": "explicit_missing_unused",
+      "source": "explicit_missing",
+      "source_class": "public_dataset",
+      "status": "unmeasured",
+      "validation_only": false
+    }
+  ],
+  "standard": {
+    "bouts": 425,
+    "cards": 86
+  },
+  "strict_exit": 2,
+  "ticket": "DWCS-106",
+  "universe_bouts": 440,
+  "universe_cards": 89
+}
