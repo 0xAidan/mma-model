@@ -154,6 +154,11 @@ from mma_model.db.tables.core import (  # noqa: E402
     FighterSourceId,
     FighterStatObservation,
 )
+from mma_model.db.tables.provenance import (  # noqa: E402
+    IngestRun,
+    RawObservation,
+    SourceCheckpoint,
+)
 
 __all__ = [
     "Base",
@@ -174,5 +179,8 @@ __all__ = [
     "FighterSourceId",
     "FighterStatObservation",
     "IngestCursor",
+    "IngestRun",
     "OddsSnapshot",
+    "RawObservation",
+    "SourceCheckpoint",
 ]

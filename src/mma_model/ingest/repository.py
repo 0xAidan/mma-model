@@ -1,0 +1,349 @@
+"""Idempotent ingest repository with bounded-batch checkpoints (DWCS-101)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Callable, Sequence
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from mma_model.db.tables.core import BoutResultVersion
+from mma_model.db.tables.provenance import IngestRun, RawObservation, SourceCheckpoint
+from mma_model.ingest.raw_store import ContentAddressedRawStore, PayloadCorruptionError
+from mma_model.sources.contracts import (
+    DETAIL_LEVEL_RANK,
+    DetailLevel,
+    SourceObservationRecord,
+)
+
+SessionFactory = Callable[[], Session]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass(frozen=True)
+class BatchCommitResult:
+    inserted: int
+    skipped_identical: int
+    skipped_downgrade: int
+    skipped_preserve_version: int
+
+
+class IngestRepository:
+    """Write path for provenance + safe application of source-neutral records.
+
+    Adapters must not touch tables directly; they return contracts consumed here.
+    Each ``commit_batch`` is one SQLite transaction (not one network-long run).
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: sessionmaker[Session] | SessionFactory,
+        raw_store: ContentAddressedRawStore,
+    ) -> None:
+        self._session_factory = session_factory
+        self._raw_store = raw_store
+
+    def start_run(self, *, source: str, stream: str, scope: str) -> IngestRun:
+        with self._session_factory() as session:
+            run = IngestRun(
+                source=source,
+                stream=stream,
+                scope=scope,
+                status="running",
+                started_at=_utc_now(),
+                observation_count=0,
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            # Detach plain values for caller use outside the session.
+            return IngestRun(
+                id=run.id,
+                source=run.source,
+                stream=run.stream,
+                scope=run.scope,
+                status=run.status,
+                started_at=run.started_at,
+                finished_at=run.finished_at,
+                error_class=run.error_class,
+                error_message=run.error_message,
+                observation_count=run.observation_count,
+                created_at=run.created_at,
+            )
+
+    def finish_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error_class: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if status not in {"succeeded", "failed"}:
+            raise ValueError(f"invalid terminal status: {status}")
+        with self._session_factory() as session:
+            run = session.get(IngestRun, run_id)
+            if run is None:
+                raise KeyError(f"unknown ingest run {run_id}")
+            run.status = status
+            run.finished_at = _utc_now()
+            run.error_class = error_class
+            run.error_message = error_message
+            session.commit()
+
+    def commit_batch(
+        self,
+        *,
+        run_id: str,
+        observations: Sequence[SourceObservationRecord],
+        checkpoint_token: str,
+        checkpoint_version: str,
+        require_raw_present: bool = False,
+    ) -> BatchCommitResult:
+        inserted = 0
+        skipped_identical = 0
+        skipped_downgrade = 0
+        skipped_preserve_version = 0
+
+        with self._session_factory() as session:
+            run = session.get(IngestRun, run_id)
+            if run is None:
+                raise KeyError(f"unknown ingest run {run_id}")
+
+            for obs in observations:
+                if require_raw_present or obs.raw_ref:
+                    ref = obs.raw_ref or obs.payload_hash
+                    if ref != obs.payload_hash:
+                        raise PayloadCorruptionError(
+                            f"raw_ref {ref} does not match payload_hash {obs.payload_hash}"
+                        )
+                    if require_raw_present and not self._raw_store.exists(obs.payload_hash):
+                        raise PayloadCorruptionError(
+                            f"missing raw payload for hash {obs.payload_hash}"
+                        )
+                    if self._raw_store.exists(obs.payload_hash):
+                        self._raw_store.verify(obs.payload_hash)
+
+                existing = session.scalars(
+                    select(RawObservation).where(
+                        RawObservation.source == obs.source,
+                        RawObservation.stream == obs.stream,
+                        RawObservation.external_id == obs.external_id,
+                        RawObservation.payload_hash == obs.payload_hash,
+                    )
+                ).first()
+                if existing is not None:
+                    skipped_identical += 1
+                    continue
+
+                session.add(
+                    RawObservation(
+                        ingest_run_id=run.id,
+                        source=obs.source,
+                        stream=obs.stream,
+                        external_id=obs.external_id,
+                        entity_kind=obs.entity_kind,
+                        observed_at=obs.observed_at,
+                        effective_at=obs.effective_at,
+                        source_updated_at=obs.source_updated_at,
+                        payload_hash=obs.payload_hash,
+                        raw_ref=obs.raw_ref or obs.payload_hash,
+                        detail_level=str(obs.detail_level),
+                        version_kind=obs.version_kind,
+                        schema_version=obs.schema_version,
+                        subject_id=obs.subject_id,
+                    )
+                )
+                inserted += 1
+
+                apply_result = self._apply_observation(session, obs)
+                if apply_result == "downgrade":
+                    skipped_downgrade += 1
+                elif apply_result == "preserve_version":
+                    skipped_preserve_version += 1
+
+            self._upsert_checkpoint(
+                session,
+                source=run.source,
+                stream=run.stream,
+                scope=run.scope,
+                version=checkpoint_version,
+                cursor_token=checkpoint_token,
+                run_id=run.id,
+            )
+            run.observation_count = int(run.observation_count or 0) + inserted
+            session.commit()
+
+        return BatchCommitResult(
+            inserted=inserted,
+            skipped_identical=skipped_identical,
+            skipped_downgrade=skipped_downgrade,
+            skipped_preserve_version=skipped_preserve_version,
+        )
+
+    def get_checkpoint(
+        self, *, source: str, stream: str, scope: str, version: str
+    ) -> SourceCheckpoint | None:
+        with self._session_factory() as session:
+            row = session.scalars(
+                select(SourceCheckpoint).where(
+                    SourceCheckpoint.source == source,
+                    SourceCheckpoint.stream == stream,
+                    SourceCheckpoint.scope == scope,
+                    SourceCheckpoint.version == version,
+                )
+            ).first()
+            if row is None:
+                return None
+            return SourceCheckpoint(
+                id=row.id,
+                source=row.source,
+                stream=row.stream,
+                scope=row.scope,
+                version=row.version,
+                cursor_token=row.cursor_token,
+                last_ingest_run_id=row.last_ingest_run_id,
+                updated_at=row.updated_at,
+            )
+
+    def _upsert_checkpoint(
+        self,
+        session: Session,
+        *,
+        source: str,
+        stream: str,
+        scope: str,
+        version: str,
+        cursor_token: str,
+        run_id: str,
+    ) -> None:
+        row = session.scalars(
+            select(SourceCheckpoint).where(
+                SourceCheckpoint.source == source,
+                SourceCheckpoint.stream == stream,
+                SourceCheckpoint.scope == scope,
+                SourceCheckpoint.version == version,
+            )
+        ).first()
+        if row is None:
+            session.add(
+                SourceCheckpoint(
+                    source=source,
+                    stream=stream,
+                    scope=scope,
+                    version=version,
+                    cursor_token=cursor_token,
+                    last_ingest_run_id=run_id,
+                    updated_at=_utc_now(),
+                )
+            )
+            return
+        row.cursor_token = cursor_token
+        row.last_ingest_run_id = run_id
+        row.updated_at = _utc_now()
+
+    def _apply_observation(self, session: Session, obs: SourceObservationRecord) -> str | None:
+        if obs.entity_kind != "bout_result" or not obs.subject_id or not obs.version_kind:
+            return None
+
+        attrs = dict(obs.attributes)
+        fighter_a_id = attrs.get("fighter_a_id")
+        fighter_b_id = attrs.get("fighter_b_id")
+        if not isinstance(fighter_a_id, str) or not isinstance(fighter_b_id, str):
+            raise ValueError("bout_result observations require fighter_a_id and fighter_b_id")
+
+        existing = session.scalars(
+            select(BoutResultVersion).where(
+                BoutResultVersion.bout_id == obs.subject_id,
+                BoutResultVersion.version_kind == obs.version_kind,
+            )
+        ).first()
+
+        if existing is None:
+            session.add(
+                BoutResultVersion(
+                    bout_id=obs.subject_id,
+                    version_kind=obs.version_kind,
+                    fighter_a_id=fighter_a_id,
+                    fighter_b_id=fighter_b_id,
+                    winner_fighter_id=attrs.get("winner_fighter_id"),
+                    result_type=attrs.get("result_type"),
+                    method=attrs.get("method"),
+                    ending_round=attrs.get("ending_round"),
+                    time_str=attrs.get("time_str"),
+                    effective_at=obs.effective_at,
+                    observed_at=obs.observed_at,
+                )
+            )
+            return None
+
+        # Event-night (and any prior immutable version_kind row) is never overwritten.
+        if obs.version_kind == "event_night":
+            return "preserve_version"
+
+        existing_level = DetailLevel(getattr(existing, "_detail_level", None) or self._infer_detail(existing))
+        # Prefer explicit detail stamped on a prior apply via raw_observations lookup.
+        prior_detail = self._latest_applied_detail(
+            session,
+            bout_id=obs.subject_id,
+            version_kind=obs.version_kind,
+            excluding_hash=obs.payload_hash,
+        )
+        if prior_detail is not None:
+            existing_level = prior_detail
+
+        if DETAIL_LEVEL_RANK[obs.detail_level] < DETAIL_LEVEL_RANK[existing_level]:
+            return "downgrade"
+
+        existing.fighter_a_id = fighter_a_id
+        existing.fighter_b_id = fighter_b_id
+        existing.winner_fighter_id = attrs.get("winner_fighter_id")
+        existing.result_type = attrs.get("result_type")
+        existing.method = attrs.get("method")
+        existing.ending_round = attrs.get("ending_round")
+        existing.time_str = attrs.get("time_str")
+        existing.effective_at = obs.effective_at
+        existing.observed_at = obs.observed_at
+        return None
+
+    def _latest_applied_detail(
+        self,
+        session: Session,
+        *,
+        bout_id: str,
+        version_kind: str,
+        excluding_hash: str,
+    ) -> DetailLevel | None:
+        rows = session.scalars(
+            select(RawObservation)
+            .where(
+                RawObservation.subject_id == bout_id,
+                RawObservation.version_kind == version_kind,
+                RawObservation.entity_kind == "bout_result",
+                RawObservation.payload_hash != excluding_hash,
+            )
+            .order_by(RawObservation.id.desc())
+        ).all()
+        if not rows:
+            return None
+        # Highest detail among prior applied observations for this version.
+        best = DetailLevel.SUMMARY
+        for row in rows:
+            level = DetailLevel(row.detail_level)
+            if DETAIL_LEVEL_RANK[level] > DETAIL_LEVEL_RANK[best]:
+                best = level
+        return best
+
+    @staticmethod
+    def _infer_detail(row: BoutResultVersion) -> DetailLevel:
+        if row.method and row.ending_round is not None and row.time_str:
+            return DetailLevel.VERIFIED
+        if row.method or row.ending_round is not None or row.time_str:
+            return DetailLevel.PARTIAL
+        return DetailLevel.SUMMARY

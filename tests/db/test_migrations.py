@@ -37,6 +37,11 @@ CANONICAL_TABLES = {
     "fighter_profile_observations",
     "fighter_stat_observations",
 }
+PROVENANCE_TABLES = {
+    "ingest_runs",
+    "raw_observations",
+    "source_checkpoints",
+}
 
 
 def _alembic_config(db_path: Path) -> Config:
@@ -69,6 +74,7 @@ def test_clean_upgrade_creates_baseline_and_canonical_tables(tmp_path: Path) -> 
     names = _table_names(db_path)
     assert LEGACY_TABLES.issubset(names)
     assert CANONICAL_TABLES.issubset(names)
+    assert PROVENANCE_TABLES.issubset(names)
 
 
 def _seed_legacy_schema(db_path: Path) -> None:

@@ -11,8 +11,9 @@ from sqlalchemy import engine_from_config, event, pool
 from mma_model.db.models import Base
 from mma_model.db.session import sqlite_connect_pragmas
 
-# Ensure canonical tables are registered on Base.metadata.
+# Ensure canonical / provenance tables are registered on Base.metadata.
 import mma_model.db.tables.core  # noqa: F401
+import mma_model.db.tables.provenance  # noqa: F401
 
 config = context.config
 
