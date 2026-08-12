@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import sessionmaker
 
 from mma_model.db.session import _attach_sqlite_listeners, create_all_for_tests
