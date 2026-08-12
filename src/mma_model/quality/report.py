@@ -61,13 +61,16 @@ def human_report(report: CoverageReport, gates: GateResult, *, strict: bool) -> 
                 f"identity scoped_pending={report.identity.scoped_pending} "
                 f"unscoped_pending={report.identity.unscoped_pending} "
                 f"upcoming_blocks={report.identity.upcoming_blocks} "
-                f"unmatched={report.identity.unmatched}"
+                f"unmatched={report.identity.unmatched} "
+                f"unmatched_source_identities={report.identity.unmatched_source_identities}"
             ),
             (
                 f"pit proxy={report.pit.proxy_timestamps} "
                 f"unknown={report.pit.unknown_timestamps} "
                 f"left_truncated={report.pit.left_truncated_histories} "
-                f"missing_details={report.pit.missing_required_details}"
+                f"leakage_future_checks={report.pit.future_row_leakage_checks_executed} "
+                f"leakage_future_fail={report.pit.future_row_leakage_failures} "
+                f"leakage_mutable_checks={report.pit.mutable_current_leakage_checks_executed}"
             ),
             (
                 f"raw_ref ok={str(report.raw_ref_integrity.ok).lower()} "
@@ -113,6 +116,7 @@ def sanitized_summary(report: CoverageReport, gates: GateResult) -> dict[str, An
             "unscoped_pending": report.identity.unscoped_pending,
             "upcoming_blocks": report.identity.upcoming_blocks,
             "unmatched": report.identity.unmatched,
+            "unmatched_source_identities": report.identity.unmatched_source_identities,
             "fixture_never_live_coverage": True,
         },
         "pit": report.pit.model_dump(mode="json"),
@@ -127,6 +131,8 @@ def sanitized_summary(report: CoverageReport, gates: GateResult) -> dict[str, An
                 "conflict_bouts": row.conflict_bouts,
                 "validation_only": row.validation_only,
                 "never_live_coverage": row.never_live_coverage,
+                "evidence_origin": row.evidence_origin,
+                "evidence_hash": row.evidence_hash,
             }
             for row in report.source_rows
         ],
@@ -134,6 +140,7 @@ def sanitized_summary(report: CoverageReport, gates: GateResult) -> dict[str, An
         "raw_ref_integrity": report.raw_ref_integrity.model_dump(mode="json"),
         "checkpoint_run_state": {
             "ingest_runs": report.checkpoint_run_state.ingest_runs,
+            "succeeded_runs": report.checkpoint_run_state.succeeded_runs,
             "completed_runs": report.checkpoint_run_state.completed_runs,
             "failed_runs": report.checkpoint_run_state.failed_runs,
             "running_runs": report.checkpoint_run_state.running_runs,
@@ -213,6 +220,7 @@ def write_coverage_evidence(
         ),
         (
             f"- Checkpoint/run: ingest_runs={report.checkpoint_run_state.ingest_runs} "
+            f"succeeded={report.checkpoint_run_state.succeeded_runs} "
             f"completed={report.checkpoint_run_state.completed_runs} "
             f"failed={report.checkpoint_run_state.failed_runs} "
             f"checkpoints={report.checkpoint_run_state.checkpoints}"
@@ -246,7 +254,8 @@ def write_coverage_evidence(
     ident = report.identity
     lines.append(
         f"- scoped pending={ident.scoped_pending}; unscoped pending={ident.unscoped_pending}; "
-        f"upcoming blocks={ident.upcoming_blocks}; unmatched={ident.unmatched}"
+        f"upcoming blocks={ident.upcoming_blocks}; unmatched={ident.unmatched}; "
+        f"unmatched_source_identities={ident.unmatched_source_identities}"
     )
     markdown_path.parent.mkdir(parents=True, exist_ok=True)
     markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")

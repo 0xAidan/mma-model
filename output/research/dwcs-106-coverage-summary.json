@@ -8,16 +8,17 @@
     "completed_runs": 0,
     "failed_runs": 0,
     "ingest_runs": 1,
-    "running_runs": 0
+    "running_runs": 0,
+    "succeeded_runs": 1
   },
-  "config_hash": "e187af6a204676bcca6b473de368d58d6223ae55f53869b89d98b2d65aa5bac8",
+  "config_hash": "497eb548fca8ad1e550dc5a6f712c4227f03b5a4fedbd185a4bbb0066d6a467e",
   "core_tier_sum": 440,
   "core_tiers": {
-    "bronze": 0,
-    "conflict": 0,
+    "bronze": 433,
+    "conflict": 7,
     "gold": 0,
     "missing": 0,
-    "silver": 440
+    "silver": 0
   },
   "counts": {
     "bouts": 440,
@@ -31,7 +32,7 @@
     "draw": 1,
     "no_contest": 8
   },
-  "db_hash": "aecbfa1eafafca59faebf0836033a0105fd94293d6a092c6eee2d41be9236a0d",
+  "db_hash": "b67814ed72903f82684d2cecd11657940c789050b49439c88e365666caae75d7",
   "event_night": {
     "decisive": 438,
     "draw": 1,
@@ -127,6 +128,7 @@
     "fixture_never_live_coverage": true,
     "scoped_pending": 0,
     "unmatched": 0,
+    "unmatched_source_identities": 0,
     "unscoped_pending": 0,
     "upcoming_blocks": 0
   },
@@ -144,11 +146,15 @@
     "licensed_primary_unselected is not a Phase 1 global blocker"
   ],
   "pit": {
-    "conflicting_outcomes": 0,
+    "conflicting_outcomes": 7,
     "direct_timestamps": 0,
+    "future_row_leakage_checks_executed": 4,
+    "future_row_leakage_evidence_hash": "1719b460f1f890df8fedb0fd57fdd71cd8654b26bfc9815950869294a37f0b15",
     "future_row_leakage_failures": 0,
     "left_truncated_histories": 0,
     "missing_required_details": 440,
+    "mutable_current_leakage_checks_executed": 1,
+    "mutable_current_leakage_evidence_hash": "3ad8fd2484d8203b91386690a2f27e95522f3b70c4c600c5d86546894371c82a",
     "mutable_current_leakage_failures": 0,
     "proxy_timestamps": 880,
     "revision_snapshots": 0,
@@ -157,16 +163,22 @@
   "raw_ref_integrity": {
     "blob_absent_explicit": 880,
     "blob_present": 0,
+    "corrupt_blobs": 0,
     "dangling_raw_refs": 0,
     "malformed": 0,
-    "ok": true
+    "missing_blobs": 0,
+    "ok": true,
+    "store_provided": false,
+    "unverifiable": 0
   },
-  "report_hash": "5719603d0d56d8d84f2bf0a256aa20b3bd186bfd39814406a629a81191463304",
+  "report_hash": "5305f02d0e6672b5559ee8bbba7337e4be194833483d39afc9aea3b1aefebc23",
   "series": "dwcs",
   "source_failures": [],
   "sources": [
     {
       "conflict_bouts": 0,
+      "evidence_hash": "9b36ab4fd30a7eb9db71e058717187167c6215acd97777094245d3bdec7251de",
+      "evidence_origin": "checkpoint",
       "mapped_bouts": 440,
       "missing_bouts": 0,
       "never_live_coverage": false,
@@ -178,6 +190,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": "aa6351fdc3865606db85f51eec5a46a3bb618d836dc8ca139d1bdfda26188cf3",
+      "evidence_origin": "frozen_fallback",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -189,6 +203,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -200,6 +216,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": "86779ef51356b02c0fbe076d4c1c8bbc68d08717691227d8c276645eef826de8",
+      "evidence_origin": "frozen_fallback",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -211,6 +229,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": "86779ef51356b02c0fbe076d4c1c8bbc68d08717691227d8c276645eef826de8",
+      "evidence_origin": "frozen_fallback",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -222,6 +242,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": "86779ef51356b02c0fbe076d4c1c8bbc68d08717691227d8c276645eef826de8",
+      "evidence_origin": "frozen_fallback",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -233,6 +255,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -244,6 +268,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,
@@ -255,6 +281,8 @@
     },
     {
       "conflict_bouts": 0,
+      "evidence_hash": null,
+      "evidence_origin": "none",
       "mapped_bouts": 0,
       "missing_bouts": 440,
       "never_live_coverage": true,

@@ -36,9 +36,15 @@ from mma_model.identity.review import (
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.the_odds_api import fetch_mma_odds
-from mma_model.quality.constants import EXIT_INTERNAL, EXIT_STRICT_BLOCKERS
+from mma_model.quality.constants import EXIT_INTERNAL
 from mma_model.quality.coverage import compute_coverage_report
 from mma_model.quality.gates import report_with_gates
+from mma_model.quality.readonly import (
+    CoverageDatabaseError,
+    is_prohibited_live_url,
+    open_readonly_sqlite_engine,
+    readonly_session_factory,
+)
 from mma_model.quality.report import dumps_report, human_report, write_coverage_evidence
 from mma_model.quality.schema import CoverageSchemaError
 from mma_model.sources.policy import load_source_policy
@@ -373,6 +379,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional markdown coverage path",
+    )
+    p_cov.add_argument(
+        "--raw-store",
+        type=Path,
+        default=None,
+        help="Optional content-addressed raw store for referenced blob verification",
     )
 
     args = p.parse_args(argv)
@@ -851,18 +863,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "coverage":
         db_url = str(args.database_url).strip()
         if not db_url:
-            print("refusing empty --database-url")
-            return EXIT_STRICT_BLOCKERS
+            print("coverage configuration error: empty --database-url")
+            return EXIT_INTERNAL
         default_url = get_settings().mma_database_url
-        if db_url in LIVE_DB_URLS or db_url == default_url:
+        if is_prohibited_live_url(db_url, default_url=default_url):
             print(
-                "refusing default live data/mma.db; pass an explicit disposable "
-                "--database-url for DWCS-106 coverage"
+                "coverage configuration error: refusing default live data/mma.db; "
+                "pass an explicit disposable --database-url for DWCS-106 coverage"
             )
-            return EXIT_STRICT_BLOCKERS
-        engine = create_engine(db_url, future=True)
-        _attach_sqlite_listeners(engine)
-        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+            return EXIT_INTERNAL
+        raw_store = None
+        if args.raw_store is not None:
+            raw_store = ContentAddressedRawStore(Path(args.raw_store))
+        try:
+            engine = open_readonly_sqlite_engine(db_url)
+        except CoverageDatabaseError as exc:
+            print(f"coverage configuration error: {exc}")
+            return EXIT_INTERNAL
+        Session = readonly_session_factory(engine)
         try:
             try:
                 policy = load_source_policy()
@@ -872,8 +890,15 @@ def main(argv: list[str] | None = None) -> int:
                         session=session,
                         policy=policy,
                         db_url=db_url,
+                        raw_store=raw_store,
                     )
                     report, gates = report_with_gates(report, policy)
+                if report.raw_ref_integrity.unverifiable > 0:
+                    print(
+                        "coverage configuration error: --raw-store required to verify "
+                        "referenced raw blobs"
+                    )
+                    return EXIT_INTERNAL
                 if args.summary_out is not None and args.coverage_doc is not None:
                     write_coverage_evidence(
                         report,
@@ -890,6 +915,9 @@ def main(argv: list[str] | None = None) -> int:
                     print(human_report(report, gates, strict=bool(args.strict)))
             except CoverageSchemaError as exc:
                 print(f"coverage schema error: {exc}")
+                return EXIT_INTERNAL
+            except CoverageDatabaseError as exc:
+                print(f"coverage configuration error: {exc}")
                 return EXIT_INTERNAL
             except ValueError as exc:
                 print(f"coverage configuration error: {exc}")

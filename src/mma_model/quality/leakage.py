@@ -14,7 +14,8 @@ from mma_model.db.tables.core import (
     CanonicalEvent,
     FighterProfileObservation,
 )
-from mma_model.db.tables.history import HistorySourceFailure
+from mma_model.db.tables.history import HistorySourceBout, HistorySourceFailure
+from mma_model.db.tables.provenance import IngestRun, RawObservation
 from mma_model.quality.coverage import compute_coverage_report
 from mma_model.quality.schema import sha256_canonical
 from mma_model.sources.policy import load_source_policy
@@ -184,6 +185,85 @@ def append_source_failure(
             subject="future-row",
             evidence_json="{}",
             observed_at=observed_at,
+        )
+    )
+
+
+def append_future_observation(
+    session: Session,
+    *,
+    bout_id: str,
+    source: str,
+    effective_at: datetime,
+    result_type: str = "draw",
+    timestamp_quality: str = "direct_source_timestamp",
+    ingest_run_id: str | None = None,
+) -> None:
+    run_id = ingest_run_id
+    if run_id is None:
+        run = IngestRun(
+            source=source,
+            stream="history",
+            scope="future-leak",
+            status="succeeded",
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+    session.add(
+        RawObservation(
+            ingest_run_id=run_id,
+            source=source,
+            stream="history",
+            scope="future-leak",
+            checkpoint_version="v-future",
+            external_id=f"future-obs-{bout_id}-{source}",
+            entity_kind="bout_result",
+            observed_at=effective_at,
+            effective_at=effective_at,
+            source_published_at=effective_at,
+            proxy_published_at=effective_at,
+            timestamp_quality=timestamp_quality,
+            quality_tier="gold",
+            payload_hash="c" * 64,
+            raw_ref=None,
+            subject_id=bout_id,
+            version_kind="event_night",
+            attributes_json=(
+                '{"result_type":"%s","winner_fighter_id":null}' % result_type
+            ),
+        )
+    )
+
+
+def append_future_history_bout(
+    session: Session,
+    *,
+    fighter_id: str,
+    effective_at: datetime,
+    external_bout_id: str = "future-hist-1",
+) -> None:
+    session.add(
+        HistorySourceBout(
+            source="tapology_public",
+            stream="fighter_history",
+            external_bout_id=external_bout_id,
+            fighter_source="tapology_public",
+            fighter_external_id="future-fighter",
+            fighter_name="Future Fighter",
+            fighter_canonical_id=fighter_id,
+            opponent_name="Future Opp",
+            event_name="Future Card",
+            classification="professional",
+            result="win",
+            version_kind="event_night",
+            revision=1,
+            observed_at=effective_at,
+            effective_at=effective_at,
+            payload_hash="d" * 64,
+            identity_status="linked",
+            is_current_record=1,
+            observation_origin="live_public",
         )
     )
 

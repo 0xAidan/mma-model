@@ -30,7 +30,16 @@ def test_schema_file_exists_and_forbids_additional_properties() -> None:
     assert schema["additionalProperties"] is False
     assert schema["properties"]["bouts"]["minItems"] == 440
     assert schema["properties"]["bouts"]["maxItems"] == 440
-    assert "gold" in schema["$defs"]["quality_tier"]["enum"]
+    assert schema["properties"]["source_failures"]["items"]["$ref"] == "#/$defs/source_failure"
+    assert schema["$defs"]["source_failure"]["additionalProperties"] is False
+    assert schema["$defs"]["regional_live"]["additionalProperties"] is False
+    assert schema["$defs"]["coverage_fixture_validation"]["additionalProperties"] is False
+    assert schema["$defs"]["timestamp_quality"]["enum"] == [
+        "direct_source_timestamp",
+        "revision_snapshot",
+        "publication_proxy",
+        "unknown",
+    ]
 
 
 def test_schema_rejects_unknown_quality_tier_enum() -> None:

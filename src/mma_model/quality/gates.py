@@ -25,6 +25,8 @@ from mma_model.quality.constants import (
     LICENSED_NON_BLOCKER_CODES,
 )
 from mma_model.quality.models import CoverageReport, GateAssessment, GateResult
+from mma_model.quality.schema import sha256_canonical
+from mma_model.quality.universe import load_universe_contract
 from mma_model.sources.policy import SourcePolicy, load_source_policy
 
 
@@ -98,6 +100,8 @@ def evaluate_strict_gates(
 ) -> GateResult:
     source_policy = policy or load_source_policy()
     contract = load_evaluation_contract()
+    universe = load_universe_contract()
+    universe_bouts = universe.bouts
     gates_retained = source_policy.gates_retained
     go_live = contract.go_live_gates.data
     regional = report.regional_live or {}
@@ -109,17 +113,17 @@ def evaluate_strict_gates(
         + int(report.core_tiers.get("bronze") or 0)
         + int(report.core_tiers.get("conflict") or 0)
     )
-    categorized = report.core_tier_sum == 440 and represented + int(
+    categorized = report.core_tier_sum == universe_bouts and represented + int(
         report.core_tiers.get("missing") or 0
-    ) == 440
+    ) == universe_bouts
     assessments.append(
         _pass_fail(
             code=GATE_CORE_DENOMINATOR,
             segment="core_overall",
-            ok=categorized and report.core_tier_sum == 440,
+            ok=categorized and report.core_tier_sum == universe_bouts,
             blocking=True,
             numerator=report.core_tier_sum,
-            denominator=440,
+            denominator=universe_bouts,
             reason="dropped_or_duplicate_denominator",
         )
     )
@@ -127,10 +131,10 @@ def evaluate_strict_gates(
         _pass_fail(
             code=GATE_MANIFEST_REPRESENTATION,
             segment="internal_manifest",
-            ok=represented == 440 and int(report.core_tiers.get("missing") or 0) == 0,
+            ok=represented == universe_bouts and int(report.core_tiers.get("missing") or 0) == 0,
             blocking=True,
             numerator=represented,
-            denominator=440,
+            denominator=universe_bouts,
             reason="uncategorized_or_missing_core_bouts",
         )
     )
@@ -184,11 +188,14 @@ def evaluate_strict_gates(
         _pass_fail(
             code=GATE_FUTURE_ROW_LEAKAGE,
             segment="pit_future_row",
-            ok=report.pit.future_row_leakage_failures
-            <= gates_retained.future_row_leakage_failures_max,
+            ok=(
+                report.pit.future_row_leakage_checks_executed > 0
+                and report.pit.future_row_leakage_failures
+                <= gates_retained.future_row_leakage_failures_max
+            ),
             blocking=True,
             numerator=report.pit.future_row_leakage_failures,
-            denominator=0,
+            denominator=report.pit.future_row_leakage_checks_executed,
             reason="future_row_leakage",
         )
     )
@@ -196,11 +203,14 @@ def evaluate_strict_gates(
         _pass_fail(
             code=GATE_MUTABLE_CURRENT_LEAKAGE,
             segment="mutable_current_profile",
-            ok=report.pit.mutable_current_leakage_failures
-            <= gates_retained.mutable_current_as_historical_feature_failures_max,
+            ok=(
+                report.pit.mutable_current_leakage_checks_executed > 0
+                and report.pit.mutable_current_leakage_failures
+                <= gates_retained.mutable_current_as_historical_feature_failures_max
+            ),
             blocking=True,
             numerator=report.pit.mutable_current_leakage_failures,
-            denominator=0,
+            denominator=report.pit.mutable_current_leakage_checks_executed,
             reason="mutable_current_leakage",
         )
     )
@@ -244,7 +254,7 @@ def evaluate_strict_gates(
     ufc_ok = (
         ufcstats is not None
         and ufcstats.status == "present"
-        and ufcstats.mapped_bouts == 440
+        and ufcstats.mapped_bouts == universe_bouts
     )
     assessments.append(
         _pass_fail(
@@ -253,7 +263,7 @@ def evaluate_strict_gates(
             ok=ufc_ok,
             blocking=True,
             numerator=0 if ufcstats is None else ufcstats.mapped_bouts,
-            denominator=440,
+            denominator=universe_bouts,
             reason=None if ufc_ok else (ufcstats.reason if ufcstats else "unmeasured"),
         )
     )
@@ -267,13 +277,17 @@ def evaluate_strict_gates(
                     ok=live_ok,
                     blocking=True,
                     numerator=row.mapped_bouts,
-                    denominator=440,
+                    denominator=universe_bouts,
                     reason=row.reason or row.status,
                 )
             )
 
     method_row = next((row for row in report.field_rows if row.field == "method"), None)
-    details_ok = method_row is not None and method_row.missing == 0 and method_row.present == 440
+    details_ok = (
+        method_row is not None
+        and method_row.missing == 0
+        and method_row.present == universe_bouts
+    )
     assessments.append(
         _pass_fail(
             code=GATE_MISSING_REQUIRED_DETAILS,
@@ -281,7 +295,7 @@ def evaluate_strict_gates(
             ok=details_ok,
             blocking=True,
             numerator=0 if method_row is None else method_row.present,
-            denominator=440,
+            denominator=universe_bouts,
             reason="missing_method_round_or_time",
         )
     )
@@ -289,7 +303,10 @@ def evaluate_strict_gates(
         _pass_fail(
             code=GATE_RAW_REF_INTEGRITY,
             segment="provenance_raw_ref",
-            ok=report.raw_ref_integrity.ok,
+            ok=report.raw_ref_integrity.ok
+            and report.raw_ref_integrity.unverifiable == 0
+            and report.raw_ref_integrity.missing_blobs == 0
+            and report.raw_ref_integrity.corrupt_blobs == 0,
             blocking=True,
             numerator=report.raw_ref_integrity.dangling_raw_refs,
             denominator=report.raw_ref_integrity.blob_absent_explicit
@@ -331,8 +348,10 @@ def evaluate_strict_gates(
 
 
 def attach_gates(report: CoverageReport, result: GateResult) -> CoverageReport:
-    payload: dict[str, Any] = report.model_dump()
+    payload: dict[str, Any] = report.model_dump(mode="json")
     payload["gates"] = [row.model_dump(mode="json") for row in result.gates]
+    payload.pop("report_hash", None)
+    payload["report_hash"] = sha256_canonical(payload)
     return CoverageReport.model_validate(payload)
 
 

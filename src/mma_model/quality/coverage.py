@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from mma_model.dwcs.ids import canonical_bout_id, canonical_event_id
 from mma_model.dwcs.manifest import load_dwcs_bout_manifest, load_dwcs_event_manifest
 from mma_model.evaluation.contract import PINNED_CONTRACT_HASH, load_evaluation_contract
+from mma_model.ingest.raw_store import ContentAddressedRawStore
+from mma_model.quality.audits import run_leakage_audits
 from mma_model.quality.classify import (
     build_bout_row,
     classify_overall_bout,
@@ -21,9 +23,10 @@ from mma_model.quality.classify import (
     normalize_result,
     observation_visible,
     parse_iso_datetime,
+    result_version_visible,
+    select_best_observation,
 )
 from mma_model.quality.constants import (
-    CORE_OVERALL_SOURCES,
     PHASE1_BOUT_SOURCES,
     QUALITY_TIERS,
     REQUIRED_RESULT_FIELDS,
@@ -34,6 +37,8 @@ from mma_model.quality.inventory import (
     db_inventory,
     group_observations_by_source_bout,
     identity_coverage,
+    influencing_db_fingerprint,
+    load_checkpoints,
     load_raw_observations,
     load_result_versions,
     pit_coverage,
@@ -42,6 +47,7 @@ from mma_model.quality.inventory import (
     source_coverage_rows,
     source_failures,
 )
+from mma_model.quality.universe import load_universe_contract
 from mma_model.quality.models import (
     CoverageReport,
     FieldCoverageRow,
@@ -62,7 +68,13 @@ def _policy_file_hash() -> str:
     return sha256_canonical(payload)
 
 
-def _config_hash(*, series: str, as_of: str | None, policy_hash: str) -> str:
+def _config_hash(
+    *,
+    series: str,
+    as_of: str | None,
+    policy_hash: str,
+    expected_universe_hash: str,
+) -> str:
     contract = load_evaluation_contract()
     payload = {
         "series": series,
@@ -70,52 +82,29 @@ def _config_hash(*, series: str, as_of: str | None, policy_hash: str) -> str:
         "policy_hash": policy_hash,
         "evaluation_contract_hash": PINNED_CONTRACT_HASH,
         "evaluation_contract_version": contract.contract_version,
+        "expected_universe_hash": expected_universe_hash,
         "coverage_contract_version": CoverageReport.model_fields["contract_version"].default,
+        "coverage_schema_version": CoverageReport.model_fields["schema_version"].default,
     }
     return sha256_canonical(payload)
 
 
 def _db_hash(
+    session: Session,
     *,
-    observations: list[dict[str, Any]],
-    result_versions: list[dict[str, Any]],
-    failures: list[dict[str, Any]],
     inventory: dict[str, int],
+    cutoff: datetime | None = None,
+    exclude_event_id: str | None = None,
+    event_id_by_bout: dict[str, str] | None = None,
 ) -> str:
-    obs_fp = sorted(
-        (
-            str(row.get("source") or ""),
-            str(row.get("external_id") or ""),
-            str(row.get("payload_hash") or ""),
-            str(row.get("entity_kind") or ""),
-            str(row.get("version_kind") or ""),
-        )
-        for row in observations
-    )
-    result_fp = sorted(
-        (
-            str(row.get("bout_id") or ""),
-            str(row.get("version_kind") or ""),
-            int(row.get("revision") or 0),
-            str(row.get("result_type") or ""),
-            str(row.get("winner_fighter_id") or ""),
-        )
-        for row in result_versions
-    )
-    fail_fp = sorted(
-        (
-            str(row.get("source") or ""),
-            str(row.get("reason") or ""),
-            str(row.get("scope") or ""),
-            str(row.get("subject") or ""),
-        )
-        for row in failures
-    )
     payload = {
         "inventory": dict(sorted(inventory.items())),
-        "observations": obs_fp,
-        "result_versions": result_fp,
-        "failures": fail_fp,
+        "fingerprint": influencing_db_fingerprint(
+            session,
+            cutoff=cutoff,
+            exclude_event_id=exclude_event_id,
+            event_id_by_bout=event_id_by_bout,
+        ),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -139,6 +128,7 @@ def compute_coverage_report(
     as_of: datetime | None = None,
     exclude_event_id: str | None = None,
     db_url: str | None = None,
+    raw_store: ContentAddressedRawStore | None = None,
 ) -> CoverageReport:
     """Build a deterministic coverage report for the frozen DWCS universe.
 
@@ -149,6 +139,7 @@ def compute_coverage_report(
     if series != "dwcs":
         raise ValueError(f"unsupported series: {series}")
     source_policy = policy or load_source_policy()
+    universe = load_universe_contract()
     events = load_dwcs_event_manifest()
     bouts = load_dwcs_bout_manifest()
     events_by_espn = {event.espn_event_id: event for event in events}
@@ -178,8 +169,9 @@ def compute_coverage_report(
     observations = load_raw_observations(session)
     result_versions = load_result_versions(session)
     failures = source_failures(session)
+    checkpoints = load_checkpoints(session)
 
-    def _visible_row(row: dict[str, Any], *, bout_key: str) -> bool:
+    def _visible_observation(row: dict[str, Any], *, bout_key: str) -> bool:
         if as_of is None and exclude_event_id is None:
             return True
         return observation_visible(
@@ -192,18 +184,29 @@ def compute_coverage_report(
             cutoff=as_of,
             event_id=event_id_by_bout.get(str(row.get(bout_key) or "")),
             exclude_event_id=exclude_event_id,
+            source_published_at=parse_iso_datetime(row.get("source_published_at")),  # type: ignore[arg-type]
+            source_updated_at=parse_iso_datetime(row.get("source_updated_at")),  # type: ignore[arg-type]
+            source=str(row.get("source") or "") or None,
+        )
+
+    def _visible_result(row: dict[str, Any]) -> bool:
+        return result_version_visible(
+            effective_at=row.get("effective_at"),  # type: ignore[arg-type]
+            cutoff=as_of,
+            event_id=event_id_by_bout.get(str(row.get("bout_id") or "")),
+            exclude_event_id=exclude_event_id,
         )
 
     observations_for_hash = [
         row
         for row in observations
         if str(row.get("subject_id") or "") in frozen_ids
-        and _visible_row({**row, "bout_id": row.get("subject_id")}, bout_key="bout_id")
+        and _visible_observation({**row, "bout_id": row.get("subject_id")}, bout_key="bout_id")
     ]
     result_versions_for_hash = [
         row
         for row in result_versions
-        if str(row.get("bout_id") or "") in frozen_ids and _visible_row(row, bout_key="bout_id")
+        if str(row.get("bout_id") or "") in frozen_ids and _visible_result(row)
     ]
     failures_for_hash = [
         row
@@ -247,11 +250,15 @@ def compute_coverage_report(
             per_source[source] = tier
             source_bout_tiers[source][bout_id] = tier
         core_obs: list[dict[str, Any]] = []
-        for source in CORE_OVERALL_SOURCES:
-            core_obs.extend(grouped.get(source, {}).get(bout_id, []))
+        source_obs: dict[str, list[dict[str, Any]]] = {}
+        for source in PHASE1_BOUT_SOURCES:
+            rows = grouped.get(source, {}).get(bout_id, [])
+            source_obs[source] = rows
+            core_obs.extend(rows)
         overall, source_class, notes = classify_overall_bout(
             source_tiers=per_source,
             core_observations=core_obs,
+            source_observations=source_obs,
         )
         versions = versions_by_bout.get(bout_id, [])
         night = _latest_result(versions, version_kind="event_night")
@@ -270,8 +277,9 @@ def compute_coverage_report(
             night_result = "missing"
             current_result = "missing"
         ts_quality = "unknown"
-        if core_obs:
-            ts_quality = str(core_obs[0].get("timestamp_quality") or "unknown")
+        best = select_best_observation(core_obs)
+        if best is not None:
+            ts_quality = str(best.get("timestamp_quality") or "unknown")
         if overall == "conflict":
             conflicting += 1
         detail_row = current or night or {}
@@ -282,8 +290,8 @@ def compute_coverage_report(
                 continue
             value = detail_row.get(field)
             if field in {"quality_tier", "timestamp_quality", "payload_hash"}:
-                if core_obs:
-                    value = core_obs[0].get(field) or (
+                if best is not None:
+                    value = best.get(field) or (
                         overall if field == "quality_tier" else value
                     )
                     if field == "quality_tier":
@@ -291,7 +299,7 @@ def compute_coverage_report(
                     if field == "timestamp_quality":
                         value = ts_quality
                     if field == "payload_hash":
-                        value = core_obs[0].get("payload_hash")
+                        value = best.get("payload_hash")
             if field == "winner_fighter_id" and night_result in {"draw", "no_contest"}:
                 field_present[field] += 1
                 continue
@@ -322,8 +330,8 @@ def compute_coverage_report(
         event_night_counts[night_result] += 1
         current_counts[current_result] += 1
 
-    if sum(core_tier_counts.values()) != 440:
-        raise RuntimeError("core coverage denominator drifted from 440")
+    if sum(core_tier_counts.values()) != universe.bouts:
+        raise RuntimeError("core coverage denominator drifted from universe contract")
     seen_ids = [row.bout_id for row in bout_rows]
     if len(seen_ids) != len(set(seen_ids)):
         raise RuntimeError("duplicate bout ids in core coverage denominator")
@@ -337,7 +345,7 @@ def compute_coverage_report(
         status = "measured"
         if denom == 0:
             status = "insufficient_sample"
-        elif unknown == 440 and present == 0 and missing == 0:
+        elif unknown == universe.bouts and present == 0 and missing == 0:
             status = "unmeasured"
         field_rows.append(
             FieldCoverageRow(
@@ -354,20 +362,45 @@ def compute_coverage_report(
     brazil_bouts = sum(1 for row in bout_rows if row.series_variant == "brazil")
     standard_cards = sum(1 for event in events if event.series_variant == "standard")
     brazil_cards = sum(1 for event in events if event.series_variant == "brazil")
+    if standard_cards != universe.standard_cards or standard_bouts != universe.standard_bouts:
+        raise RuntimeError("standard universe counts disagree with frozen contracts")
+    if brazil_cards != universe.brazil_cards or brazil_bouts != universe.brazil_bouts:
+        raise RuntimeError("brazil universe counts disagree with frozen contracts")
     as_of_text = as_of.isoformat() if as_of is not None else None
     policy_hash = _policy_file_hash()
     identity = identity_coverage(session, series=series)
     regional = regional_live_payload(session, as_of=as_of)
-    integrity = raw_ref_integrity(observations_for_hash)
+    integrity = raw_ref_integrity(observations_for_hash, raw_store=raw_store)
+    leakage = run_leakage_audits(
+        session,
+        skeleton=skeleton,
+        observations=observations,
+        result_versions=result_versions,
+        event_id_by_bout=event_id_by_bout,
+        cutoff=as_of,
+    )
     pit = pit_coverage(
         session,
         observations_for_hash,
         missing_required_details=missing_details,
         conflicting_outcomes=conflicting,
-        future_row_leakage_failures=int(regional.get("future_invariance_failures") or 0),
+        future_row_leakage_failures=int(leakage["future_row_leakage_failures"]),
+        future_row_leakage_checks_executed=int(
+            leakage["future_row_leakage_checks_executed"]
+        ),
+        future_row_leakage_evidence_hash=str(leakage["future_row_leakage_evidence_hash"]),
+        mutable_current_leakage_failures=int(leakage["mutable_current_leakage_failures"]),
+        mutable_current_leakage_checks_executed=int(
+            leakage["mutable_current_leakage_checks_executed"]
+        ),
+        mutable_current_leakage_evidence_hash=str(
+            leakage["mutable_current_leakage_evidence_hash"]
+        ),
     )
     source_rows = source_coverage_rows(
-        source_bout_tiers=source_bout_tiers, failures=failures_for_hash
+        source_bout_tiers=source_bout_tiers,
+        failures=failures_for_hash,
+        checkpoints=checkpoints,
     )
     db_inv = db_inventory(session, series=series)
     if as_of is None:
@@ -416,19 +449,25 @@ def compute_coverage_report(
         "ticket": "DWCS-106",
         "series": series,
         "as_of": as_of_text,
-        "config_hash": _config_hash(series=series, as_of=as_of_text, policy_hash=policy_hash),
+        "config_hash": _config_hash(
+            series=series,
+            as_of=as_of_text,
+            policy_hash=policy_hash,
+            expected_universe_hash=universe.expected_universe_hash,
+        ),
         "db_hash": _db_hash(
-            observations=observations_for_hash,
-            result_versions=result_versions_for_hash,
-            failures=failures_for_hash,
+            session,
             inventory=inventory,
+            cutoff=as_of,
+            exclude_event_id=exclude_event_id,
+            event_id_by_bout=event_id_by_bout,
         ),
         "policy_hash": policy_hash,
         "evaluation_contract_hash": PINNED_CONTRACT_HASH,
         "policy_mode": source_policy.policy_mode,
         "licensed_status": licensed.model_dump(mode="json"),
-        "universe_cards": 89,
-        "universe_bouts": 440,
+        "universe_cards": universe.cards,
+        "universe_bouts": universe.bouts,
         "standard": {"cards": standard_cards, "bouts": standard_bouts},
         "brazil": {"cards": brazil_cards, "bouts": brazil_bouts},
         "event_night": {
@@ -464,7 +503,7 @@ def compute_coverage_report(
         "identity": identity.model_dump(mode="json"),
         "pit": pit.model_dump(mode="json"),
         "raw_ref_integrity": integrity.model_dump(mode="json"),
-        "checkpoint_run_state": checkpoint_run_state(session).model_dump(mode="json"),
+        "checkpoint_run_state": checkpoint_run_state(session, cutoff=as_of).model_dump(mode="json"),
         "source_failures": failures_for_hash,
         "fixture_validation": fixture_validation,
         "regional_live": regional,
@@ -486,8 +525,8 @@ def compute_coverage_report(
         evaluation_contract_hash=PINNED_CONTRACT_HASH,
         policy_mode=source_policy.policy_mode,
         licensed_status=licensed,
-        universe_cards=89,
-        universe_bouts=440,
+        universe_cards=universe.cards,
+        universe_bouts=universe.bouts,
         standard=LaneCounts(cards=standard_cards, bouts=standard_bouts),
         brazil=LaneCounts(cards=brazil_cards, bouts=brazil_bouts),
         event_night=ResultLaneCounts(
@@ -522,7 +561,7 @@ def compute_coverage_report(
         identity=identity,
         pit=pit,
         raw_ref_integrity=integrity,
-        checkpoint_run_state=checkpoint_run_state(session),
+        checkpoint_run_state=checkpoint_run_state(session, cutoff=as_of),
         source_failures=tuple(failures_for_hash),
         fixture_validation=fixture_validation,
         regional_live=regional,

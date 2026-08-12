@@ -8,6 +8,13 @@ from typing import Literal
 from mma_model.sources.policy import SourceId
 
 QualityTier = Literal["gold", "silver", "bronze", "missing", "conflict"]
+TimestampQuality = Literal[
+    "direct_source_timestamp",
+    "revision_snapshot",
+    "publication_proxy",
+    "unknown",
+]
+EvidenceOrigin = Literal["persisted", "frozen_fallback", "checkpoint", "none"]
 SourceClass = Literal[
     "internal_manifest",
     "public_extraction",
@@ -49,6 +56,32 @@ TIER_RANK: dict[str, int] = {
     "gold": 3,
     "conflict": 4,
 }
+TIMESTAMP_QUALITY_RANK: dict[str, int] = {
+    "unknown": 0,
+    "publication_proxy": 1,
+    "revision_snapshot": 2,
+    "direct_source_timestamp": 3,
+}
+DIRECT_TIMESTAMP_QUALITIES = frozenset(
+    {"direct_source_timestamp", "revision_snapshot"}
+)
+TIMESTAMP_QUALITIES: tuple[TimestampQuality, ...] = (
+    "direct_source_timestamp",
+    "revision_snapshot",
+    "publication_proxy",
+    "unknown",
+)
+EVIDENCE_ORIGINS: tuple[EvidenceOrigin, ...] = (
+    "persisted",
+    "frozen_fallback",
+    "checkpoint",
+    "none",
+)
+SUCCEEDED_RUN_STATUSES = frozenset({"succeeded"})
+COMPLETED_RUN_STATUSES = frozenset({"completed"})
+FAILED_RUN_STATUSES = frozenset({"failed"})
+RUNNING_RUN_STATUSES = frozenset({"running"})
+CANONICAL_TERMINAL_OK_STATUSES = frozenset({"succeeded"})
 
 COVERAGE_SCHEMA_VERSION = 1
 COVERAGE_CONTRACT_ID = "dwcs_coverage"
@@ -110,6 +143,17 @@ CORE_OVERALL_SOURCES = frozenset(
         SourceId.EXPLICIT_MISSING.value,
     }
 )
+INDEPENDENT_AGREEMENT_SOURCES = frozenset(
+    {
+        SourceId.DWCS_MANIFEST.value,
+        SourceId.UFCSTATS_PUBLIC.value,
+        SourceId.MMA_AI_BOOTSTRAP.value,
+        SourceId.TAPOLOGY_PUBLIC.value,
+        SourceId.SHERDOG_PUBLIC.value,
+        SourceId.COMBAT_REGISTRY.value,
+    }
+)
+GATE_RAW_UNVERIFIABLE = "raw_ref_unverifiable"
 
 REQUIRED_RESULT_FIELDS: tuple[str, ...] = (
     "result_type",
@@ -166,6 +210,10 @@ UFCSTATS_FROZEN_AUDIT_PATH = (
     REPO_ROOT / "output" / "research" / "ufcstats-public-audit-summary.json"
 )
 REGIONAL_LIVE_PROBE_PATH = REPO_ROOT / "config" / "history" / "live_probe_evidence_v1.json"
+REGIONAL_SAMPLE_PATH = (
+    REPO_ROOT / "config" / "history" / "adjudicated_regional_sample_v1.json"
+)
+DEFAULT_LEAKAGE_CUTOFF = "2024-01-01T00:00:00+00:00"
 DEFAULT_COVERAGE_DOC = REPO_ROOT / "docs" / "data" / "coverage-health.md"
 DEFAULT_COVERAGE_SUMMARY = (
     REPO_ROOT / "output" / "research" / "dwcs-106-coverage-summary.json"

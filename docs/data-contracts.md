@@ -89,8 +89,8 @@ immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 |-------|--------|
 | **Modules** | `src/mma_model/quality/coverage.py`, `gates.py`, `leakage.py` |
 | **Schema** | `output/contracts/coverage.schema.json` |
-| **CLI** | `mma-model coverage --series dwcs [--strict] [--json] --database-url ...` |
-| **Tiers** | Every frozen bout is in exactly one overall core category: gold / silver / bronze / missing / conflict |
+| **CLI** | `mma-model coverage --series dwcs [--strict] [--json] [--raw-store DIR] --database-url ...` |
+| **Tiers** | Every frozen bout is in exactly one overall core category. Gold = direct/revision timestamp; silver = proxy/stable fact plus independent agreement; bronze = single-source retrospective/proxy; conflict = independent disagreement; missing = no visible fact. Manifest-only is bronze. |
 | **Strict exit** | `0` pass; `2` any affected blocking gate; `1` configuration/schema/internal error |
 | **Non-strict** | Exit `0` while still listing blockers |
 | **Licensed status** | `decision.primary=null` / `licensed_primary_unselected` / `licensed_adoption_not_selected` / legacy `licensed_hard_blocker` are informational only and **never** a Phase 1 global blocker |
@@ -98,6 +98,18 @@ immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 | **Fixtures** | Identity/regional fixture metrics are labeled validation-only and never fill live denominators |
 
 Phase 3 train/eval consumers must refuse segments whose strict health fails. Healthy public-source segments may proceed. Public accessibility is not accuracy, PIT, or rights proof.
+
+### Coverage hash contracts
+
+| Hash | Canonical bytes |
+|------|-----------------|
+| **`config_hash`** | SHA-256 of canonical JSON over exactly: `series`, `as_of`, `policy_hash` (canonical `source_policy_v1.json`), `evaluation_contract_hash` (`PINNED_CONTRACT_HASH`), `evaluation_contract_version`, `expected_universe_hash` (`PINNED_EXPECTED_UNIVERSE_HASH`), `coverage_contract_version`, `coverage_schema_version`. Temp paths and insertion order are not inputs. |
+| **`db_hash`** | SHA-256 of canonical JSON over inventory counts plus the sorted semantic fingerprint of every table/column that can change the report: raw observations (identity, payload/raw metadata, PIT clocks, result fields), result versions, identity reviews, fighter source IDs, fighter profile observations, regional history bouts, source failures, ingest runs, and source checkpoints. Adding/changing a row in any of those tables changes `db_hash`. Insertion order and disposable DB path do not. |
+| **`report_hash`** | SHA-256 of the complete canonical emitted coverage report **excluding only** the `report_hash` field itself. Gates, blockers, cutoff/`as_of`, `config_hash`, and `db_hash` are included. After gates are attached, the hash is recomputed so the published report is self-describing. |
+
+CLI: `mma-model coverage --series dwcs [--strict] [--json] [--raw-store DIR] --database-url ...`. Empty/malformed/live `data/mma.db` URLs, missing raw store when referenced blobs exist, and schema/config/internal errors exit **1**. Strict data blockers exit **2**. Non-strict valid reports exit **0**. Coverage opens SQLite read-only (`mode=ro` + `PRAGMA query_only=ON`); no migrations, writes, or network.
+
+Quality tiers (overall): **gold** = qualifying direct/revision timestamp evidence; **silver** = documented proxy or stable immutable fact **plus** independent agreeing source evidence; **bronze** = single-source retrospective/proxy; **conflict** = independent disagreement; **missing** = no visible fact. Manifest-only proxy rows are bronze. Source **access** status (killed/failed/unmeasured) is reported separately from mapped **data coverage**.
 
 ## Existing prototype stores (retained, not yet DWCS-canonical)
 

@@ -11,12 +11,14 @@ from mma_model.quality.constants import (
     COVERAGE_CONTRACT_VERSION,
     COVERAGE_SCHEMA_VERSION,
     COVERAGE_TICKET,
+    EvidenceOrigin,
     GateStatus,
     QualityTier,
     ResultClassName,
     SeriesVariant,
     SourceClass,
     SourceStatus,
+    TimestampQuality,
 )
 
 
@@ -30,7 +32,7 @@ class BoutCoverageRow(BaseModel):
     overall_tier: QualityTier
     event_night_result: ResultClassName
     current_result: ResultClassName
-    timestamp_quality: str
+    timestamp_quality: TimestampQuality
     source_class: SourceClass
     notes: tuple[str, ...] = ()
 
@@ -62,6 +64,9 @@ class SourceCoverageRow(BaseModel):
     bronze: int = 0
     validation_only: bool = False
     never_live_coverage: bool = False
+    evidence_origin: EvidenceOrigin = "none"
+    evidence_hash: str | None = None
+    evidence_observed_at: str | None = None
 
 
 class FieldCoverageRow(BaseModel):
@@ -111,6 +116,7 @@ class IdentityCoverage(BaseModel):
     unscoped_rejected: int = 0
     unscoped_pending_blocking: bool = False
     unmatched: int = 0
+    unmatched_source_identities: int = 0
     upcoming_blocks: int = 0
     fixture_validation: dict[str, Any] = Field(default_factory=dict)
 
@@ -124,7 +130,11 @@ class PitCoverage(BaseModel):
     revision_snapshots: int = 0
     left_truncated_histories: int = 0
     future_row_leakage_failures: int = 0
+    future_row_leakage_checks_executed: int = 0
+    future_row_leakage_evidence_hash: str = ""
     mutable_current_leakage_failures: int = 0
+    mutable_current_leakage_checks_executed: int = 0
+    mutable_current_leakage_evidence_hash: str = ""
     conflicting_outcomes: int = 0
     missing_required_details: int = 0
 
@@ -137,12 +147,17 @@ class RawRefIntegrity(BaseModel):
     blob_absent_explicit: int = 0
     blob_present: int = 0
     malformed: int = 0
+    unverifiable: int = 0
+    missing_blobs: int = 0
+    corrupt_blobs: int = 0
+    store_provided: bool = False
 
 
 class CheckpointRunState(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     ingest_runs: int = 0
+    succeeded_runs: int = 0
     completed_runs: int = 0
     failed_runs: int = 0
     running_runs: int = 0

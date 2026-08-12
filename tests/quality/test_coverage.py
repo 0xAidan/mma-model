@@ -53,7 +53,10 @@ def test_populated_manifest_89_440_and_result_lanes(populated) -> None:
     assert report.counts_result_versions == 880
     assert report.core_tier_sum == 440
     assert report.core_tiers["missing"] == 0
-    assert report.core_tiers["silver"] == 440
+    assert report.core_tiers["silver"] == 0
+    assert report.core_tiers["gold"] == 0
+    assert report.core_tiers["bronze"] + report.core_tiers["conflict"] == 440
+    assert report.core_tiers["bronze"] >= 430
     assert report.standard.bouts == 425
     assert report.brazil.bouts == 15
     assert report.event_night.decisive == 438
@@ -65,7 +68,7 @@ def test_populated_manifest_89_440_and_result_lanes(populated) -> None:
     bouts = load_dwcs_bout_manifest()
     fighters = {p.espn_athlete_id for bout in bouts for p in bout.participants}
     assert report.counts_fighters == len(fighters)
-    assert all(row.overall_tier == "silver" for row in report.bouts)
+    assert {row.overall_tier for row in report.bouts} <= {"bronze", "conflict"}
     source_classes = {row.source_class for row in report.bouts}
     assert source_classes == {"internal_manifest"}
 
@@ -136,7 +139,9 @@ def test_config_hash_changes_with_as_of(populated) -> None:
         )
     assert current.config_hash != past.config_hash
     assert past.core_tiers["missing"] > 0
-    assert past.core_tiers["missing"] + past.core_tiers["silver"] == 440
+    assert past.core_tiers["bronze"] > 0
+    assert sum(past.core_tiers.values()) == 440
+    assert past.core_tiers["silver"] == 0
 
 
 def test_schema_rejects_unknown_enum_missing_required_additional() -> None:
@@ -222,7 +227,7 @@ def test_duplicate_malformed_source_rows_conflict(populated) -> None:
     assert ufc.conflict_bouts >= 1
     assert report.core_tier_sum == 440
     assert report.core_tiers["conflict"] >= 1
-    assert report.core_tiers["silver"] + report.core_tiers["conflict"] == 440
+    assert report.core_tiers["bronze"] + report.core_tiers["conflict"] == 440
 
 
 def test_killed_vs_absent_vs_unmeasured_vs_schema_drift(tmp_path) -> None:
@@ -261,8 +266,12 @@ def test_no_raw_blob_dangling_on_manifest_ingest(populated) -> None:
     assert report.raw_ref_integrity.dangling_raw_refs == 0
     assert report.raw_ref_integrity.blob_absent_explicit == 880
     assert report.checkpoint_run_state.ingest_runs >= 1
+    assert report.checkpoint_run_state.succeeded_runs == 1
+    assert report.checkpoint_run_state.completed_runs == 0
     assert report.pit.proxy_timestamps == 880
     assert report.pit.missing_required_details == 440
+    assert report.pit.future_row_leakage_checks_executed > 0
+    assert report.pit.mutable_current_leakage_checks_executed > 0
 
 
 def test_coverage_on_alembic_migrated_empty_db(tmp_path) -> None:

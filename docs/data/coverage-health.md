@@ -2,18 +2,18 @@
 
 Sanitized DWCS-106 evidence. No database files, raw HTML, or secrets.
 
-- Report hash: `5719603d0d56d8d84f2bf0a256aa20b3bd186bfd39814406a629a81191463304`
-- Config hash: `e187af6a204676bcca6b473de368d58d6223ae55f53869b89d98b2d65aa5bac8`
-- DB hash: `aecbfa1eafafca59faebf0836033a0105fd94293d6a092c6eee2d41be9236a0d`
+- Report hash: `5305f02d0e6672b5559ee8bbba7337e4be194833483d39afc9aea3b1aefebc23`
+- Config hash: `497eb548fca8ad1e550dc5a6f712c4227f03b5a4fedbd185a4bbb0066d6a467e`
+- DB hash: `b67814ed72903f82684d2cecd11657940c789050b49439c88e365666caae75d7`
 - Universe: 89 cards / 440 bouts
 - Standard: 86/425; Brazil: 3/15
 - Event-night results: decisive=438 draw=1 nc=1
 - Current results: decisive=431 draw=1 nc=8
-- Core tiers: gold=0 silver=440 bronze=0 missing=0 conflict=0
+- Core tiers: gold=0 silver=0 bronze=433 missing=0 conflict=7
 - DB counts: events=89 bouts=440 fighters=796 result_versions=880 provenance=880
-- PIT: proxy=880 unknown=0 direct=0 left_truncated=0 conflicting_outcomes=0 missing_required_details=440
+- PIT: proxy=880 unknown=0 direct=0 left_truncated=0 conflicting_outcomes=7 missing_required_details=440
 - Raw-ref: ok=true absent_explicit=880 dangling=0 present=0
-- Checkpoint/run: ingest_runs=1 completed=0 failed=0 checkpoints=1
+- Checkpoint/run: ingest_runs=1 succeeded=1 completed=0 failed=0 checkpoints=1
 - Passing gates: core_denominator, identity_conflict, manifest_representation, mutable_current_leakage, future_row_leakage, raw_ref_integrity
 - Blocking gates: pre_fight_agreement, live_source_killed:combat_registry, regional_amateur_sample, regional_professional_sample, live_accessibility_only:sherdog_public, live_source_killed:tapology_public, missing_required_details, result_agreement, ufcstats_public_live, cross_source_reconciliation
 - Non-strict CLI exit: 0; strict CLI exit: 2
@@ -46,4 +46,4 @@ Sanitized DWCS-106 evidence. No database files, raw HTML, or secrets.
 
 ## Identity
 
-- scoped pending=0; unscoped pending=0; upcoming blocks=0; unmatched=0
+- scoped pending=0; unscoped pending=0; upcoming blocks=0; unmatched=0; unmatched_source_identities=0

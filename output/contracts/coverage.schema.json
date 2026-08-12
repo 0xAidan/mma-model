@@ -106,10 +106,10 @@
     "checkpoint_run_state": { "$ref": "#/$defs/checkpoint_run_state" },
     "source_failures": {
       "type": "array",
-      "items": { "type": "object" }
+      "items": { "$ref": "#/$defs/source_failure" }
     },
-    "fixture_validation": { "type": "object" },
-    "regional_live": { "type": "object" },
+    "fixture_validation": { "$ref": "#/$defs/coverage_fixture_validation" },
+    "regional_live": { "$ref": "#/$defs/regional_live" },
     "notes": {
       "type": "array",
       "items": { "type": "string" }
@@ -120,6 +120,19 @@
     }
   },
   "$defs": {
+    "timestamp_quality": {
+      "type": "string",
+      "enum": [
+        "direct_source_timestamp",
+        "revision_snapshot",
+        "publication_proxy",
+        "unknown"
+      ]
+    },
+    "evidence_origin": {
+      "type": "string",
+      "enum": ["persisted", "frozen_fallback", "checkpoint", "none"]
+    },
     "quality_tier": {
       "type": "string",
       "enum": ["gold", "silver", "bronze", "missing", "conflict"]
@@ -229,7 +242,7 @@
         "overall_tier": { "$ref": "#/$defs/quality_tier" },
         "event_night_result": { "$ref": "#/$defs/result_class" },
         "current_result": { "$ref": "#/$defs/result_class" },
-        "timestamp_quality": { "type": "string" },
+        "timestamp_quality": { "$ref": "#/$defs/timestamp_quality" },
         "source_class": { "$ref": "#/$defs/source_class" },
         "notes": { "type": "array", "items": { "type": "string" } }
       }
@@ -263,7 +276,10 @@
         "silver",
         "bronze",
         "validation_only",
-        "never_live_coverage"
+        "never_live_coverage",
+        "evidence_origin",
+        "evidence_hash",
+        "evidence_observed_at"
       ],
       "properties": {
         "source": { "type": "string" },
@@ -277,7 +293,10 @@
         "silver": { "type": "integer", "minimum": 0 },
         "bronze": { "type": "integer", "minimum": 0 },
         "validation_only": { "type": "boolean" },
-        "never_live_coverage": { "type": "boolean" }
+        "never_live_coverage": { "type": "boolean" },
+        "evidence_origin": { "$ref": "#/$defs/evidence_origin" },
+        "evidence_hash": { "type": ["string", "null"] },
+        "evidence_observed_at": { "type": ["string", "null"] }
       }
     },
     "field_row": {
@@ -307,6 +326,7 @@
         "unscoped_rejected",
         "unscoped_pending_blocking",
         "unmatched",
+        "unmatched_source_identities",
         "upcoming_blocks",
         "fixture_validation"
       ],
@@ -318,8 +338,9 @@
         "unscoped_rejected": { "type": "integer", "minimum": 0 },
         "unscoped_pending_blocking": { "type": "boolean" },
         "unmatched": { "type": "integer", "minimum": 0 },
+        "unmatched_source_identities": { "type": "integer", "minimum": 0 },
         "upcoming_blocks": { "type": "integer", "minimum": 0 },
-        "fixture_validation": { "type": "object" }
+        "fixture_validation": { "$ref": "#/$defs/identity_fixture_validation" }
       }
     },
     "pit": {
@@ -332,7 +353,11 @@
         "revision_snapshots",
         "left_truncated_histories",
         "future_row_leakage_failures",
+        "future_row_leakage_checks_executed",
+        "future_row_leakage_evidence_hash",
         "mutable_current_leakage_failures",
+        "mutable_current_leakage_checks_executed",
+        "mutable_current_leakage_evidence_hash",
         "conflicting_outcomes",
         "missing_required_details"
       ],
@@ -343,7 +368,11 @@
         "revision_snapshots": { "type": "integer", "minimum": 0 },
         "left_truncated_histories": { "type": "integer", "minimum": 0 },
         "future_row_leakage_failures": { "type": "integer", "minimum": 0 },
+        "future_row_leakage_checks_executed": { "type": "integer", "minimum": 0 },
+        "future_row_leakage_evidence_hash": { "type": "string" },
         "mutable_current_leakage_failures": { "type": "integer", "minimum": 0 },
+        "mutable_current_leakage_checks_executed": { "type": "integer", "minimum": 0 },
+        "mutable_current_leakage_evidence_hash": { "type": "string" },
         "conflicting_outcomes": { "type": "integer", "minimum": 0 },
         "missing_required_details": { "type": "integer", "minimum": 0 }
       }
@@ -356,14 +385,22 @@
         "dangling_raw_refs",
         "blob_absent_explicit",
         "blob_present",
-        "malformed"
+        "malformed",
+        "unverifiable",
+        "missing_blobs",
+        "corrupt_blobs",
+        "store_provided"
       ],
       "properties": {
         "ok": { "type": "boolean" },
         "dangling_raw_refs": { "type": "integer", "minimum": 0 },
         "blob_absent_explicit": { "type": "integer", "minimum": 0 },
         "blob_present": { "type": "integer", "minimum": 0 },
-        "malformed": { "type": "integer", "minimum": 0 }
+        "malformed": { "type": "integer", "minimum": 0 },
+        "unverifiable": { "type": "integer", "minimum": 0 },
+        "missing_blobs": { "type": "integer", "minimum": 0 },
+        "corrupt_blobs": { "type": "integer", "minimum": 0 },
+        "store_provided": { "type": "boolean" }
       }
     },
     "checkpoint_run_state": {
@@ -371,6 +408,7 @@
       "additionalProperties": false,
       "required": [
         "ingest_runs",
+        "succeeded_runs",
         "completed_runs",
         "failed_runs",
         "running_runs",
@@ -380,6 +418,7 @@
       ],
       "properties": {
         "ingest_runs": { "type": "integer", "minimum": 0 },
+        "succeeded_runs": { "type": "integer", "minimum": 0 },
         "completed_runs": { "type": "integer", "minimum": 0 },
         "failed_runs": { "type": "integer", "minimum": 0 },
         "running_runs": { "type": "integer", "minimum": 0 },
@@ -392,6 +431,197 @@
           "type": "array",
           "items": { "type": "array", "items": { "type": "string" } }
         }
+      }
+    },
+    "source_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "reason",
+        "scope",
+        "subject",
+        "host",
+        "path_category",
+        "http_status",
+        "observed_at"
+      ],
+      "properties": {
+        "source": { "type": "string" },
+        "reason": { "type": "string" },
+        "scope": { "type": "string" },
+        "subject": { "type": "string" },
+        "host": { "type": ["string", "null"] },
+        "path_category": { "type": ["string", "null"] },
+        "http_status": { "type": ["integer", "null"] },
+        "observed_at": { "type": ["string", "null"] }
+      }
+    },
+    "identity_fixture_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "n",
+        "case_count",
+        "denominator_all",
+        "denominator_auto_eligible",
+        "auto_true_pos",
+        "auto_false_pos",
+        "auto_false_neg",
+        "precision",
+        "recall",
+        "queued",
+        "queue_rate",
+        "blocked",
+        "blocked_rate",
+        "coverage",
+        "same_name_conflations",
+        "fixture_status",
+        "statistical_confidence_claim",
+        "version",
+        "case_file_hash",
+        "label",
+        "never_live_coverage"
+      ],
+      "properties": {
+        "n": { "type": "integer", "minimum": 0 },
+        "case_count": { "type": "integer", "minimum": 0 },
+        "denominator_all": { "type": "integer", "minimum": 0 },
+        "denominator_auto_eligible": { "type": "integer", "minimum": 0 },
+        "auto_true_pos": { "type": "integer", "minimum": 0 },
+        "auto_false_pos": { "type": "integer", "minimum": 0 },
+        "auto_false_neg": { "type": "integer", "minimum": 0 },
+        "precision": { "type": "number" },
+        "recall": { "type": "number" },
+        "queued": { "type": "integer", "minimum": 0 },
+        "queue_rate": { "type": "number" },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "blocked_rate": { "type": "number" },
+        "coverage": { "type": "number" },
+        "same_name_conflations": { "type": "integer", "minimum": 0 },
+        "fixture_status": { "type": "string" },
+        "statistical_confidence_claim": { "type": "boolean" },
+        "version": { "type": "string" },
+        "case_file_hash": { "type": "string" },
+        "label": { "type": "string" },
+        "never_live_coverage": { "type": "boolean", "const": true }
+      }
+    },
+    "coverage_fixture_lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "found", "never_live_coverage"],
+      "properties": {
+        "n": { "type": ["integer", "null"], "minimum": 0 },
+        "found": { "type": ["integer", "null"], "minimum": 0 },
+        "never_live_coverage": { "type": "boolean", "const": true }
+      }
+    },
+    "coverage_fixture_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "regional_fixture_professional",
+        "regional_fixture_amateur",
+        "label",
+        "never_live_coverage"
+      ],
+      "properties": {
+        "identity": { "$ref": "#/$defs/identity_fixture_validation" },
+        "regional_fixture_professional": { "$ref": "#/$defs/coverage_fixture_lane" },
+        "regional_fixture_amateur": { "$ref": "#/$defs/coverage_fixture_lane" },
+        "label": { "type": "string" },
+        "never_live_coverage": { "type": "boolean", "const": true }
+      }
+    },
+    "regional_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "result", "reason", "http_status", "path_category"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "present",
+            "source_killed",
+            "source_failed",
+            "accessibility_only",
+            "accessible",
+            "schema_drift",
+            "unmeasured",
+            "validation_only"
+          ]
+        },
+        "result": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "http_status": { "type": ["integer", "string", "null"] },
+        "path_category": { "type": ["string", "null"] }
+      }
+    },
+    "regional_live": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_class",
+        "probe_evidence_source",
+        "professional_n",
+        "professional_found",
+        "professional_source_failed",
+        "amateur_n",
+        "amateur_found",
+        "amateur_source_failed",
+        "pre_fight_agreement_n",
+        "pre_fight_agreement_d",
+        "pre_fight_agreement_rate",
+        "live_source_coverage",
+        "fixture_professional_n",
+        "fixture_professional_found",
+        "fixture_amateur_n",
+        "fixture_amateur_found",
+        "never_live_coverage_fixture",
+        "adjudicated_sample_professional_n",
+        "adjudicated_sample_amateur_n",
+        "left_truncated",
+        "unresolved_identities"
+      ],
+      "properties": {
+        "evidence_class": {
+          "type": "string",
+          "enum": ["fixture_validation", "live_source_coverage", "mixed"]
+        },
+        "probe_evidence_source": {
+          "type": "string",
+          "enum": ["persisted", "frozen_fallback", "checkpoint", "none"]
+        },
+        "professional_n": { "type": "integer", "minimum": 0 },
+        "professional_found": { "type": "integer", "minimum": 0 },
+        "professional_source_failed": { "type": "integer", "minimum": 0 },
+        "amateur_n": { "type": "integer", "minimum": 0 },
+        "amateur_found": { "type": "integer", "minimum": 0 },
+        "amateur_source_failed": { "type": "integer", "minimum": 0 },
+        "pre_fight_agreement_n": { "type": "integer", "minimum": 0 },
+        "pre_fight_agreement_d": { "type": "integer", "minimum": 0 },
+        "pre_fight_agreement_rate": { "type": ["number", "null"] },
+        "live_source_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tapology_public", "sherdog_public", "combat_registry"],
+          "properties": {
+            "tapology_public": { "$ref": "#/$defs/regional_probe" },
+            "sherdog_public": { "$ref": "#/$defs/regional_probe" },
+            "combat_registry": { "$ref": "#/$defs/regional_probe" }
+          }
+        },
+        "fixture_professional_n": { "type": "integer", "minimum": 0 },
+        "fixture_professional_found": { "type": "integer", "minimum": 0 },
+        "fixture_amateur_n": { "type": "integer", "minimum": 0 },
+        "fixture_amateur_found": { "type": "integer", "minimum": 0 },
+        "never_live_coverage_fixture": { "type": "boolean", "const": true },
+        "adjudicated_sample_professional_n": { "type": "integer", "minimum": 0 },
+        "adjudicated_sample_amateur_n": { "type": "integer", "minimum": 0 },
+        "left_truncated": { "type": "integer", "minimum": 0 },
+        "unresolved_identities": { "type": "integer", "minimum": 0 }
       }
     },
     "gate": {
