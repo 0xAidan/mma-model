@@ -83,6 +83,22 @@ Public observations require source labels and quality tiers (`gold` / `silver` /
 evaluation contract explicitly enables a challenger. Loader returns a deeply
 immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 
+## Coverage and data-health gates (DWCS-106)
+
+| Field | Value |
+|-------|--------|
+| **Modules** | `src/mma_model/quality/coverage.py`, `gates.py`, `leakage.py` |
+| **Schema** | `output/contracts/coverage.schema.json` |
+| **CLI** | `mma-model coverage --series dwcs [--strict] [--json] --database-url ...` |
+| **Tiers** | Every frozen bout is in exactly one overall core category: gold / silver / bronze / missing / conflict |
+| **Strict exit** | `0` pass; `2` any affected blocking gate; `1` configuration/schema/internal error |
+| **Non-strict** | Exit `0` while still listing blockers |
+| **Licensed status** | `decision.primary=null` / `licensed_primary_unselected` / `licensed_adoption_not_selected` / legacy `licensed_hard_blocker` are informational only and **never** a Phase 1 global blocker |
+| **Zero denominator** | Required live sample with n=0 is `insufficient_sample` (block), never a pass |
+| **Fixtures** | Identity/regional fixture metrics are labeled validation-only and never fill live denominators |
+
+Phase 3 train/eval consumers must refuse segments whose strict health fails. Healthy public-source segments may proceed. Public accessibility is not accuracy, PIT, or rights proof.
+
 ## Existing prototype stores (retained, not yet DWCS-canonical)
 
 | Store | Module / table | Notes |
