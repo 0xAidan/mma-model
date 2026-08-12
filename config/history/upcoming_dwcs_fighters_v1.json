@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "selection": "upcoming-dwcs",
+  "fighters": [
+    {
+      "display_name": "Alex Sample",
+      "canonical_hint_id": null,
+      "source_ids": {
+        "tapology_public": "tap-100",
+        "sherdog_public": "sh-100",
+        "combat_registry": "cr-100",
+        "wikidata": "Q900001"
+      }
+    },
+    {
+      "display_name": "José Núñez",
+      "source_ids": {
+        "tapology_public": "tap-jose",
+        "wikidata": "Q900002"
+      }
+    }
+  ]
+}

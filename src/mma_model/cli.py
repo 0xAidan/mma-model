@@ -7,12 +7,25 @@ import json
 import tempfile
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
 from mma_model.dwcs.ingest import sync_dwcs_history
+from mma_model.history.audit import (
+    coverage_gates_ok,
+    evaluate_sample_coverage,
+    write_regional_coverage_doc,
+)
+from mma_model.history.constants import PROBE_PATHS, REGIONAL_FALLBACK_ORDER
+from mma_model.history.probe import (
+    not_run_live_probe_evidence as history_not_run_probe,
+    run_bounded_live_probe as history_run_bounded_probe,
+)
+from mma_model.history.sync import load_upcoming_dwcs_fighters, sync_regional_history
 from mma_model.identity.audit import build_identity_audit
 from mma_model.identity.review import (
     ReviewDecisionError,
@@ -25,7 +38,10 @@ from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.the_odds_api import fetch_mma_odds
 from mma_model.predict.backtest import walk_forward_backtest
 from mma_model.predict.train import predict_fight_a_win_prob, train_and_save
+from mma_model.sources.combat_registry.client import CombatRegistryPublicClient
 from mma_model.sources.http.block_signals import SourceBlockedError
+from mma_model.sources.sherdog_public.client import SherdogPublicClient
+from mma_model.sources.tapology_public.client import TapologyPublicClient
 from mma_model.sources.ufcstats_public.adapter import UfcstatsPublicAdapter
 from mma_model.sources.ufcstats_public.client import UfcstatsPublicClient
 from mma_model.sources.ufcstats_public.probe import (
@@ -268,6 +284,62 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional optimistic lock version",
     )
 
+    p_history = sub.add_parser("history", help="Regional/pre-UFC history utilities")
+    history_sub = p_history.add_subparsers(dest="history_cmd", required=True)
+    p_h_sync = history_sub.add_parser(
+        "sync",
+        help="Sync upcoming-DWCS regional history from public sources",
+    )
+    p_h_sync.add_argument(
+        "--fighters",
+        required=True,
+        choices=["upcoming-dwcs"],
+        help="Fighter selection (upcoming-dwcs seed or scheduled DWCS events)",
+    )
+    p_h_sync.add_argument("--database-url", required=True, help="Explicit disposable SQLite URL")
+    p_h_sync.add_argument(
+        "--raw-store",
+        type=Path,
+        required=True,
+        help="Explicit disposable content-addressed raw store root",
+    )
+    p_h_sync.add_argument(
+        "--fixture-root",
+        type=Path,
+        default=None,
+        help="Offline fixture root with tapology/sherdog/combat_registry dirs",
+    )
+    p_h_sync.add_argument("--dry-run", action="store_true")
+    p_h_sync.add_argument("--json", action="store_true")
+    p_h_sync.add_argument(
+        "--live",
+        action="store_true",
+        help="Allow bounded live fetches; refused without this flag",
+    )
+    p_h_sync.add_argument("--cache-dir", type=Path, default=None)
+
+    p_h_audit = history_sub.add_parser(
+        "audit",
+        help="Audit reconstructed regional coverage for a year range",
+    )
+    p_h_audit.add_argument("--years", required=True, help="Year or start:stop inclusive")
+    p_h_audit.add_argument("--database-url", required=True, help="Explicit disposable SQLite URL")
+    p_h_audit.add_argument("--json", action="store_true")
+    p_h_audit.add_argument("--live", action="store_true")
+    p_h_audit.add_argument("--cache-dir", type=Path, default=None)
+    p_h_audit.add_argument(
+        "--summary-out",
+        type=Path,
+        default=None,
+        help="Optional sanitized aggregate JSON path",
+    )
+    p_h_audit.add_argument(
+        "--coverage-doc",
+        type=Path,
+        default=None,
+        help="Optional markdown coverage path",
+    )
+
     args = p.parse_args(argv)
 
     if args.cmd == "init-db":
@@ -424,9 +496,6 @@ def main(argv: list[str] | None = None) -> int:
         _attach_sqlite_listeners(engine)
         if not args.dry_run:
             # Apply migrations against the explicit target only.
-            from alembic import command
-            from alembic.config import Config
-
             root = get_settings().project_root
             cfg = Config(str(root / "alembic.ini"))
             cfg.set_main_option("script_location", str(root / "migrations"))
@@ -583,6 +652,164 @@ def main(argv: list[str] | None = None) -> int:
                         f"status={payload['status']} version={payload['version']}"
                     )
                 return 0
+        finally:
+            engine.dispose()
+
+    if args.cmd == "history":
+        db_url = str(args.database_url).strip()
+        if not db_url:
+            print("refusing empty --database-url")
+            return 2
+        if db_url in LIVE_DB_URLS:
+            print(
+                "refusing default live data/mma.db; pass an explicit disposable "
+                "--database-url for DWCS-105 verification"
+            )
+            return 2
+
+        engine = create_engine(db_url, future=True)
+        _attach_sqlite_listeners(engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        try:
+            if args.history_cmd == "sync":
+                if args.fixture_root is None and not args.live:
+                    print(
+                        "refusing live history sync without --live; "
+                        "pass --fixture-root for offline fixture mode"
+                    )
+                    return 2
+                if not args.dry_run:
+                    root = get_settings().project_root
+                    cfg = Config(str(root / "alembic.ini"))
+                    cfg.set_main_option("script_location", str(root / "migrations"))
+                    cfg.set_main_option("sqlalchemy.url", db_url)
+                    command.upgrade(cfg, "head")
+                store = ContentAddressedRawStore(Path(args.raw_store))
+                repo = IngestRepository(session_factory=Session, raw_store=store)
+                fixture_roots = {}
+                if args.fixture_root is not None:
+                    for name in REGIONAL_FALLBACK_ORDER:
+                        candidate = args.fixture_root / name
+                        fixture_roots[name] = candidate if candidate.is_dir() else args.fixture_root
+                clients = {}
+                tmp_ctx: tempfile.TemporaryDirectory[str] | None = None
+                try:
+                    if args.live and args.fixture_root is None:
+                        cache_dir = args.cache_dir
+                        if cache_dir is None:
+                            tmp_ctx = tempfile.TemporaryDirectory(prefix="history-sync-cache-")
+                            cache_dir = Path(tmp_ctx.name)
+                        clients = {
+                            "tapology_public": TapologyPublicClient(cache_dir=cache_dir / "tapology"),
+                            "sherdog_public": SherdogPublicClient(cache_dir=cache_dir / "sherdog"),
+                            "combat_registry": CombatRegistryPublicClient(
+                                cache_dir=cache_dir / "combat_registry"
+                            ),
+                        }
+                    with Session() as session:
+                        fighters = load_upcoming_dwcs_fighters(session=session)
+                    report = sync_regional_history(
+                        repo=repo,
+                        session_factory=Session,
+                        fighters=fighters,
+                        fixture_roots=fixture_roots or None,
+                        clients=clients or None,
+                        dry_run=bool(args.dry_run),
+                    )
+                    payload = report.to_dict()
+                    if args.json:
+                        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+                    else:
+                        print(report.human_summary())
+                        if report.blockers:
+                            print("blockers: " + ", ".join(report.blockers))
+                    if report.blockers or report.unresolved_source_ids:
+                        return 2
+                    return 0
+                finally:
+                    for client in clients.values():
+                        client.close()
+                    if tmp_ctx is not None:
+                        tmp_ctx.cleanup()
+
+            if args.history_cmd == "audit":
+                years = _parse_years(args.years)
+                probes = {
+                    source: history_not_run_probe(source) for source in REGIONAL_FALLBACK_ORDER
+                }
+                tmp_ctx = None
+                live_clients: dict[str, object] = {}
+                try:
+                    if args.live:
+                        cache_dir = args.cache_dir
+                        if cache_dir is None:
+                            tmp_ctx = tempfile.TemporaryDirectory(prefix="history-audit-cache-")
+                            cache_dir = Path(tmp_ctx.name)
+                        live_clients = {
+                            "tapology_public": TapologyPublicClient(cache_dir=cache_dir / "tapology"),
+                            "sherdog_public": SherdogPublicClient(cache_dir=cache_dir / "sherdog"),
+                            "combat_registry": CombatRegistryPublicClient(
+                                cache_dir=cache_dir / "combat_registry"
+                            ),
+                        }
+                        for source, (host, path) in PROBE_PATHS.items():
+                            client = live_clients[source]
+                            probes[source] = history_run_bounded_probe(
+                                client=client.polite_http,
+                                source=source,
+                                host=host,
+                                path_category=path,
+                            )
+                    with Session() as session:
+                        probe_mode = "live" if args.live else "offline"
+                        report = evaluate_sample_coverage(
+                            session,
+                            years=years,
+                            live_probes={"probes": probes} if args.live else None,
+                            probe_mode=probe_mode,
+                        )
+                        ok, blockers = coverage_gates_ok(report)
+                        if args.coverage_doc is not None:
+                            write_regional_coverage_doc(
+                                report,
+                                path=args.coverage_doc,
+                                live_probes=report.probe_evidence or probes,
+                            )
+                    payload = {
+                        **report.model_dump(mode="json"),
+                        "years": {"start": years.start, "stop": years.stop - 1},
+                        "live_probes": report.probe_evidence or probes,
+                        "probe_evidence_source": report.probe_evidence_source,
+                        "gates_ok": ok,
+                        "blockers": list(blockers),
+                    }
+                    if args.summary_out is not None:
+                        args.summary_out.parent.mkdir(parents=True, exist_ok=True)
+                        args.summary_out.write_text(
+                            json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+                            encoding="utf-8",
+                        )
+                    if args.json:
+                        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+                    else:
+                        print(
+                            f"pro={report.professional_found}/{report.professional_n} "
+                            f"am={report.amateur_found}/{report.amateur_n} "
+                            f"agree={report.pre_fight_agreement_n}/{report.pre_fight_agreement_d} "
+                            f"killed={len(report.source_failed)} hash={report.report_hash}"
+                        )
+                        if blockers:
+                            print("blockers: " + ", ".join(blockers))
+                            print(
+                                "gates blocked; live unmeasured or insufficient "
+                                "comparable records"
+                            )
+                    return 0 if ok else 2
+                finally:
+                    for client in live_clients.values():
+                        client.close()
+                    if tmp_ctx is not None:
+                        tmp_ctx.cleanup()
         finally:
             engine.dispose()
 

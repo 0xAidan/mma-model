@@ -82,6 +82,7 @@ def init_db() -> None:
     """Apply Alembic migrations to head (compatible replacement for create_all-only init)."""
     # Ensure metadata modules are imported before upgrade (env.py also imports them).
     import mma_model.db.tables.core  # noqa: F401
+    import mma_model.db.tables.history  # noqa: F401
     import mma_model.db.tables.identity  # noqa: F401
     import mma_model.db.tables.provenance  # noqa: F401
 
