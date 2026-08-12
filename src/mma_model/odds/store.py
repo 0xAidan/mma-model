@@ -205,9 +205,7 @@ class OddsQuoteStore:
                     bookmaker_key=obs.bookmaker_key,
                     bookmaker_title=obs.bookmaker_title,
                     provider_market_key=obs.provider_market_key,
-                    market_family=None
-                    if obs.market_family is None
-                    else obs.market_family.value,
+                    market_family=obs.market_family.value,
                     availability=obs.availability.value,
                     observed_at=obs.observed_at,
                     commence_time=obs.commence_time,

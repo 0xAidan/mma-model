@@ -121,7 +121,12 @@ class NormalizedQuote:
 
 @dataclass(frozen=True)
 class UnknownMarketObservation:
-    """Auditable missing-market observation (never fabricated as suspended)."""
+    """Auditable missing-market observation for supported contracts only.
+
+    Never used for unsupported-by-normalizer markets. Never suspended without
+    provider evidence. ``snapshot_at`` set ⇒ historical provider snapshot;
+    ``snapshot_at`` null ⇒ current poll observation.
+    """
 
     provider: str
     region: str
@@ -131,12 +136,16 @@ class UnknownMarketObservation:
     bookmaker_key: str | None
     bookmaker_title: str | None
     provider_market_key: str
-    market_family: MarketFamily | None
+    market_family: MarketFamily
     availability: QuoteAvailability
     observed_at: datetime
     commence_time: datetime
     snapshot_at: datetime | None
     dedupe_key: str
+
+    @property
+    def poll_kind(self) -> str:
+        return "historical" if self.snapshot_at is not None else "current"
 
 
 @dataclass(frozen=True)

@@ -101,7 +101,12 @@ class OddsQuote(Base):
 
 
 class OddsAvailabilityObservation(Base):
-    """Append-only unknown/missing market observations with event/book identity."""
+    """Append-only unknown/missing market observations with event/book identity.
+
+    Supported contracts only (never unsupported-by-normalizer). ``snapshot_at``
+    set marks a historical provider snapshot; null marks a current poll.
+    Availability is ``unknown`` (missing), never implied suspension.
+    """
 
     __tablename__ = "odds_availability_observations"
     __table_args__ = (

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from sqlalchemy.orm import Session
 
+from mma_model.config import get_settings
 from mma_model.odds.normalize import ensure_utc, normalize_odds_payload, parse_single_region
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, TheOddsApiClient
@@ -26,6 +29,11 @@ LIVE_DEFAULT_DB_URLS = frozenset(
         "sqlite:///data/mma.db",
         "sqlite:///./data/mma.db",
     }
+)
+
+_TESTISH_DB_PATH = re.compile(
+    r"(?:^|[\\/_-])(?:test|tests|tmp|temp|fixture|fixtures|pytest)(?:[\\/_-]|$)",
+    re.IGNORECASE,
 )
 
 
@@ -105,17 +113,110 @@ def resolve_odds_client(
     )
 
 
-def require_disposable_database_url(database_url: str | None) -> str:
-    """Offline fixture writes must target an explicit disposable DB URL."""
+def _sqlite_url_filesystem_path(
+    database_url: str, *, project_root: Path
+) -> Path | None:
+    """Resolve a SQLite URL to a filesystem path, or None for ``:memory:``."""
+    raw = str(database_url).strip()
+    if "?" in raw:
+        raw = raw.split("?", 1)[0]
+    if "#" in raw:
+        raw = raw.split("#", 1)[0]
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if not scheme.startswith("sqlite"):
+        raise OddsOfflineModeError(
+            "offline fixture mode requires an explicit SQLite --database-url "
+            f"(refusing non-SQLite scheme {scheme or 'missing'!r})"
+        )
+
+    # Preserve SQLAlchemy's 3-slash relative / 4-slash absolute convention.
+    if raw.lower().startswith("sqlite:////") or raw.lower().startswith(
+        "sqlite+pysqlite:////"
+    ):
+        prefix = "sqlite+pysqlite:////" if "pysqlite" in scheme else "sqlite:////"
+        rest = unquote(raw[len(prefix) :])
+        path = Path("/" + rest.lstrip("/"))
+        return path.resolve()
+
+    # sqlite:///:memory: or sqlite://user@/path forms
+    if raw.lower().endswith("/:memory:") or raw.lower().endswith("/:memory"):
+        return None
+    if parsed.path in {":memory:", "/:memory:", "/:memory"}:
+        return None
+
+    three = "sqlite+pysqlite:///" if "pysqlite" in scheme else "sqlite:///"
+    if not raw.lower().startswith(three):
+        raise OddsOfflineModeError(
+            f"unsupported SQLite URL form for offline fixtures: {database_url!r}"
+        )
+    rest = unquote(raw[len(three) :])
+    if not rest or rest == ":memory:":
+        return None
+    path = Path(rest)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def _looks_like_test_db_path(path: Path) -> bool:
+    return bool(_TESTISH_DB_PATH.search(path.as_posix()))
+
+
+def require_disposable_database_url(
+    database_url: str | None,
+    *,
+    live_database_url: str | None = None,
+    project_root: Path | None = None,
+) -> str:
+    """Offline fixture writes must target an explicit disposable SQLite DB URL.
+
+    Compares normalized filesystem paths against the configured live DB so
+    absolute paths, ``sqlite:////…/data/mma.db``, and query variants cannot
+    poison production. Non-SQLite URLs are rejected. Existing files must look
+    like test/fixture paths; brand-new paths are allowed.
+    """
     if not database_url or not str(database_url).strip():
         raise OddsOfflineModeError(
             "offline fixture mode requires an explicit disposable --database-url"
         )
     url = str(database_url).strip()
-    if url in LIVE_DEFAULT_DB_URLS:
+    settings = get_settings()
+    root = project_root if project_root is not None else settings.project_root
+    live_url = (
+        live_database_url
+        if live_database_url is not None
+        else settings.mma_database_url
+    )
+
+    candidate_path = _sqlite_url_filesystem_path(url, project_root=root)
+    try:
+        live_path = _sqlite_url_filesystem_path(str(live_url), project_root=root)
+    except OddsOfflineModeError:
+        live_path = None
+
+    if candidate_path is None:
+        # :memory: is always disposable.
+        return url
+
+    if live_path is not None and candidate_path == live_path:
         raise OddsOfflineModeError(
-            "refusing default live data/mma.db for offline fixture odds writes; "
-            "pass an explicit disposable --database-url"
+            "refusing live data/mma.db for offline fixture odds writes; "
+            "pass an explicit disposable SQLite --database-url"
+        )
+
+    # Extra guard for default production layout under alternate spellings when
+    # MMA_DATABASE_URL is overridden away from data/mma.db.
+    if candidate_path.name == "mma.db" and candidate_path.parent.name == "data":
+        raise OddsOfflineModeError(
+            "refusing live data/mma.db for offline fixture odds writes; "
+            "pass an explicit disposable SQLite --database-url"
+        )
+
+    if candidate_path.exists() and not _looks_like_test_db_path(candidate_path):
+        raise OddsOfflineModeError(
+            "offline fixture database must be a non-existing or explicitly "
+            "test/fixture-named SQLite path; refusing existing non-test database"
         )
     return url
 

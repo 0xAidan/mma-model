@@ -46,6 +46,9 @@ def parse_utc_datetime(value: object, *, field: str = "timestamp") -> datetime |
     """Parse Odds API ISO/unix timestamps into aware UTC datetimes.
 
     Empty/missing values return None. Malformed values raise OddsTimestampError.
+    Provider ISO strings must include an explicit offset (``Z`` or ``±HH:MM``);
+    timezone-naive strings are rejected rather than silently assumed UTC.
+    Unix epoch values are treated as UTC.
     """
     if value is None or value == "":
         return None
@@ -59,13 +62,19 @@ def parse_utc_datetime(value: object, *, field: str = "timestamp") -> datetime |
             return None
         if text.isdigit():
             return datetime.fromtimestamp(float(text), tz=UTC)
+        # Preserve original for error context; normalize Z before fromisoformat.
+        original = text
         text = text.replace("Z", "+00:00")
         if "T" not in text and " " in text:
             text = text.replace(" ", "T", 1)
         dt = datetime.fromisoformat(text)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
+            raise OddsTimestampError(
+                f"{field} must include UTC offset (naive rejected): {original!r}"
+            )
         return dt.astimezone(UTC)
+    except OddsTimestampError:
+        raise
     except (TypeError, ValueError, OSError):
         raise OddsTimestampError(f"invalid {field}: {value!r}") from None
 
@@ -149,8 +158,17 @@ def unknown_dedupe_key(
     observed_at: datetime,
     snapshot_at: datetime | None,
 ) -> str:
-    """Stable identity for append-only unknown-market observations."""
-    snap = "" if snapshot_at is None else snapshot_at.isoformat()
+    """Stable identity for append-only unknown-market observations.
+
+    Historical rows key on provider ``snapshot_at`` so reruns of the same
+    snapshot are idempotent. Current polls key on operator ``observed_at`` so
+    distinct wall-clock polls remain distinct.
+    """
+    time_key = (
+        snapshot_at.isoformat()
+        if snapshot_at is not None
+        else observed_at.isoformat()
+    )
     material = "|".join(
         [
             provider,
@@ -159,8 +177,8 @@ def unknown_dedupe_key(
             region,
             provider_market_key,
             QuoteAvailability.UNKNOWN.value,
-            observed_at.isoformat(),
-            snap,
+            "historical" if snapshot_at is not None else "current",
+            time_key,
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -255,6 +273,10 @@ def normalize_odds_payload(
 
         if not bookmakers:
             for market_key in requested:
+                if market_key not in SUPPORTED_PROVIDER_MARKETS:
+                    # Unsupported-by-normalizer ≠ provider-missing: skip only.
+                    skipped_unsupported.add(market_key)
+                    continue
                 unknowns.append(
                     _unknown_observation(
                         provider=provider,
@@ -270,14 +292,14 @@ def normalize_odds_payload(
                         snapshot_at=snapshot_utc,
                     )
                 )
-                if market_key not in SUPPORTED_PROVIDER_MARKETS:
-                    skipped_unsupported.add(market_key)
             continue
 
         for bookmaker in bookmakers:
             book_key = str(bookmaker.get("key") or "").strip()
             book_title = str(bookmaker.get("title") or book_key).strip()
-            seen_supported: set[str] = set()
+            # Markets present in the payload (including rejected malformed ones).
+            # Malformed ≠ provider-missing: never emit UNKNOWN for these.
+            present_supported: set[str] = set()
 
             for market in bookmaker.get("markets") or []:
                 if not isinstance(market, Mapping):
@@ -290,15 +312,19 @@ def normalize_odds_payload(
                     continue
                 family = PROVIDER_MARKET_TO_FAMILY[market_key]
                 catalog = catalog_for_family(family)
-                seen_supported.add(market_key)
+                present_supported.add(market_key)
                 try:
                     source_updated = parse_utc_datetime(
                         market.get("last_update") or bookmaker.get("last_update"),
                         field="source_updated_at",
                     )
                 except OddsTimestampError:
-                    skipped_unmapped.add(f"{market_key}:{book_key}:bad_last_update")
-                    source_updated = None
+                    # Fail closed at market scope: do not store any quotes from
+                    # this market with weakened PIT provenance.
+                    skipped_unmapped.add(
+                        f"{event_id}:{book_key}:{market_key}:bad_last_update"
+                    )
+                    continue
 
                 for outcome in market.get("outcomes") or []:
                     if not isinstance(outcome, Mapping):
@@ -386,24 +412,10 @@ def normalize_odds_payload(
 
             for market_key in requested:
                 if market_key not in SUPPORTED_PROVIDER_MARKETS:
+                    # Never persist UNKNOWN for unsupported contracts.
                     skipped_unsupported.add(market_key)
-                    unknowns.append(
-                        _unknown_observation(
-                            provider=provider,
-                            region=region_key,
-                            event_id=event_id,
-                            home_team=home_team,
-                            away_team=away_team,
-                            bookmaker_key=book_key,
-                            bookmaker_title=book_title,
-                            provider_market_key=market_key,
-                            observed_at=observed_utc,
-                            commence_time=commence,
-                            snapshot_at=snapshot_utc,
-                        )
-                    )
                     continue
-                if market_key not in seen_supported:
+                if market_key not in present_supported:
                     unknowns.append(
                         _unknown_observation(
                             provider=provider,
@@ -454,7 +466,11 @@ def _unknown_observation(
     commence_time: datetime,
     snapshot_at: datetime | None,
 ) -> UnknownMarketObservation:
-    family = PROVIDER_MARKET_TO_FAMILY.get(provider_market_key)
+    if provider_market_key not in SUPPORTED_PROVIDER_MARKETS:
+        raise ValueError(
+            f"refusing unknown observation for unsupported market {provider_market_key!r}"
+        )
+    family = PROVIDER_MARKET_TO_FAMILY[provider_market_key]
     return UnknownMarketObservation(
         provider=provider,
         region=region,

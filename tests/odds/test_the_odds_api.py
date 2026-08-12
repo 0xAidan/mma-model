@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -264,6 +265,9 @@ def test_unknown_missing_is_per_bookmaker_and_persisted(tmp_path: Path) -> None:
     assert len(unknowns) == 1
     assert unknowns[0].bookmaker_key == "draftkings"
     assert unknowns[0].provider_market_key == "totals"
+    assert unknowns[0].market_family is not None
+    assert unknowns[0].poll_kind == "current"
+    assert unknowns[0].snapshot_at is None
     assert unknowns[0].availability is QuoteAvailability.UNKNOWN
 
     session = _session(tmp_path)
@@ -332,6 +336,11 @@ def test_observed_at_converted_to_utc_and_malformed_timestamps() -> None:
         )
     with pytest.raises(OddsTimestampError, match="invalid commence_time"):
         parse_utc_datetime("not-a-date", field="commence_time")
+    with pytest.raises(OddsTimestampError, match="naive rejected"):
+        parse_utc_datetime("2026-08-11T21:00:00", field="source_updated_at")
+    assert parse_utc_datetime("2026-08-11T21:00:00Z", field="source_updated_at") == (
+        datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    )
 
 
 def test_no_key_default_cannot_mutate_db(
@@ -357,13 +366,51 @@ def test_no_key_default_cannot_mutate_db(
     get_settings.cache_clear()
 
 
-def test_explicit_offline_fixtures_require_disposable_db() -> None:
+def test_explicit_offline_fixtures_require_disposable_db(tmp_path: Path) -> None:
     with pytest.raises(OddsOfflineModeError, match="fixture-dir"):
         resolve_odds_client(provider="the-odds-api", offline_fixtures=True)
     with pytest.raises(OddsOfflineModeError, match="disposable"):
         require_disposable_database_url(None)
-    with pytest.raises(OddsOfflineModeError, match="live data/mma.db"):
-        require_disposable_database_url("sqlite:///data/mma.db")
+
+    root = get_settings().project_root
+    live_abs = (root / "data" / "mma.db").resolve()
+    refused = [
+        "sqlite:///data/mma.db",
+        "sqlite:///./data/mma.db",
+        f"sqlite:////{live_abs.as_posix().lstrip('/')}",
+        f"sqlite:///{live_abs.as_posix()}",
+        "sqlite:///data/mma.db?cache=shared",
+        f"sqlite:////{live_abs.as_posix().lstrip('/')}?mode=ro",
+    ]
+    for url in refused:
+        with pytest.raises(OddsOfflineModeError, match="live data/mma.db"):
+            require_disposable_database_url(url, project_root=root)
+
+    with pytest.raises(OddsOfflineModeError, match="non-SQLite"):
+        require_disposable_database_url("postgresql://localhost/mma")
+
+    # Existing non-test SQLite path is refused even when not the live DB.
+    guard_dir = root / "data" / "offline_guard_probe"
+    guard_dir.mkdir(parents=True, exist_ok=True)
+    prod_like = guard_dir / "scratch-prod-odds.db"
+    prod_like.write_bytes(b"")
+    try:
+        with pytest.raises(OddsOfflineModeError, match="test/fixture-named"):
+            require_disposable_database_url(
+                f"sqlite:///{prod_like.resolve().as_posix()}",
+                project_root=root,
+            )
+    finally:
+        prod_like.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            guard_dir.rmdir()
+
+    ok_new = tmp_path / "disposable-odds.db"
+    assert require_disposable_database_url(
+        f"sqlite:///{ok_new.resolve().as_posix()}",
+        project_root=root,
+    ).startswith("sqlite:///")
+    assert require_disposable_database_url("sqlite:///:memory:") == "sqlite:///:memory:"
 
 
 def test_snapshot_and_audit_explicit_offline_mode(tmp_path: Path) -> None:
@@ -504,3 +551,227 @@ def test_append_only_quote_guards(tmp_path: Path) -> None:
 def test_unsupported_series_rejected() -> None:
     with pytest.raises(OddsConfigurationError, match="unsupported requested series"):
         validate_requested_series("ufc-only")
+
+
+def test_unsupported_markets_never_persist_unknown_present_or_absent() -> None:
+    """Unsupported-by-normalizer is skip-only; never UNKNOWN availability."""
+    with_mov = [
+        {
+            "id": "e-mov",
+            "commence_time": "2026-08-12T00:00:00Z",
+            "home_team": "A Fighter",
+            "away_team": "B Fighter",
+            "bookmakers": [
+                {
+                    "key": "fanduel",
+                    "title": "FanDuel",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "last_update": "2026-08-11T21:00:00Z",
+                            "outcomes": [
+                                {"name": "A Fighter", "price": 1.8},
+                                {"name": "B Fighter", "price": 2.0},
+                            ],
+                        },
+                        {
+                            "key": "method_of_victory",
+                            "last_update": "2026-08-11T21:00:00Z",
+                            "outcomes": [{"name": "KO/TKO", "price": 3.5}],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    without_mov = [
+        {
+            "id": "e-nomov",
+            "commence_time": "2026-08-12T00:00:00Z",
+            "home_team": "A Fighter",
+            "away_team": "B Fighter",
+            "bookmakers": [
+                {
+                    "key": "fanduel",
+                    "title": "FanDuel",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "last_update": "2026-08-11T21:00:00Z",
+                            "outcomes": [
+                                {"name": "A Fighter", "price": 1.8},
+                                {"name": "B Fighter", "price": 2.0},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    for events in (with_mov, without_mov):
+        report = normalize_odds_payload(
+            events,
+            observed_at=OBSERVED,
+            region="us",
+            requested_markets=["h2h", "method_of_victory"],
+        )
+        assert report.skipped_unsupported_markets == ("method_of_victory",)
+        assert all(
+            o.provider_market_key != "method_of_victory"
+            for o in report.unknown_observations
+        )
+        assert all(o.market_family is not None for o in report.unknown_observations)
+        # No fabricated unsupported-prop / suspension claim.
+        assert all(
+            o.availability is QuoteAvailability.UNKNOWN for o in report.unknown_observations
+        )
+        assert report.unknown_observations == ()
+
+
+def test_malformed_last_update_skips_market_quotes_with_context() -> None:
+    events = [
+        {
+            "id": "evt-bad-ts",
+            "commence_time": "2026-08-12T00:00:00Z",
+            "home_team": "A Fighter",
+            "away_team": "B Fighter",
+            "bookmakers": [
+                {
+                    "key": "fanduel",
+                    "title": "FanDuel",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "last_update": "2026-08-11T21:00:00",  # naive — rejected
+                            "outcomes": [
+                                {"name": "A Fighter", "price": 1.8},
+                                {"name": "B Fighter", "price": 2.0},
+                            ],
+                        },
+                        {
+                            "key": "totals",
+                            "last_update": "2026-08-11T21:00:00Z",
+                            "outcomes": [
+                                {"name": "Over", "price": 1.9, "point": 2.5},
+                                {"name": "Under", "price": 1.9, "point": 2.5},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    report = normalize_odds_payload(
+        events,
+        observed_at=OBSERVED,
+        region="us",
+        requested_markets=["h2h", "totals"],
+    )
+    assert report.quotes
+    assert all(q.provider_market_key != "h2h" for q in report.quotes)
+    assert all(q.provider_market_key == "totals" for q in report.quotes)
+    assert "evt-bad-ts:fanduel:h2h:bad_last_update" in report.skipped_unmapped_outcomes
+    # Present-but-malformed must not be recorded as provider-missing UNKNOWN.
+    assert all(o.provider_market_key != "h2h" for o in report.unknown_observations)
+
+
+def test_historical_unknown_dedupe_ignores_rerun_observed_at(tmp_path: Path) -> None:
+    events = [
+        {
+            "id": "e-hist-unk",
+            "commence_time": "2026-08-12T00:00:00Z",
+            "home_team": "A Fighter",
+            "away_team": "B Fighter",
+            "bookmakers": [
+                {
+                    "key": "draftkings",
+                    "title": "DraftKings",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "last_update": "2026-08-11T21:00:00Z",
+                            "outcomes": [
+                                {"name": "A Fighter", "price": 1.85},
+                                {"name": "B Fighter", "price": 1.95},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    snapshot_at = datetime(2026, 8, 11, 21, 0, tzinfo=UTC)
+    first_obs = datetime(2026, 8, 11, 22, 0, tzinfo=UTC)
+    second_obs = datetime(2026, 8, 12, 3, 0, tzinfo=UTC)
+    first = normalize_odds_payload(
+        events,
+        observed_at=first_obs,
+        region="us",
+        requested_markets=["h2h", "totals"],
+        snapshot_at=snapshot_at,
+    )
+    second = normalize_odds_payload(
+        events,
+        observed_at=second_obs,
+        region="us",
+        requested_markets=["h2h", "totals"],
+        snapshot_at=snapshot_at,
+    )
+    assert len(first.unknown_observations) == 1
+    assert first.unknown_observations[0].dedupe_key == second.unknown_observations[0].dedupe_key
+    assert first.unknown_observations[0].poll_kind == "historical"
+    assert first.unknown_observations[0].snapshot_at == snapshot_at
+
+    session = _session(tmp_path)
+    store = OddsQuoteStore(session)
+    assert store.append_unknown_observations(first.unknown_observations).unknown_inserted == 1
+    assert store.append_unknown_observations(second.unknown_observations).unknown_deduped == 1
+    session.commit()
+    assert session.scalar(select(func.count()).select_from(OddsAvailabilityObservation)) == 1
+    session.close()
+
+
+def test_current_unknown_polls_at_different_times_append(tmp_path: Path) -> None:
+    events = [
+        {
+            "id": "e-cur-unk",
+            "commence_time": "2026-08-12T00:00:00Z",
+            "home_team": "A Fighter",
+            "away_team": "B Fighter",
+            "bookmakers": [
+                {
+                    "key": "draftkings",
+                    "title": "DraftKings",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "last_update": "2026-08-11T21:00:00Z",
+                            "outcomes": [
+                                {"name": "A Fighter", "price": 1.85},
+                                {"name": "B Fighter", "price": 1.95},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    t1 = datetime(2026, 8, 11, 21, 5, tzinfo=UTC)
+    t2 = datetime(2026, 8, 11, 21, 10, tzinfo=UTC)
+    first = normalize_odds_payload(
+        events, observed_at=t1, region="us", requested_markets=["h2h", "totals"]
+    )
+    second = normalize_odds_payload(
+        events, observed_at=t2, region="us", requested_markets=["h2h", "totals"]
+    )
+    assert first.unknown_observations[0].poll_kind == "current"
+    assert first.unknown_observations[0].snapshot_at is None
+    assert first.unknown_observations[0].dedupe_key != second.unknown_observations[0].dedupe_key
+
+    session = _session(tmp_path)
+    store = OddsQuoteStore(session)
+    assert store.append_unknown_observations(first.unknown_observations).unknown_inserted == 1
+    assert store.append_unknown_observations(second.unknown_observations).unknown_inserted == 1
+    session.commit()
+    assert session.scalar(select(func.count()).select_from(OddsAvailabilityObservation)) == 2
+    session.close()
