@@ -286,9 +286,31 @@ def upgrade() -> None:
         )
 
 
+def _remaining_source_count(conn, table: str, id_column: str, entity_id: str) -> int:
+    return int(
+        conn.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {id_column} = :entity_id"),
+            {"entity_id": entity_id},
+        ).scalar()
+        or 0
+    )
+
+
 def downgrade() -> None:
-    """Remove only rows introduced from the ufcstats legacy import."""
+    """Remove only UFCStats-owned import rows; preserve shared canonical entities.
+
+    Provenance rules (deterministic):
+    - Delete ``*_source_ids`` rows with ``source='ufcstats'`` only.
+    - Delete aliases / profile / stat observations with ``source='ufcstats'`` only.
+    - Delete bout dependents + ``canonical_bouts`` only when no non-UFCStats
+      ``bout_source_ids`` remain for that bout.
+    - Delete ``canonical_events`` only when no source IDs remain and no bouts
+      still reference the event.
+    - Delete ``canonical_fighters`` only when no source IDs remain and no
+      remaining bouts/participants reference the fighter.
+    """
     conn = op.get_bind()
+
     bout_ids = [
         r[0]
         for r in conn.execute(
@@ -296,7 +318,14 @@ def downgrade() -> None:
             {"source": SOURCE},
         )
     ]
+    # Drop UFCStats bout linkage first; only destroy sole-owned bouts afterward.
+    conn.execute(
+        text("DELETE FROM bout_source_ids WHERE source = :source"),
+        {"source": SOURCE},
+    )
     for bout_id in bout_ids:
+        if _remaining_source_count(conn, "bout_source_ids", "bout_id", bout_id) > 0:
+            continue
         conn.execute(
             text("DELETE FROM bout_result_versions WHERE bout_id = :bout_id"),
             {"bout_id": bout_id},
@@ -309,11 +338,6 @@ def downgrade() -> None:
             text("DELETE FROM fighter_stat_observations WHERE bout_id = :bout_id"),
             {"bout_id": bout_id},
         )
-    conn.execute(
-        text("DELETE FROM bout_source_ids WHERE source = :source"),
-        {"source": SOURCE},
-    )
-    for bout_id in bout_ids:
         conn.execute(
             text("DELETE FROM canonical_bouts WHERE id = :bout_id"),
             {"bout_id": bout_id},
@@ -331,15 +355,21 @@ def downgrade() -> None:
         {"source": SOURCE},
     )
     for event_id in event_ids:
-        remaining = conn.execute(
-            text("SELECT COUNT(*) FROM event_source_ids WHERE event_id = :event_id"),
-            {"event_id": event_id},
-        ).scalar()
-        if remaining == 0:
+        if _remaining_source_count(conn, "event_source_ids", "event_id", event_id) > 0:
+            continue
+        bout_refs = int(
             conn.execute(
-                text("DELETE FROM canonical_events WHERE id = :event_id"),
+                text("SELECT COUNT(*) FROM canonical_bouts WHERE event_id = :event_id"),
                 {"event_id": event_id},
-            )
+            ).scalar()
+            or 0
+        )
+        if bout_refs > 0:
+            continue
+        conn.execute(
+            text("DELETE FROM canonical_events WHERE id = :event_id"),
+            {"event_id": event_id},
+        )
 
     fighter_ids = [
         r[0]
@@ -348,33 +378,48 @@ def downgrade() -> None:
             {"source": SOURCE},
         )
     ]
-    # Delete fighter-linked observations first (including bout_id IS NULL rows).
-    for fighter_id in fighter_ids:
-        conn.execute(
-            text("DELETE FROM fighter_stat_observations WHERE fighter_id = :fighter_id"),
-            {"fighter_id": fighter_id},
-        )
-        conn.execute(
-            text(
-                "DELETE FROM fighter_profile_observations WHERE fighter_id = :fighter_id"
-            ),
-            {"fighter_id": fighter_id},
-        )
-        conn.execute(
-            text("DELETE FROM fighter_aliases WHERE fighter_id = :fighter_id"),
-            {"fighter_id": fighter_id},
-        )
+    # Remove only UFCStats-owned provenance/observations (never other sources).
+    conn.execute(
+        text("DELETE FROM fighter_stat_observations WHERE source = :source"),
+        {"source": SOURCE},
+    )
+    conn.execute(
+        text("DELETE FROM fighter_profile_observations WHERE source = :source"),
+        {"source": SOURCE},
+    )
+    conn.execute(
+        text("DELETE FROM fighter_aliases WHERE source = :source"),
+        {"source": SOURCE},
+    )
     conn.execute(
         text("DELETE FROM fighter_source_ids WHERE source = :source"),
         {"source": SOURCE},
     )
     for fighter_id in fighter_ids:
-        remaining = conn.execute(
-            text("SELECT COUNT(*) FROM fighter_source_ids WHERE fighter_id = :fighter_id"),
-            {"fighter_id": fighter_id},
-        ).scalar()
-        if remaining == 0:
+        if _remaining_source_count(conn, "fighter_source_ids", "fighter_id", fighter_id) > 0:
+            continue
+        bout_refs = int(
             conn.execute(
-                text("DELETE FROM canonical_fighters WHERE id = :fighter_id"),
+                text(
+                    "SELECT COUNT(*) FROM canonical_bouts "
+                    "WHERE fighter_a_id = :fighter_id OR fighter_b_id = :fighter_id"
+                ),
                 {"fighter_id": fighter_id},
-            )
+            ).scalar()
+            or 0
+        )
+        participant_refs = int(
+            conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM bout_participants WHERE fighter_id = :fighter_id"
+                ),
+                {"fighter_id": fighter_id},
+            ).scalar()
+            or 0
+        )
+        if bout_refs > 0 or participant_refs > 0:
+            continue
+        conn.execute(
+            text("DELETE FROM canonical_fighters WHERE id = :fighter_id"),
+            {"fighter_id": fighter_id},
+        )

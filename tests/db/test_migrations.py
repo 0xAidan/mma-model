@@ -327,7 +327,7 @@ def test_orphan_fight_import_fails_closed(tmp_path: Path) -> None:
 
 
 def test_downgrade_import_with_null_bout_stat_observations(tmp_path: Path) -> None:
-    """0003 downgrade must remove fighter-linked stats even when bout_id is NULL."""
+    """0003 downgrade must remove UFCStats fighter stats even when bout_id is NULL."""
     db_path = tmp_path / "null_bout_stats.db"
     _seed_legacy_schema(db_path)
     cfg = _alembic_config(db_path)
@@ -368,6 +368,232 @@ def test_downgrade_import_with_null_bout_stat_observations(tmp_path: Path) -> No
         assert remaining == 0
         stats = conn.execute("SELECT COUNT(*) FROM fighter_stat_observations").fetchone()[0]
         assert stats == 0
+    finally:
+        conn.close()
+
+
+def test_downgrade_preserves_shared_canonical_entities_and_other_source_rows(
+    tmp_path: Path,
+) -> None:
+    """Shared fighter/event/bout entities and non-UFCStats provenance must survive 0003 down."""
+    db_path = tmp_path / "shared_entities.db"
+    _seed_legacy_schema(db_path)
+    cfg = _alembic_config(db_path)
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    from mma_model.db.session import _attach_sqlite_listeners
+
+    _attach_sqlite_listeners(engine)
+    now = "2024-06-01T00:00:00+00:00"
+    with engine.begin() as conn:
+        fighter_id = conn.execute(
+            text(
+                "SELECT fighter_id FROM fighter_source_ids "
+                "WHERE source='ufcstats' AND external_id='f1'"
+            )
+        ).scalar_one()
+        event_id = conn.execute(
+            text(
+                "SELECT event_id FROM event_source_ids "
+                "WHERE source='ufcstats' AND external_id='e1'"
+            )
+        ).scalar_one()
+        bout_id = conn.execute(
+            text(
+                "SELECT bout_id FROM bout_source_ids "
+                "WHERE source='ufcstats' AND external_id='fight1'"
+            )
+        ).scalar_one()
+
+        # Second source retains the same canonical entities.
+        conn.execute(
+            text(
+                "INSERT INTO fighter_source_ids "
+                "(fighter_id, source, external_id, created_at) "
+                "VALUES (:fighter_id, 'balldontlie', 'bdl-f1', :now)"
+            ),
+            {"fighter_id": fighter_id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO event_source_ids "
+                "(event_id, source, external_id, created_at) "
+                "VALUES (:event_id, 'balldontlie', 'bdl-e1', :now)"
+            ),
+            {"event_id": event_id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO bout_source_ids "
+                "(bout_id, source, external_id, created_at) "
+                "VALUES (:bout_id, 'balldontlie', 'bdl-fight1', :now)"
+            ),
+            {"bout_id": bout_id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO fighter_aliases (fighter_id, alias, source, created_at) "
+                "VALUES (:fighter_id, 'BDL Alias', 'balldontlie', :now)"
+            ),
+            {"fighter_id": fighter_id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO fighter_profile_observations "
+                "(fighter_id, attribute, value_text, value_num, value_date, source, "
+                "effective_at, observed_at, created_at) "
+                "VALUES (:fighter_id, 'stance', 'Orthodox', NULL, NULL, 'balldontlie', "
+                ":now, :now, :now)"
+            ),
+            {"fighter_id": fighter_id, "now": now},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO fighter_stat_observations "
+                "(fighter_id, bout_id, stat_key, value_num, value_text, source, "
+                "effective_at, observed_at, created_at) "
+                "VALUES (:fighter_id, NULL, 'bdl_rating', 9.5, NULL, 'balldontlie', "
+                ":now, :now, :now)"
+            ),
+            {"fighter_id": fighter_id, "now": now},
+        )
+        # UFCStats-owned observation should still be removable.
+        conn.execute(
+            text(
+                "INSERT INTO fighter_stat_observations "
+                "(fighter_id, bout_id, stat_key, value_num, value_text, source, "
+                "effective_at, observed_at, created_at) "
+                "VALUES (:fighter_id, NULL, 'ufc_only', 1.0, NULL, 'ufcstats', "
+                ":now, :now, :now)"
+            ),
+            {"fighter_id": fighter_id, "now": now},
+        )
+
+    engine.dispose()
+
+    command.downgrade(cfg, "0002_canonical_core")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_source_ids WHERE source='ufcstats'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM event_source_ids WHERE source='ufcstats'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM bout_source_ids WHERE source='ufcstats'"
+            ).fetchone()[0]
+            == 0
+        )
+
+        # Shared canonical entities retained by balldontlie.
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM canonical_fighters WHERE id=?",
+                (fighter_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM canonical_events WHERE id=?",
+                (event_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM canonical_bouts WHERE id=?",
+                (bout_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM bout_source_ids "
+                "WHERE source='balldontlie' AND bout_id=?",
+                (bout_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM event_source_ids "
+                "WHERE source='balldontlie' AND event_id=?",
+                (event_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_source_ids "
+                "WHERE source='balldontlie' AND fighter_id=?",
+                (fighter_id,),
+            ).fetchone()[0]
+            == 1
+        )
+
+        # Non-UFCStats provenance/observations preserved.
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_aliases "
+                "WHERE source='balldontlie' AND alias='BDL Alias'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_profile_observations "
+                "WHERE source='balldontlie' AND attribute='stance'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_stat_observations "
+                "WHERE source='balldontlie' AND stat_key='bdl_rating'"
+            ).fetchone()[0]
+            == 1
+        )
+        # UFCStats-owned observation removed.
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_stat_observations WHERE source='ufcstats'"
+            ).fetchone()[0]
+            == 0
+        )
+        # UFCStats aliases removed; other-source alias kept.
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM fighter_aliases WHERE source='ufcstats'"
+            ).fetchone()[0]
+            == 0
+        )
+        # Shared bout dependents remain (participants/results for retained bout).
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM bout_participants WHERE bout_id=?",
+                (bout_id,),
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM bout_result_versions WHERE bout_id=?",
+                (bout_id,),
+            ).fetchone()[0]
+            >= 1
+        )
     finally:
         conn.close()
 
