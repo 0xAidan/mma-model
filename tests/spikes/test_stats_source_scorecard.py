@@ -1525,6 +1525,7 @@ def test_sportsdataio_partial_season_cannot_pass_global_features(audit: Any) -> 
     )
     assert result["access_status"] == "entitlement_blocked"
     assert result["metrics_status"] == "blocked"
+    assert result.get("full_universe_measurable") is False
     assert result["required_features"]["status"] in {"unknown", "blocked"}
     assert result["required_features"]["status"] != "pass"
     assert result["event_coverage"]["status"] == "unknown"
@@ -1538,6 +1539,86 @@ def test_sportsdataio_partial_season_cannot_pass_global_features(audit: Any) -> 
     assert diag["seasons_entitlement_blocked"] == [2023, 2024]
     assert diag["matched_bout_count"] == 2
     assert diag["global_feature_pass_allowed"] is False
+
+
+def test_sportsdataio_universe_gates_fail_closed_unless_all_seasons_ok(
+    audit: Any,
+) -> None:
+    """Partial/unknown/missing season scope must never set full_universe_measurable."""
+    required = tuple(audit.SPORTSDATAIO_AUDIT_SEASONS)
+    assert required == (2023, 2024, 2025)
+    # Exhaustive contract shared with the live probe.
+    assert set(audit.SPORTSDATAIO_SEASON_ACCESS_STATUSES) == {
+        "ok",
+        "auth_failed",
+        "entitlement_blocked",
+        "quota_exceeded",
+        "request_failed",
+        "not_configured",
+        "unknown",
+    }
+
+    unknown_partial = audit.evaluate_sportsdataio_universe_gates(
+        audit_season_access={2023: "unknown", 2024: "ok", 2025: "ok"},
+        accessible_matched_fights=[{"id": 1}],
+        accessible_stat_observations=None,
+        full_event_denominator=30,
+        full_bout_denominator=149,
+    )
+    assert unknown_partial.get("full_universe_measurable") is False
+    assert unknown_partial["metrics_status"] == "blocked"
+    assert unknown_partial["access_status"] == "unknown"
+    assert unknown_partial["event_coverage"]["numerator"] is None
+    assert unknown_partial["bout_coverage"]["numerator"] is None
+    assert "unknown" in str(unknown_partial.get("error") or "").lower() or (
+        "incomplete" in str(unknown_partial.get("error") or "").lower()
+    )
+
+    missing_season = audit.evaluate_sportsdataio_universe_gates(
+        audit_season_access={2024: "ok", 2025: "ok"},
+        accessible_matched_fights=[],
+        accessible_stat_observations=None,
+        full_event_denominator=30,
+        full_bout_denominator=149,
+    )
+    assert missing_season.get("full_universe_measurable") is False
+    assert missing_season["metrics_status"] == "blocked"
+    assert missing_season["access_status"] == "unknown"
+    assert missing_season["event_coverage"]["numerator"] is None
+    assert "missing" in str(missing_season.get("error") or "").lower()
+    assert 2023 in (
+        missing_season.get("accessible_season_diagnostics", {}).get("seasons_missing")
+        or []
+    )
+
+    unrecognized = audit.evaluate_sportsdataio_universe_gates(
+        audit_season_access={
+            2023: "weird_future_status",
+            2024: "ok",
+            2025: "ok",
+        },
+        accessible_matched_fights=[],
+        accessible_stat_observations=None,
+        full_event_denominator=30,
+        full_bout_denominator=149,
+    )
+    assert unrecognized.get("full_universe_measurable") is False
+    assert unrecognized["metrics_status"] == "blocked"
+    assert unrecognized["access_status"] == "unknown"
+    assert unrecognized["event_coverage"]["numerator"] is None
+    assert "unrecognized" in str(unrecognized.get("error") or "").lower()
+
+    all_ok = audit.evaluate_sportsdataio_universe_gates(
+        audit_season_access={2023: "ok", 2024: "ok", 2025: "ok"},
+        accessible_matched_fights=[{"id": 1}],
+        accessible_stat_observations=None,
+        full_event_denominator=30,
+        full_bout_denominator=149,
+    )
+    assert all_ok.get("full_universe_measurable") is True
+    assert all_ok["access_status"] == "ok"
+    assert all_ok["metrics_status"] == "pending_full_measurement"
+    assert all_ok.get("error") is None
 
 
 def test_sportsdataio_key_absent_is_not_zero_coverage(

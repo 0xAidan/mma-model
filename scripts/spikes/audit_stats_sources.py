@@ -82,6 +82,19 @@ API_SPORTS_BASE = "https://v1.mma.api-sports.io"
 SPORTSDATAIO_BASE = "https://api.sportsdata.io/v3/mma"
 SPORTSDATAIO_AUDIT_SEASONS = (2023, 2024, 2025)
 SPORTSDATAIO_LEAGUE = "UFC"
+# Exhaustive season-scope statuses shared by the live probe and gate evaluator.
+# Future variants must be added here before they can be treated as measurable.
+SPORTSDATAIO_SEASON_ACCESS_STATUSES: frozenset[str] = frozenset(
+    {
+        "ok",
+        "auth_failed",
+        "entitlement_blocked",
+        "quota_exceeded",
+        "request_failed",
+        "not_configured",
+        "unknown",
+    }
+)
 
 REQUIRED_FIGHT_FIELDS = (
     "id",
@@ -2542,6 +2555,120 @@ def summarize_sportsdataio_fight_stats(
     return present
 
 
+def normalize_sportsdataio_season_access_status(value: Any) -> AccessStatus | str:
+    """Map a season status into the shared exhaustive contract (or unrecognized)."""
+    text = str(value or "").strip()
+    if text in SPORTSDATAIO_SEASON_ACCESS_STATUSES:
+        return text  # type: ignore[return-value]
+    return str(value)
+
+
+def classify_sportsdataio_season_scope(
+    audit_season_access: Mapping[int, Any],
+    *,
+    required_seasons: Sequence[int] = SPORTSDATAIO_AUDIT_SEASONS,
+) -> dict[str, Any]:
+    """Fail-closed season-scope classifier shared by probe + gate evaluator.
+
+    ``full_universe_measurable`` is true only when every required frozen season is
+    explicitly present with status ``ok``. Missing keys, unrecognized statuses,
+    ``unknown``, and any auth/entitlement/request/quota failure block measurement.
+    """
+    normalized: dict[int, str] = {}
+    for year, status in audit_season_access.items():
+        try:
+            year_i = int(year)
+        except (TypeError, ValueError):
+            continue
+        normalized[year_i] = str(normalize_sportsdataio_season_access_status(status))
+
+    seasons_missing = sorted(year for year in required_seasons if year not in normalized)
+    seasons_unrecognized = sorted(
+        year
+        for year in required_seasons
+        if year in normalized and normalized[year] not in SPORTSDATAIO_SEASON_ACCESS_STATUSES
+    )
+    seasons_ok = sorted(
+        year for year in required_seasons if normalized.get(year) == "ok"
+    )
+    seasons_entitlement_blocked = sorted(
+        year
+        for year in required_seasons
+        if normalized.get(year) == "entitlement_blocked"
+    )
+    seasons_auth_failed = sorted(
+        year for year in required_seasons if normalized.get(year) == "auth_failed"
+    )
+    seasons_quota_exceeded = sorted(
+        year for year in required_seasons if normalized.get(year) == "quota_exceeded"
+    )
+    seasons_request_failed = sorted(
+        year for year in required_seasons if normalized.get(year) == "request_failed"
+    )
+    seasons_not_configured = sorted(
+        year for year in required_seasons if normalized.get(year) == "not_configured"
+    )
+    seasons_unknown = sorted(
+        year for year in required_seasons if normalized.get(year) == "unknown"
+    )
+
+    all_ok = (
+        not seasons_missing
+        and not seasons_unrecognized
+        and len(seasons_ok) == len(tuple(required_seasons))
+        and all(normalized.get(year) == "ok" for year in required_seasons)
+    )
+
+    # Typed fail-closed blocking status/reason (priority order).
+    if all_ok:
+        block_status: AccessStatus = "ok"
+        block_reason: str | None = None
+    elif seasons_entitlement_blocked:
+        block_status = "entitlement_blocked"
+        block_reason = "historical_season_entitlement_blocked"
+    elif seasons_auth_failed:
+        block_status = "auth_failed"
+        block_reason = "audit_season_auth_failed"
+    elif seasons_quota_exceeded:
+        block_status = "quota_exceeded"
+        block_reason = "audit_season_quota_exceeded"
+    elif seasons_request_failed:
+        block_status = "request_failed"
+        block_reason = "audit_season_request_failed"
+    elif seasons_not_configured:
+        block_status = "not_configured"
+        block_reason = "audit_season_not_configured"
+    elif seasons_missing:
+        block_status = "unknown"
+        block_reason = "missing_required_audit_season"
+    elif seasons_unrecognized:
+        block_status = "unknown"
+        block_reason = "unrecognized_season_access_status"
+    elif seasons_unknown:
+        block_status = "unknown"
+        block_reason = "audit_season_access_unknown"
+    else:
+        block_status = "unknown"
+        block_reason = "incomplete_audit_season_scope"
+
+    return {
+        "required_seasons": list(required_seasons),
+        "normalized_season_access": {str(k): v for k, v in sorted(normalized.items())},
+        "seasons_ok": seasons_ok,
+        "seasons_entitlement_blocked": seasons_entitlement_blocked,
+        "seasons_auth_failed": seasons_auth_failed,
+        "seasons_quota_exceeded": seasons_quota_exceeded,
+        "seasons_request_failed": seasons_request_failed,
+        "seasons_not_configured": seasons_not_configured,
+        "seasons_unknown": seasons_unknown,
+        "seasons_missing": seasons_missing,
+        "seasons_unrecognized": seasons_unrecognized,
+        "full_universe_measurable": all_ok,
+        "block_status": block_status,
+        "block_reason": block_reason,
+    }
+
+
 def evaluate_sportsdataio_universe_gates(
     *,
     audit_season_access: Mapping[int, str],
@@ -2552,182 +2679,196 @@ def evaluate_sportsdataio_universe_gates(
 ) -> dict[str, Any]:
     """Apply full-universe SportsDataIO gates without treating blocked access as zero.
 
+    Fail closed unless every required frozen audit season is explicitly ``ok``.
     A small accessible-season sample must never produce a global feature pass.
     """
-    seasons_ok = sorted(
-        year for year, status in audit_season_access.items() if status == "ok"
-    )
-    seasons_entitlement_blocked = sorted(
-        year
-        for year, status in audit_season_access.items()
-        if status == "entitlement_blocked"
-    )
-    seasons_auth_failed = sorted(
-        year for year, status in audit_season_access.items() if status == "auth_failed"
-    )
-    seasons_failed = sorted(
-        year
-        for year, status in audit_season_access.items()
-        if status in {"request_failed", "quota_exceeded"}
-    )
+    scope = classify_sportsdataio_season_scope(audit_season_access)
+    seasons_ok = list(scope["seasons_ok"])
+    seasons_entitlement_blocked = list(scope["seasons_entitlement_blocked"])
     diagnostics = {
         "seasons_ok": seasons_ok,
         "seasons_entitlement_blocked": seasons_entitlement_blocked,
-        "seasons_auth_failed": seasons_auth_failed,
-        "seasons_request_failed": seasons_failed,
+        "seasons_auth_failed": list(scope["seasons_auth_failed"]),
+        "seasons_quota_exceeded": list(scope["seasons_quota_exceeded"]),
+        "seasons_request_failed": list(scope["seasons_request_failed"]),
+        "seasons_not_configured": list(scope["seasons_not_configured"]),
+        "seasons_unknown": list(scope["seasons_unknown"]),
+        "seasons_missing": list(scope["seasons_missing"]),
+        "seasons_unrecognized": list(scope["seasons_unrecognized"]),
+        "required_seasons": list(scope["required_seasons"]),
         "matched_bout_count": len(accessible_matched_fights),
         "full_event_denominator": full_event_denominator,
         "full_bout_denominator": full_bout_denominator,
         "global_feature_pass_allowed": False,
+        "full_universe_measurable": bool(scope["full_universe_measurable"]),
+        "block_status": scope["block_status"],
+        "block_reason": scope["block_reason"],
         "note": (
-            "Accessible-season matches are diagnostic only. Entitlement-blocked "
-            "audit seasons are not scored as coverage absences."
+            "Accessible-season matches are diagnostic only. Any non-ok, missing, "
+            "or unrecognized required audit season blocks global measurement; "
+            "blocked seasons are not scored as coverage absences."
         ),
     }
 
-    blocked_reason = "historical_season_entitlement_blocked"
-    if seasons_entitlement_blocked:
-        empty = _empty_provider_metrics(
-            full_event_denominator,
-            full_bout_denominator,
-            DIFFICULT_IDENTITY_SAMPLE_SIZE,
-        )
-        for key in (
-            "event_coverage",
-            "bout_coverage",
-            "profile_coverage",
-            "stat_coverage",
-        ):
-            empty[key]["reason"] = blocked_reason
-            empty[key]["status"] = "unknown"
-        empty["outcome_agreement"]["reason"] = blocked_reason
-        empty["outcome_agreement"]["status"] = "unknown"
-        empty["difficult_identity_coverage"]["reason"] = blocked_reason
-        empty["required_features"] = {
-            "status": "unknown",
-            "reason": "full_universe_not_measurable_due_to_entitlement",
-            "coverage_min": REQUIRED_FEATURE_COVERAGE_MIN,
-            "fight_fields": {
-                "status": "unknown",
-                "denominator": full_bout_denominator,
-                "fields": {},
-            },
-            "stat_fields": {
-                "status": "unknown",
-                "denominator": full_bout_denominator,
-                "probed": 0,
-                "fields": {},
-            },
-            "result_fields": {
-                "status": "unknown",
-                "denominator": full_bout_denominator,
-                "fields": {
-                    field: {
-                        "numerator": None,
-                        "denominator": full_bout_denominator,
-                        "rate": None,
-                        "status": "unknown",
-                    }
-                    for field in SPORTSDATAIO_RESULT_FIELDS
-                },
-            },
-            "missing_fight_fields": list(REQUIRED_FIGHT_FIELDS),
-            "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
-            "missing_result_fields": list(SPORTSDATAIO_RESULT_FIELDS),
-            "accessible_sample_stat_observations": (
-                len(accessible_stat_observations or [])
-            ),
-        }
-        empty["pit_fitness"] = {
-            "status": "unknown",
-            "reason": (
-                "pre_fight_reconstruction_unproven,revision_support_unproven,"
-                "publication_timestamps_unproven"
-            ),
-            "pre_fight_reconstruction": "unknown",
-            "revision_support": "unknown",
-            "publication_timestamps": "unknown",
-            "latency_ms_p50": None,
-            "request_cost_units": None,
-            "field_null_rates": {
-                "status": "unknown",
-                "reason": "not_probed_full_universe",
-                "fields": {},
-            },
-        }
-        # Schema diagnostic on accessible sample only (never a global pass).
-        if accessible_matched_fights:
-            sample_required = evaluate_required_features(
-                accessible_matched_fights,
-                bout_stat_observations=accessible_stat_observations,
-            )
-            result_field_metrics: dict[str, Any] = {}
-            for field in SPORTSDATAIO_RESULT_FIELDS:
-                numerator = sum(
-                    1 for fight in accessible_matched_fights if _field_present(fight, field)
-                )
-                result_field_metrics[field] = {
-                    "numerator": numerator,
-                    "denominator": len(accessible_matched_fights),
-                    "rate": numerator / max(len(accessible_matched_fights), 1),
-                    "status": "diagnostic_only",
-                }
-            pre_fight_present = sum(
-                1
-                for fight in accessible_matched_fights
-                if fight.get("pre_fight_records_present") is True
-            )
-            diagnostics["accessible_sample_required_features"] = {
-                "status": sample_required["status"],
-                "fight_fields_status": sample_required["fight_fields"]["status"],
-                "stat_fields_status": sample_required["stat_fields"]["status"],
-                "result_fields": result_field_metrics,
-                "pre_fight_records_present": {
-                    "numerator": pre_fight_present,
-                    "denominator": len(accessible_matched_fights),
-                    "rate": pre_fight_present / max(len(accessible_matched_fights), 1),
-                    "status": "diagnostic_only",
-                },
-                "note": (
-                    "Diagnostic only; incomplete audit-season entitlement prevents "
-                    "a global required-features pass."
-                ),
-            }
+    if scope["full_universe_measurable"]:
         return {
-            "access_status": "entitlement_blocked",
-            "error": blocked_reason,
-            "metrics_status": "blocked",
-            "event_coverage": empty["event_coverage"],
-            "bout_coverage": empty["bout_coverage"],
-            "outcome_agreement": empty["outcome_agreement"],
-            "difficult_identity_coverage": empty["difficult_identity_coverage"],
-            "profile_coverage": empty["profile_coverage"],
-            "stat_coverage": empty["stat_coverage"],
-            "required_features": empty["required_features"],
-            "pit_fitness": empty["pit_fitness"],
+            "access_status": "ok",
+            "error": None,
+            "metrics_status": "pending_full_measurement",
             "accessible_season_diagnostics": diagnostics,
-            "access_classification": {
-                "auth": "ok" if seasons_ok or seasons_entitlement_blocked else "unknown",
-                "subscription_entitlement": "historical_seasons_blocked",
-                "quota": "ok",
-                "schema": (
-                    "ok_on_accessible_endpoints"
-                    if accessible_matched_fights
-                    else "unknown"
-                ),
-                "missing_data": "not_assessed_for_blocked_seasons",
-                "rights": "unknown",
-                "quote": "quote_pending",
-            },
+            "full_universe_measurable": True,
         }
 
-    # Full audit seasons accessible — caller must run shared measurement path.
+    blocked_reason = str(scope["block_reason"] or "incomplete_audit_season_scope")
+    block_status = _as_access_status(scope["block_status"])
+    empty = _empty_provider_metrics(
+        full_event_denominator,
+        full_bout_denominator,
+        DIFFICULT_IDENTITY_SAMPLE_SIZE,
+    )
+    for key in (
+        "event_coverage",
+        "bout_coverage",
+        "profile_coverage",
+        "stat_coverage",
+    ):
+        empty[key]["reason"] = blocked_reason
+        empty[key]["status"] = "unknown"
+    empty["outcome_agreement"]["reason"] = blocked_reason
+    empty["outcome_agreement"]["status"] = "unknown"
+    empty["difficult_identity_coverage"]["reason"] = blocked_reason
+    required_reason = (
+        "full_universe_not_measurable_due_to_entitlement"
+        if block_status == "entitlement_blocked"
+        else f"full_universe_not_measurable_due_to_{blocked_reason}"
+    )
+    empty["required_features"] = {
+        "status": "unknown",
+        "reason": required_reason,
+        "coverage_min": REQUIRED_FEATURE_COVERAGE_MIN,
+        "fight_fields": {
+            "status": "unknown",
+            "denominator": full_bout_denominator,
+            "fields": {},
+        },
+        "stat_fields": {
+            "status": "unknown",
+            "denominator": full_bout_denominator,
+            "probed": 0,
+            "fields": {},
+        },
+        "result_fields": {
+            "status": "unknown",
+            "denominator": full_bout_denominator,
+            "fields": {
+                field: {
+                    "numerator": None,
+                    "denominator": full_bout_denominator,
+                    "rate": None,
+                    "status": "unknown",
+                }
+                for field in SPORTSDATAIO_RESULT_FIELDS
+            },
+        },
+        "missing_fight_fields": list(REQUIRED_FIGHT_FIELDS),
+        "missing_stat_fields": list(REQUIRED_STAT_FIELDS),
+        "missing_result_fields": list(SPORTSDATAIO_RESULT_FIELDS),
+        "accessible_sample_stat_observations": (
+            len(accessible_stat_observations or [])
+        ),
+    }
+    empty["pit_fitness"] = {
+        "status": "unknown",
+        "reason": (
+            "pre_fight_reconstruction_unproven,revision_support_unproven,"
+            "publication_timestamps_unproven"
+        ),
+        "pre_fight_reconstruction": "unknown",
+        "revision_support": "unknown",
+        "publication_timestamps": "unknown",
+        "latency_ms_p50": None,
+        "request_cost_units": None,
+        "field_null_rates": {
+            "status": "unknown",
+            "reason": "not_probed_full_universe",
+            "fields": {},
+        },
+    }
+    # Schema diagnostic on accessible sample only (never a global pass).
+    if accessible_matched_fights:
+        sample_required = evaluate_required_features(
+            accessible_matched_fights,
+            bout_stat_observations=accessible_stat_observations,
+        )
+        result_field_metrics: dict[str, Any] = {}
+        for field in SPORTSDATAIO_RESULT_FIELDS:
+            numerator = sum(
+                1 for fight in accessible_matched_fights if _field_present(fight, field)
+            )
+            result_field_metrics[field] = {
+                "numerator": numerator,
+                "denominator": len(accessible_matched_fights),
+                "rate": numerator / max(len(accessible_matched_fights), 1),
+                "status": "diagnostic_only",
+            }
+        pre_fight_present = sum(
+            1
+            for fight in accessible_matched_fights
+            if fight.get("pre_fight_records_present") is True
+        )
+        diagnostics["accessible_sample_required_features"] = {
+            "status": sample_required["status"],
+            "fight_fields_status": sample_required["fight_fields"]["status"],
+            "stat_fields_status": sample_required["stat_fields"]["status"],
+            "result_fields": result_field_metrics,
+            "pre_fight_records_present": {
+                "numerator": pre_fight_present,
+                "denominator": len(accessible_matched_fights),
+                "rate": pre_fight_present / max(len(accessible_matched_fights), 1),
+                "status": "diagnostic_only",
+            },
+            "note": (
+                "Diagnostic only; incomplete audit-season scope prevents "
+                "a global required-features pass."
+            ),
+        }
+
+    if block_status == "entitlement_blocked":
+        entitlement_label = "historical_seasons_blocked"
+        auth_label = "ok" if seasons_ok or seasons_entitlement_blocked else "unknown"
+        schema_label = (
+            "ok_on_accessible_endpoints" if accessible_matched_fights else "unknown"
+        )
+        missing_data_label = "not_assessed_for_blocked_seasons"
+    else:
+        entitlement_label = "unknown"
+        auth_label = "auth_failed" if block_status == "auth_failed" else "unknown"
+        schema_label = "unknown"
+        missing_data_label = "not_assessed_for_incomplete_season_scope"
+
     return {
-        "access_status": "ok",
-        "error": None,
-        "metrics_status": "pending_full_measurement",
+        "access_status": block_status,
+        "error": blocked_reason,
+        "metrics_status": "blocked",
+        "full_universe_measurable": False,
+        "event_coverage": empty["event_coverage"],
+        "bout_coverage": empty["bout_coverage"],
+        "outcome_agreement": empty["outcome_agreement"],
+        "difficult_identity_coverage": empty["difficult_identity_coverage"],
+        "profile_coverage": empty["profile_coverage"],
+        "stat_coverage": empty["stat_coverage"],
+        "required_features": empty["required_features"],
+        "pit_fitness": empty["pit_fitness"],
         "accessible_season_diagnostics": diagnostics,
-        "full_universe_measurable": True,
+        "access_classification": {
+            "auth": auth_label,
+            "subscription_entitlement": entitlement_label,
+            "quota": "quota_exceeded" if block_status == "quota_exceeded" else "ok",
+            "schema": schema_label,
+            "missing_data": missing_data_label,
+            "rights": "unknown",
+            "quote": "quote_pending",
+        },
     }
 
 
@@ -2819,13 +2960,17 @@ def probe_sportsdataio_live(
         status, body = _get(
             f"/scores/json/Schedule/{SPORTSDATAIO_LEAGUE}/{season}"
         )
-        season_access[season] = access
-        if access in {"entitlement_blocked", "unknown"}:
+        # Probe + gate evaluator share the exhaustive season-status contract.
+        season_status = normalize_sportsdataio_season_access_status(access)
+        if season_status not in SPORTSDATAIO_SEASON_ACCESS_STATUSES:
+            season_status = "unknown"
+        season_access[season] = season_status  # type: ignore[assignment]
+        if season_status in {"entitlement_blocked", "unknown"}:
             # Restore access for subsequent seasons after a season-scoped denial.
             access = "ok"
             error = None
             continue
-        if access != "ok":
+        if season_status != "ok":
             continue
         if not isinstance(body, list):
             season_access[season] = "request_failed"
