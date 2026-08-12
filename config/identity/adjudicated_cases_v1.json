@@ -1,4 +1,10 @@
 {
+  "schema_version": 1,
+  "version": "1",
+  "fixture_id": "identity_adjudicated_cases_v1",
+  "fixture_status": "synthetic_explicit",
+  "statistical_confidence_claim": false,
+  "description": "Hand-authored synthetic identity cases for resolver regression. Not a live DWCS coverage sample and not a statistical confidence claim.",
   "seeds": [
     {
       "espn_id": "10001",
@@ -60,6 +66,17 @@
       "espn_id": "10011",
       "display_name": "Context Only",
       "dob": "1987-07-07"
+    },
+    {
+      "espn_id": "10012",
+      "display_name": "Riley Exact"
+    },
+    {
+      "espn_id": "10013",
+      "display_name": "Sam Prelinked",
+      "extra_source_ids": [
+        {"source": "sherdog_public", "external_id": "sd-prelink-1"}
+      ]
     }
   ],
   "events": [
@@ -117,6 +134,7 @@
       "dob": "1990-01-01",
       "same_name_group": "john_smith",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10001"}
     },
     {
@@ -127,6 +145,7 @@
       "dob": "1992-06-15",
       "same_name_group": "john_smith",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10002"}
     },
     {
@@ -135,6 +154,8 @@
       "external_id": "sd-js-alone",
       "display_name": "John Smith",
       "same_name_group": "john_smith",
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -144,6 +165,7 @@
       "display_name": "José Silva",
       "dob": "1988-03-03",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10003"}
     },
     {
@@ -152,6 +174,8 @@
       "external_id": "sd-jose-ascii",
       "display_name": "Jose Silva",
       "candidate_hints": ["transliterated"],
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -161,6 +185,7 @@
       "display_name": "Bones",
       "candidate_hints": ["nickname"],
       "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -169,6 +194,8 @@
       "external_id": "sd-reord",
       "display_name": "Lopez Maria",
       "candidate_hints": ["reordered"],
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -177,6 +204,8 @@
       "external_id": "tp-dob-conflict",
       "display_name": "Maria Lopez",
       "dob": "1999-09-09",
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -184,6 +213,8 @@
       "source": "sherdog_public",
       "external_id": "sd-dob-missing",
       "display_name": "Maria Lopez",
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -195,6 +226,7 @@
       "event_id": "evt-a",
       "event_date": "2019-01-10",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10011"}
     },
     {
@@ -204,6 +236,7 @@
       "display_name": "Ambiguous Fighter",
       "opponent_normalized_name": "shared opp",
       "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "created"}
     },
     {
@@ -213,6 +246,7 @@
       "display_name": "Wiki Exact",
       "wikidata_id": "Q70001",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10007"}
     },
     {
@@ -222,6 +256,8 @@
       "display_name": "Wiki Conflict B",
       "wikidata_id": "Q80001",
       "dob": "1981-02-02",
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -230,6 +266,7 @@
       "external_id": "dup-ext-1",
       "display_name": "Dup External",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10010"}
     },
     {
@@ -238,6 +275,7 @@
       "external_id": "dup-ext-1",
       "display_name": "Totally Different Person",
       "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "queued"}
     },
     {
@@ -248,6 +286,8 @@
       "bout_id": "bout-up",
       "bout_status": "upcoming",
       "same_name_group": "john_smith",
+      "auto_eligible": false,
+      "series": "dwcs",
       "expected": {"kind": "blocked_or_queued"}
     },
     {
@@ -256,14 +296,28 @@
       "external_id": "10004",
       "display_name": "ALEX BONES CARTER",
       "auto_eligible": true,
+      "series": "dwcs",
       "expected": {"kind": "linked", "canonical_espn_id": "10004"}
+    },
+    {
+      "id": "exact_espn_riley",
+      "source": "espn",
+      "external_id": "10012",
+      "display_name": "Riley Exact",
+      "auto_eligible": true,
+      "series": "dwcs",
+      "expected": {"kind": "linked", "canonical_espn_id": "10012"}
+    },
+    {
+      "id": "exact_sherdog_prelinked",
+      "source": "sherdog_public",
+      "external_id": "sd-prelink-1",
+      "display_name": "Sam Prelinked",
+      "auto_eligible": true,
+      "series": "dwcs",
+      "expected": {"kind": "linked", "canonical_espn_id": "10013"}
     }
   ],
-  "exact_id_expansion": {
-    "espn_id_start": 10100,
-    "count": 40,
-    "name_prefix": "Exact Link"
-  },
   "review_cases": [
     {
       "source": "sherdog_public",

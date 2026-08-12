@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from mma_model.db.models import Base
+from mma_model.db.base import Base
 
 
 def _utc_now() -> datetime:
@@ -37,11 +37,11 @@ class IdentityReviewQueue(Base):
     __tablename__ = "identity_review_queue"
     __table_args__ = (
         Index(
-            "uq_identity_review_open_source_external",
+            "uq_identity_review_pending_source_external",
             "source",
             "external_id",
             unique=True,
-            sqlite_where=text("status IN ('pending', 'approved', 'rejected')"),
+            sqlite_where=text("status = 'pending'"),
         ),
     )
 

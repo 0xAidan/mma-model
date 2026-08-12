@@ -298,6 +298,227 @@ def test_repeated_approve_reverse_cycles_keep_history(env) -> None:
         assert _mappings(session, source="tapology_public", external_id="cycle-1") == []
 
 
+def test_reject_reresolve_creates_new_pending(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        _seed(session, "30041", "Reject Cycle")
+        session.commit()
+        first = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="rej-cycle",
+            display_name="Reject Cycle",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        apply_review_decision(
+            session,
+            review_id=first.review_id,
+            decision="reject",
+            canonical_id=None,
+            actor="bob",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        second = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="rej-cycle",
+            display_name="Reject Cycle",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        assert second.kind in {"queued", "blocked"}
+        assert second.review_id != first.review_id
+        pending = list(
+            session.scalars(
+                select(IdentityReviewQueue).where(
+                    IdentityReviewQueue.source == "tapology_public",
+                    IdentityReviewQueue.external_id == "rej-cycle",
+                    IdentityReviewQueue.status == "pending",
+                )
+            ).all()
+        )
+        rejected = list(
+            session.scalars(
+                select(IdentityReviewQueue).where(
+                    IdentityReviewQueue.source == "tapology_public",
+                    IdentityReviewQueue.external_id == "rej-cycle",
+                    IdentityReviewQueue.status == "rejected",
+                )
+            ).all()
+        )
+        assert len(pending) == 1
+        assert len(rejected) == 1
+        assert pending[0].id == second.review_id
+
+
+def test_approve_different_name_reresolve_queues_conflict(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        fid = _seed(session, "30051", "Approved Name")
+        session.commit()
+        first = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="appr-diff",
+            display_name="Approved Name",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        apply_review_decision(
+            session,
+            review_id=first.review_id,
+            decision="approve",
+            canonical_id=fid,
+            actor="bob",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        assert len(_mappings(session, source="sherdog_public", external_id="appr-diff")) == 1
+        second = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="appr-diff",
+            display_name="Completely Different Person",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        assert second.kind in {"queued", "blocked"}
+        assert second.rule_id == "identity_conflict_queue"
+        pending = list(
+            session.scalars(
+                select(IdentityReviewQueue).where(
+                    IdentityReviewQueue.source == "sherdog_public",
+                    IdentityReviewQueue.external_id == "appr-diff",
+                    IdentityReviewQueue.status == "pending",
+                )
+            ).all()
+        )
+        approved = list(
+            session.scalars(
+                select(IdentityReviewQueue).where(
+                    IdentityReviewQueue.source == "sherdog_public",
+                    IdentityReviewQueue.external_id == "appr-diff",
+                    IdentityReviewQueue.status == "approved",
+                )
+            ).all()
+        )
+        assert len(pending) == 1
+        assert len(approved) == 1
+        assert len(_mappings(session, source="sherdog_public", external_id="appr-diff")) == 1
+
+
+def test_repeated_reject_reresolve_cycles(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        _seed(session, "30061", "Repeat Reject")
+        session.commit()
+        ids: list[str] = []
+        for _ in range(2):
+            queued = resolve_fighter(
+                session,
+                source="tapology_public",
+                external_id="rep-rej",
+                display_name="Repeat Reject",
+                actor="system",
+                now=FIXED_NOW,
+            )
+            session.commit()
+            assert queued.review_id not in ids
+            ids.append(queued.review_id)
+            apply_review_decision(
+                session,
+                review_id=queued.review_id,
+                decision="reject",
+                canonical_id=None,
+                actor="bob",
+                now=FIXED_NOW,
+            )
+            session.commit()
+        rejected = list(
+            session.scalars(
+                select(IdentityReviewQueue).where(
+                    IdentityReviewQueue.source == "tapology_public",
+                    IdentityReviewQueue.external_id == "rep-rej",
+                    IdentityReviewQueue.status == "rejected",
+                )
+            ).all()
+        )
+        assert len(rejected) == 2
+
+
+def test_approved_does_not_block_second_pending_index(env) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    engine = env["engine"]
+    Session = env["Session"]
+    now = FIXED_NOW
+    with Session() as session:
+        session.add(
+            IdentityReviewQueue(
+                id="appr-open",
+                status="approved",
+                version=1,
+                source="tapology_public",
+                external_id="idx-mix",
+                display_name="Mix",
+                normalized_name="mix",
+                candidate_canonical_ids_json="[]",
+                evidence_json="{}",
+                rule_id="manual_enqueue",
+                resolver_version="1",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+    other = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    with other() as session:
+        session.add(
+            IdentityReviewQueue(
+                id="pend-open",
+                status="pending",
+                version=1,
+                source="tapology_public",
+                external_id="idx-mix",
+                display_name="Mix",
+                normalized_name="mix",
+                candidate_canonical_ids_json="[]",
+                evidence_json="{}",
+                rule_id="manual_enqueue",
+                resolver_version="1",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+    with Session() as session:
+        session.add(
+            IdentityReviewQueue(
+                id="pend-dup",
+                status="pending",
+                version=1,
+                source="tapology_public",
+                external_id="idx-mix",
+                display_name="Mix",
+                normalized_name="mix",
+                candidate_canonical_ids_json="[]",
+                evidence_json="{}",
+                rule_id="manual_enqueue",
+                resolver_version="1",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
 def test_cannot_reapprove_reversed_row(env) -> None:
     Session = env["Session"]
     with Session() as session:

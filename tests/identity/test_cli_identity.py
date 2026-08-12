@@ -83,7 +83,11 @@ def test_identity_audit_list_json_readonly(db_env, capsys) -> None:
     assert "report_hash" in payload
     assert "pending_reviews" in payload
     assert "canonical_fighter_count" in payload
+    assert "unscoped_pending" in payload
+    assert "fixture_validation" in payload
+    fixture_metrics = payload["fixture_validation"]
     for key in (
+        "n",
         "denominator_all",
         "denominator_auto_eligible",
         "auto_true_pos",
@@ -97,8 +101,11 @@ def test_identity_audit_list_json_readonly(db_env, capsys) -> None:
         "blocked_rate",
         "coverage",
         "same_name_conflations",
+        "fixture_status",
+        "statistical_confidence_claim",
     ):
-        assert key in payload
+        assert key in fixture_metrics
+    assert fixture_metrics["statistical_confidence_claim"] is False
 
     code = main(
         [

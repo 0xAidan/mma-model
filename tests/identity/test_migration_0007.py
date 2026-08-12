@@ -173,30 +173,57 @@ def test_identity_unique_constraints_enforced(tmp_path: Path) -> None:
             (now, now),
         )
         conn.commit()
+        conn.execute(
+            "INSERT INTO identity_review_queue("
+            "id, status, version, source, external_id, display_name, normalized_name, "
+            "candidate_canonical_ids_json, evidence_json, rule_id, resolver_version, "
+            "created_at, updated_at, reversible) "
+            "VALUES ('r-approved','approved',1,'tapology_public','x','A','a','[]','{}',"
+            "'manual_enqueue','1',?,?,1)",
+            (now, now),
+        )
+        conn.commit()
+        mixed = conn.execute(
+            "SELECT status, COUNT(*) FROM identity_review_queue "
+            "WHERE source='tapology_public' AND external_id='x' "
+            "GROUP BY status"
+        ).fetchall()
+        by_status = {row[0]: row[1] for row in mixed}
+        assert by_status["pending"] == 1
+        assert by_status["approved"] == 1
+        assert by_status["reversed"] == 2
+
         try:
             conn.execute(
                 "INSERT INTO identity_review_queue("
                 "id, status, version, source, external_id, display_name, normalized_name, "
                 "candidate_canonical_ids_json, evidence_json, rule_id, resolver_version, "
                 "created_at, updated_at, reversible) "
-                "VALUES ('r-open-2','approved',1,'tapology_public','x','A','a','[]','{}',"
+                "VALUES ('r-open-2','pending',1,'tapology_public','x','A','a','[]','{}',"
                 "'manual_enqueue','1',?,?,1)",
                 (now, now),
             )
             conn.commit()
-            open_raised = False
+            second_pending_raised = False
         except sqlite3.IntegrityError:
-            open_raised = True
+            second_pending_raised = True
             conn.rollback()
-        assert open_raised
+        assert second_pending_raised
 
+        index_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='uq_identity_review_pending_source_external'"
+        ).fetchone()
+        assert index_sql is not None
+        assert "pending" in index_sql[0]
+        assert "approved" not in index_sql[0]
         indexes = {
             r[1]
             for r in conn.execute(
                 "SELECT type, name FROM sqlite_master WHERE name LIKE 'uq_identity_review%'"
             ).fetchall()
         }
-        assert "uq_identity_review_open_source_external" in indexes
+        assert "uq_identity_review_pending_source_external" in indexes
+        assert "uq_identity_review_open_source_external" not in indexes
         assert "uq_identity_review_source_external_status" not in indexes
     finally:
         conn.close()

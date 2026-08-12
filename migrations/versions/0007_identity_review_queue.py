@@ -67,13 +67,6 @@ def upgrade() -> None:
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
             sa.PrimaryKeyConstraint("id"),
         )
-        op.execute(
-            sa.text(
-                "CREATE UNIQUE INDEX uq_identity_review_open_source_external "
-                "ON identity_review_queue(source, external_id) "
-                "WHERE status IN ('pending', 'approved', 'rejected')"
-            )
-        )
         op.create_index(
             "ix_identity_review_queue_status", "identity_review_queue", ["status"]
         )
@@ -88,6 +81,18 @@ def upgrade() -> None:
         op.create_index(
             "ix_identity_review_queue_bout_id", "identity_review_queue", ["bout_id"]
         )
+
+    # Pending-only uniqueness: approved/rejected/reversed rows must not block a
+    # later pending review for the same source+external ID.
+    op.execute(sa.text("DROP INDEX IF EXISTS uq_identity_review_open_source_external"))
+    op.execute(sa.text("DROP INDEX IF EXISTS uq_identity_review_source_external_status"))
+    op.execute(
+        sa.text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_identity_review_pending_source_external "
+            "ON identity_review_queue(source, external_id) "
+            "WHERE status = 'pending'"
+        )
+    )
 
     if "identity_match_evidence" not in existing:
         op.create_table(

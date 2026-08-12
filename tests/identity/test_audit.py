@@ -100,15 +100,20 @@ def test_audit_deterministic_fixed_db_config_hash(env) -> None:
     assert a.exact_espn_mappings == 2
     assert a.unresolved_conflicts >= 1
     payload = a.to_dict()
+    assert "fixture_validation" in payload
+    fixture_metrics = payload["fixture_validation"]
     for key in METRIC_KEYS:
-        assert key in payload
+        assert key in fixture_metrics
+    assert fixture_metrics["statistical_confidence_claim"] is False
+    assert fixture_metrics["fixture_status"] == "synthetic_explicit"
+    assert "unscoped_pending" in payload
+    assert "unscoped_rejected" in payload
+    assert "unscoped_approved" in payload
     human = a.human_summary()
+    assert "unscoped_pending=" in human
+    assert "fixture_n=" in human
     assert "precision=" in human
-    assert "recall=" in human
-    assert "queued=" in human
-    assert "blocked=" in human
-    assert "denominator_all=" in human
-    assert "denominator_auto_eligible=" in human
+    assert "no statistical confidence" in human.lower() or "synthetic" in human.lower()
 
 
 def test_audit_series_filters_unrelated_rows_and_fails_closed(env) -> None:
@@ -225,3 +230,194 @@ def test_audit_series_filters_unrelated_rows_and_fails_closed(env) -> None:
     assert dwcs_a.exact_espn_mappings == 2
     assert ufc.canonical_fighter_count >= 3
     assert ufc.report_hash != dwcs_a.report_hash
+
+
+def test_audit_includes_mapping_linked_and_unscoped_reviews(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        dwcs_fid = canonical_fighter_id("88101")
+        dwcs_opp = canonical_fighter_id("88102")
+        session.add(CanonicalFighter(id=dwcs_fid, display_name="Mapped DWCS"))
+        session.add(CanonicalFighter(id=dwcs_opp, display_name="Mapped Opp"))
+        session.add(FighterSourceId(fighter_id=dwcs_fid, source="espn", external_id="88101"))
+        session.add(FighterSourceId(fighter_id=dwcs_opp, source="espn", external_id="88102"))
+        session.add(
+            CanonicalEvent(
+                id="map-evt",
+                name="Mapped Card",
+                series="dwcs_standard",
+                status="completed",
+                event_date=date(2020, 3, 3),
+            )
+        )
+        session.flush()
+        session.add(
+            CanonicalBout(
+                id="map-bout",
+                event_id="map-evt",
+                fighter_a_id=dwcs_fid,
+                fighter_b_id=dwcs_opp,
+                status="completed",
+            )
+        )
+        session.flush()
+        session.add(BoutParticipant(bout_id="map-bout", fighter_id=dwcs_fid, corner="a"))
+        session.add(BoutParticipant(bout_id="map-bout", fighter_id=dwcs_opp, corner="b"))
+        session.commit()
+        mapped = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="map-linked",
+            display_name="Mapped DWCS",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        unscoped = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="no-bout-person",
+            display_name="Unscoped Stranger",
+            candidate_hints=("nickname",),
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        assert mapped.kind in {"queued", "blocked"}
+        assert unscoped.kind in {"queued", "blocked"}
+        report = build_identity_audit(session, series="dwcs")
+        payload = report.to_dict()
+        assert payload["unscoped_pending"] >= 1
+        assert payload["pending_reviews"] >= 1
+        assert mapped.review_id is not None
+        assert payload["unscoped_pending_blocking"] is True
+        human = report.human_summary()
+        assert "unscoped_pending=" in human
+        assert "precision" not in payload
+        assert "queued" not in payload
+
+
+def test_audit_hash_changes_with_material_inputs_not_insert_order(env) -> None:
+    Session = env["Session"]
+
+    def _seed_pair(session, *, fighter_espn: str, opp_espn: str, review_ext: str) -> None:
+        fid = canonical_fighter_id(fighter_espn)
+        opp = canonical_fighter_id(opp_espn)
+        session.add(CanonicalFighter(id=fid, display_name=f"Hash {fighter_espn}"))
+        session.add(CanonicalFighter(id=opp, display_name=f"Hash Opp {opp_espn}"))
+        session.add(FighterSourceId(fighter_id=fid, source="espn", external_id=fighter_espn))
+        session.add(FighterSourceId(fighter_id=opp, source="espn", external_id=opp_espn))
+        session.add(
+            CanonicalEvent(
+                id=f"hash-evt-{fighter_espn}",
+                name="Hash Card",
+                series="dwcs",
+                status="completed",
+                event_date=date(2020, 1, 1),
+            )
+        )
+        session.flush()
+        session.add(
+            CanonicalBout(
+                id=f"hash-bout-{fighter_espn}",
+                event_id=f"hash-evt-{fighter_espn}",
+                fighter_a_id=fid,
+                fighter_b_id=opp,
+                status="completed",
+            )
+        )
+        session.flush()
+        session.add(
+            BoutParticipant(bout_id=f"hash-bout-{fighter_espn}", fighter_id=fid, corner="a")
+        )
+        session.add(
+            BoutParticipant(bout_id=f"hash-bout-{fighter_espn}", fighter_id=opp, corner="b")
+        )
+        session.commit()
+        resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id=review_ext,
+            display_name=f"Hash {fighter_espn}",
+            bout_id=f"hash-bout-{fighter_espn}",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+
+    with Session() as session:
+        _seed_pair(session, fighter_espn="88201", opp_espn="88202", review_ext="hash-a")
+        _seed_pair(session, fighter_espn="88203", opp_espn="88204", review_ext="hash-b")
+        first = build_identity_audit(session, series="dwcs")
+        unscoped = resolve_fighter(
+            session,
+            source="sherdog_public",
+            external_id="hash-unscoped",
+            display_name="Hash Unscoped",
+            candidate_hints=("nickname",),
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        with_unscoped = build_identity_audit(session, series="dwcs")
+        assert unscoped.kind in {"queued", "blocked"}
+    assert first.report_hash != with_unscoped.report_hash
+    payload = first.to_dict()
+    assert payload["case_file_hash"]
+    assert payload["fixture_validation"]["case_file_hash"] == payload["case_file_hash"]
+    assert payload["allowed_resolve_sources"]
+    assert "espn" in payload["allowed_resolve_sources"]
+    assert "queued" not in payload
+    assert "precision" not in payload
+
+    engine = env["engine"]
+    SessionB = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    with Session() as session:
+        ordered_a = build_identity_audit(session, series="dwcs")
+    with SessionB() as session:
+        ordered_b = build_identity_audit(session, series="dwcs")
+    assert ordered_a.report_hash == ordered_b.report_hash
+
+
+def test_audit_hash_changes_with_resolver_version_and_allowed_sources(env, monkeypatch) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        fid = canonical_fighter_id("88301")
+        opp = canonical_fighter_id("88302")
+        session.add(CanonicalFighter(id=fid, display_name="Hash Policy"))
+        session.add(CanonicalFighter(id=opp, display_name="Hash Policy Opp"))
+        session.add(FighterSourceId(fighter_id=fid, source="espn", external_id="88301"))
+        session.add(FighterSourceId(fighter_id=opp, source="espn", external_id="88302"))
+        session.add(
+            CanonicalEvent(
+                id="hash-pol-evt",
+                name="Hash Policy Card",
+                series="dwcs",
+                status="completed",
+                event_date=date(2020, 1, 1),
+            )
+        )
+        session.flush()
+        session.add(
+            CanonicalBout(
+                id="hash-pol-bout",
+                event_id="hash-pol-evt",
+                fighter_a_id=fid,
+                fighter_b_id=opp,
+                status="completed",
+            )
+        )
+        session.flush()
+        session.add(BoutParticipant(bout_id="hash-pol-bout", fighter_id=fid, corner="a"))
+        session.add(BoutParticipant(bout_id="hash-pol-bout", fighter_id=opp, corner="b"))
+        session.commit()
+        baseline = build_identity_audit(session, series="dwcs")
+        monkeypatch.setattr("mma_model.identity.audit.RESOLVER_VERSION", "hash-test-version")
+        versioned = build_identity_audit(session, series="dwcs")
+        monkeypatch.setattr(
+            "mma_model.identity.audit.ALLOWED_RESOLVE_SOURCES",
+            frozenset({"espn", "tapology_public"}),
+        )
+        sourced = build_identity_audit(session, series="dwcs")
+    assert baseline.report_hash != versioned.report_hash
+    assert versioned.report_hash != sourced.report_hash
+    assert sourced.config_hash != baseline.config_hash

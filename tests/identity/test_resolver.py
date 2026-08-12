@@ -45,8 +45,6 @@ from mma_model.identity.review import (
     reverse_review_decision,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "identity" / "adjudicated_cases_v1.json"
 UTC = timezone.utc
 FIXED_NOW = datetime(2026, 8, 12, 17, 0, 0, tzinfo=UTC)
 
@@ -616,7 +614,7 @@ def test_unique_constraint_race_on_fighter_source_ids(env) -> None:
 def _load_adjudicated_fixture() -> dict:
     from mma_model.identity.adjudicated import load_adjudicated_cases
 
-    return load_adjudicated_cases(FIXTURE_PATH)
+    return load_adjudicated_cases()
 
 
 def test_adjudicated_fixture_precision_recall_and_zero_same_name_conflation(env) -> None:
@@ -713,43 +711,46 @@ def test_adjudicated_fixture_precision_recall_and_zero_same_name_conflation(env)
         session.commit()
 
         metrics = score_adjudicated_results(cases, results_by_id)
-        assert metrics["denominator_all"] == len(cases["cases"])
-        assert metrics["denominator_auto_eligible"] >= 40
-        assert metrics["auto_true_pos"] + metrics["auto_false_pos"] + metrics["auto_false_neg"] == (
-            metrics["denominator_auto_eligible"]
-        )
+        assert "exact_id_expansion" not in cases
+        assert all(not str(case["id"]).startswith("exact_id_expansion_") for case in cases["cases"])
+        assert cases.get("fixture_status") == "synthetic_explicit"
+        assert cases.get("statistical_confidence_claim") is False
+        assert metrics["n"] == metrics["denominator_all"] == len(cases["cases"])
+        assert metrics["n"] < 40
+        auto_n = sum(1 for case in cases["cases"] if case.get("auto_eligible") is True)
+        assert metrics["denominator_auto_eligible"] == auto_n
+        assert auto_n < 40
+        assert metrics["auto_true_pos"] + metrics["auto_false_pos"] + metrics["auto_false_neg"] == auto_n
         assert metrics["queued"] + metrics["blocked"] == metrics["queue_or_blocked"]
         assert metrics["queue_rate"] == metrics["queued"] / metrics["denominator_all"]
         assert metrics["blocked_rate"] == metrics["blocked"] / metrics["denominator_all"]
         assert metrics["same_name_conflations"] == 0
+        assert metrics["statistical_confidence_claim"] is False
+        assert metrics["fixture_status"] == "synthetic_explicit"
+        assert metrics["queued"] >= 1
+        assert metrics["blocked"] >= 1
         assert metrics["precision"] >= 0.995
         assert metrics["recall"] >= 0.98
-        assert metrics["queued"] >= 5
-        assert metrics["blocked"] >= 1
-        assert 0.05 <= metrics["queue_rate"] <= 0.6
-        assert metrics["coverage"] == 1.0
+        rule_ids = {getattr(results_by_id[c["id"]], "rule_id", None) for c in cases["cases"]}
+        assert "exact_source_external_id" in rule_ids
+        assert "exact_wikidata" in rule_ids
+        assert "exact_normalized_name_dob_unique" in rule_ids
+        assert "exact_normalized_name_opponent_event_date_unique" in rule_ids
 
         report = build_identity_audit(session, series="dwcs")
         payload = report.to_dict()
-        for key in (
-            "denominator_all",
-            "denominator_auto_eligible",
-            "auto_true_pos",
-            "auto_false_pos",
-            "auto_false_neg",
-            "precision",
-            "recall",
-            "queued",
-            "queue_rate",
-            "blocked",
-            "blocked_rate",
-            "coverage",
-            "same_name_conflations",
-        ):
-            assert key in payload
-        assert payload["queued"] == metrics["queued"]
-        assert payload["blocked"] == metrics["blocked"]
-        assert payload["precision"] == metrics["precision"]
+        assert "fixture_validation" in payload
+        fixture_metrics = payload["fixture_validation"]
+        assert fixture_metrics["n"] == metrics["n"]
+        assert fixture_metrics["case_count"] == metrics["n"]
+        assert fixture_metrics["precision"] == metrics["precision"]
+        assert fixture_metrics["queued"] == metrics["queued"]
+        assert fixture_metrics["statistical_confidence_claim"] is False
+        assert fixture_metrics["fixture_status"] == "synthetic_explicit"
+        assert "unscoped_pending" in payload
+        assert "queued" not in payload
+        assert "precision" not in payload
+        assert payload["canonical_fighter_count"] != metrics["n"]
 
         for review_case in cases.get("review_cases", []):
             pending = [

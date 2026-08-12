@@ -1,9 +1,11 @@
-"""Frozen adjudicated identity fixture loading and honest scoring (DWCS-104)."""
+"""Frozen adjudicated identity case loading and honest scoring (DWCS-104)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, datetime, timezone
+from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,6 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, create_all_for_tests
 from mma_model.db.tables.core import (
     BoutParticipant,
@@ -30,13 +33,7 @@ from mma_model.identity.constants import (
 from mma_model.identity.models import ResolveResult
 from mma_model.identity.resolver import resolve_fighter
 
-DEFAULT_FIXTURE_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "tests"
-    / "fixtures"
-    / "identity"
-    / "adjudicated_cases_v1.json"
-)
+CASES_FILENAME = "adjudicated_cases_v1.json"
 _EVAL_NOW = datetime(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc)
 
 AUTO_LINK_RULES = frozenset(
@@ -49,45 +46,101 @@ AUTO_LINK_RULES = frozenset(
 )
 
 
-def adjudicated_fixture_path() -> Path:
-    candidates = (
-        DEFAULT_FIXTURE_PATH,
-        Path.cwd() / "tests" / "fixtures" / "identity" / "adjudicated_cases_v1.json",
-    )
-    for path in candidates:
-        if path.is_file():
-            return path
-    raise FileNotFoundError("adjudicated identity fixture not found")
+class AdjudicatedCasesError(ValueError):
+    """Fail-closed loader error for the adjudicated identity case file."""
+
+
+def package_adjudicated_cases_path() -> Path:
+    root = resources.files("mma_model.identity.data")
+    resource = root.joinpath(CASES_FILENAME)
+    if not resource.is_file():
+        raise AdjudicatedCasesError("packaged adjudicated identity cases not found")
+    with resources.as_file(resource) as path:
+        resolved = Path(path)
+        if not resolved.is_file():
+            raise AdjudicatedCasesError("packaged adjudicated identity cases not found")
+        return resolved
+
+
+def visible_adjudicated_cases_path(*, root: Path | None = None) -> Path:
+    base = root if root is not None else get_settings().project_root
+    return base / "config" / "identity" / CASES_FILENAME
+
+
+def _package_cases_bytes() -> bytes | None:
+    try:
+        root = resources.files("mma_model.identity.data")
+        resource = root.joinpath(CASES_FILENAME)
+    except (ModuleNotFoundError, FileNotFoundError, AttributeError, OSError):
+        return None
+    if not resource.is_file():
+        return None
+    return resource.read_bytes()
+
+
+def adjudicated_cases_path(*, root: Path | None = None) -> Path:
+    """Canonical checkout config, else the byte-identical packaged copy."""
+    visible = visible_adjudicated_cases_path(root=root)
+    if visible.is_file():
+        return visible
+    return package_adjudicated_cases_path()
+
+
+def case_file_hash(path: Path | None = None) -> str:
+    if path is not None:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    visible = visible_adjudicated_cases_path()
+    packaged = _package_cases_bytes()
+    if visible.is_file():
+        return hashlib.sha256(visible.read_bytes()).hexdigest()
+    if packaged is not None:
+        return hashlib.sha256(packaged).hexdigest()
+    raise AdjudicatedCasesError("adjudicated identity cases not found")
+
+
+def _parse_adjudicated_cases(raw_bytes: bytes) -> dict[str, Any]:
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+        raw = json.loads(raw_text)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AdjudicatedCasesError(f"invalid adjudicated identity cases: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise AdjudicatedCasesError("adjudicated identity cases root must be an object")
+    if raw.get("exact_id_expansion"):
+        raise AdjudicatedCasesError("generated exact_id_expansion is not allowed")
+    if not raw.get("version"):
+        raise AdjudicatedCasesError("adjudicated identity cases version is required")
+    if not isinstance(raw.get("cases"), list) or not raw["cases"]:
+        raise AdjudicatedCasesError("adjudicated identity cases list is required")
+    if raw.get("statistical_confidence_claim") is True:
+        raise AdjudicatedCasesError("statistical confidence claims are not allowed")
+    raw["case_file_hash"] = hashlib.sha256(raw_bytes).hexdigest()
+    return raw
 
 
 def load_adjudicated_cases(path: Path | None = None) -> dict[str, Any]:
-    """Load the frozen fixture and expand exact-ID cases for threshold coverage."""
-    fixture_path = path or adjudicated_fixture_path()
-    raw = json.loads(fixture_path.read_text(encoding="utf-8"))
-    seeds = list(raw.get("seeds") or [])
-    cases = list(raw.get("cases") or [])
-    expansion = raw.get("exact_id_expansion") or {}
-    start = int(expansion.get("espn_id_start") or 0)
-    count = int(expansion.get("count") or 0)
-    prefix = str(expansion.get("name_prefix") or "Exact Link")
-    for offset in range(count):
-        espn_id = str(start + offset)
-        display_name = f"{prefix} {espn_id}"
-        seeds.append({"espn_id": espn_id, "display_name": display_name})
-        cases.append(
-            {
-                "id": f"exact_id_expansion_{espn_id}",
-                "source": "espn",
-                "external_id": espn_id,
-                "display_name": display_name.upper(),
-                "auto_eligible": True,
-                "expected": {"kind": "linked", "canonical_espn_id": espn_id},
-            }
-        )
-    expanded = dict(raw)
-    expanded["seeds"] = seeds
-    expanded["cases"] = cases
-    return expanded
+    """Load the versioned explicit case file. No generated expansion."""
+    if path is not None:
+        try:
+            return _parse_adjudicated_cases(path.read_bytes())
+        except FileNotFoundError as exc:
+            raise AdjudicatedCasesError("adjudicated identity cases not found") from exc
+        except OSError as exc:
+            raise AdjudicatedCasesError(f"invalid adjudicated identity cases: {exc}") from exc
+    visible = visible_adjudicated_cases_path()
+    packaged_bytes = _package_cases_bytes()
+    if visible.is_file() and packaged_bytes is not None:
+        visible_bytes = visible.read_bytes()
+        if visible_bytes != packaged_bytes:
+            raise AdjudicatedCasesError(
+                "config and package adjudicated cases are not byte-identical"
+            )
+        return _parse_adjudicated_cases(visible_bytes)
+    if visible.is_file():
+        return _parse_adjudicated_cases(visible.read_bytes())
+    if packaged_bytes is not None:
+        return _parse_adjudicated_cases(packaged_bytes)
+    raise AdjudicatedCasesError("adjudicated identity cases not found")
 
 
 def is_auto_link_eligible(case: Mapping[str, Any]) -> bool:
@@ -212,9 +265,13 @@ def resolve_adjudicated_cases(
 def score_adjudicated_results(
     fixture: Mapping[str, Any],
     results_by_id: Mapping[str, ResolveResult | Any],
+    *,
+    series: str | None = None,
 ) -> dict[str, Any]:
     """Score auto-link eligibility honestly; queued/blocked never count as TPs."""
     cases = list(fixture.get("cases") or [])
+    if series is not None:
+        cases = [case for case in cases if case.get("series", "dwcs") == series]
     denominator_all = len(cases)
     auto_true_pos = 0
     auto_false_pos = 0
@@ -279,6 +336,7 @@ def score_adjudicated_results(
     blocked_rate = blocked / denominator_all if denominator_all else 0.0
     coverage = matched_expected / denominator_all if denominator_all else 0.0
     return {
+        "n": denominator_all,
         "denominator_all": denominator_all,
         "denominator_auto_eligible": auto_eligible_count,
         "auto_true_pos": auto_true_pos,
@@ -293,10 +351,17 @@ def score_adjudicated_results(
         "queue_or_blocked": queue_or_blocked,
         "coverage": coverage,
         "same_name_conflations": same_name_conflations,
+        "fixture_status": fixture.get("fixture_status", "synthetic_explicit"),
+        "statistical_confidence_claim": False,
+        "version": str(fixture.get("version") or ""),
+        "case_file_hash": str(fixture.get("case_file_hash") or ""),
+        "label": "global_synthetic_validation",
     }
 
 
-def evaluate_frozen_adjudicated_fixture(path: Path | None = None) -> dict[str, Any]:
+def evaluate_frozen_adjudicated_fixture(
+    path: Path | None = None, *, series: str | None = None
+) -> dict[str, Any]:
     """Run the frozen fixture against the current resolver in an isolated temp DB."""
     fixture = load_adjudicated_cases(path)
     engine = create_engine(
@@ -314,6 +379,6 @@ def evaluate_frozen_adjudicated_fixture(path: Path | None = None) -> dict[str, A
             session.commit()
             results = resolve_adjudicated_cases(session, fixture)
             session.commit()
-            return score_adjudicated_results(fixture, results)
+            return score_adjudicated_results(fixture, results, series=series)
     finally:
         engine.dispose()
