@@ -5,25 +5,46 @@
 # Bookmaker lines remain optional enrichment. This file encodes how bets settle
 # once an event-night result exists; it does not require a live sportsbook feed.
 #
-# Default applicable rule set is mma_generic. Sportsbook overrides are versioned
-# separately and activate only when explicitly selected with an approved source.
+# Content identity: SHA-256 of canonical JSON over this document is pinned in
+# mma_model.markets.rules.PINNED_SETTLEMENT_HASH. Any byte/semantic change must
+# bump contract_version + rule-set version and update the pinned digest together.
+#
+# Default rule set status is internal_contract (repo-governed grading rules),
+# NOT an approved external sportsbook house-rules source.
 
 schema_version: 1
 contract_id: dwcs_settlement
-contract_version: "1.0.0"
+contract_version: "1.1.0"
 default_rule_set_id: mma_generic
 
 rule_sets:
   mma_generic:
-    version: "1.0.0"
-    status: approved
+    version: "1.1.0"
+    status: internal_contract
     source:
-      id: generic_mma_industry_conventions
+      id: dwcs_internal_settlement_contract_v1
       citation: >
-        Generic MMA settlement conventions for DWCS v1 (moneyline draw=push,
-        NC/cancel=void, technical decision settles as decision, half-round
-        totals use ending-round boundary with no push). Not a claim of any
-        specific sportsbook's published house rules.
+        Internally governed DWCS settlement contract for deterministic grading
+        across moneyline, totals, distance, method, and exact-round markets.
+        These rules are repository policy for consistent evaluation — they are
+        not an approved external sportsbook house-rules source and must not be
+        described as universal sportsbook rules. Sportsbook-agnostic fair /
+        actionable / strong-value price guidance remains the required product
+        fallback and does not depend on this rule set.
+      references:
+        - id: dwcs_evaluation_terminal_atoms
+          locator: packaged:mma_model/evaluation/dwcs_v1.json
+          role: terminal label taxonomy (KO/TKO, submission, decision, other
+            stoppage, draw; NC/void settlement-only)
+          accessed: "2026-08-12"
+        - id: dwcs_data_contracts
+          locator: docs/data-contracts.md
+          role: repository governing product and settlement documentation
+          accessed: "2026-08-12"
+        - id: dwcs_adr_0001_boundaries
+          locator: docs/adr/0001-dwcs-system-boundaries.md
+          role: system boundary that bookmaker odds are optional enrichment
+          accessed: "2026-08-12"
     moneyline:
       draw: push
       no_contest: void
@@ -36,12 +57,15 @@ rule_sets:
       no_contest: void
       cancellation: void
     totals:
+      # v1 offers half-round lines only. Boundary uses fight duration in rounds
+      # (ending_round + elapsed_seconds_in_round, or total_elapsed_seconds).
+      # Over wins when elapsed_rounds > line; under when elapsed_rounds < line;
+      # exact equality (e.g. 2:30 of round 2 for 1.5) is push.
       half_round_lines: [1.5, 2.5]
-      half_round_boundary: ending_round
-      # over X.5 wins when ending_round >= ceil(X.5); under otherwise; no push
-      half_round_push: false
-      whole_round_push: true
-      decision_uses_scheduled_rounds_as_ending_round: true
+      half_round_boundary: elapsed_rounds
+      round_seconds: 300
+      exact_half_result: push
+      decision_uses_full_scheduled_duration: true
       no_contest: void
       cancellation: void
     method:
@@ -63,7 +87,7 @@ rule_sets:
       cancellation: void
 
   bet365_mma:
-    version: "1.0.0"
+    version: "1.1.0"
     status: provisional_pending_approved_source
     extends: mma_generic
     source:
@@ -71,6 +95,8 @@ rule_sets:
       citation: >
         Placeholder sportsbook override lane for Bet365 MMA. Exact Bet365 DWCS
         house rules are not activated until an approved public/licensed rule
-        source is attached. Selecting this rule set without allow_provisional
-        hard-fails. Differences versus mma_generic remain empty until approved.
+        source with durable identifiers is attached. Selecting this rule set
+        without allow_provisional hard-fails. Differences versus mma_generic
+        remain empty until approved.
+      references: []
     overrides: {}

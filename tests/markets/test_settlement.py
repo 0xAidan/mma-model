@@ -6,6 +6,7 @@ import pytest
 
 from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.markets.rules import (
+    PINNED_SETTLEMENT_HASH,
     ProvisionalRuleSetError,
     get_rule_set,
     load_settlement_rules,
@@ -13,6 +14,7 @@ from mma_model.markets.rules import (
 from mma_model.markets.settlement import (
     BoutSettlementFacts,
     MarketSelection,
+    SettlementFactsError,
     SettlementResult,
     settle,
 )
@@ -22,14 +24,26 @@ def _ml(outcome: OutcomeKey) -> MarketSelection:
     return MarketSelection(family=MarketFamily.MONEYLINE, outcome=outcome)
 
 
-def test_moneyline_win_loss_draw_nc_cancel() -> None:
-    facts_a = BoutSettlementFacts(
-        scheduled_rounds=3,
+def _finish(
+    *,
+    ending_round: int,
+    elapsed_seconds_in_round: int,
+    winner_side: str = "a",
+    method: str = "ko_tko",
+    scheduled_rounds: int = 3,
+) -> BoutSettlementFacts:
+    return BoutSettlementFacts(
+        scheduled_rounds=scheduled_rounds,
         result_class="decisive",
-        winner_side="a",
-        method="ko_tko",
-        ending_round=1,
+        winner_side=winner_side,  # type: ignore[arg-type]
+        method=method,  # type: ignore[arg-type]
+        ending_round=ending_round,
+        elapsed_seconds_in_round=elapsed_seconds_in_round,
     )
+
+
+def test_moneyline_win_loss_draw_nc_cancel() -> None:
+    facts_a = _finish(ending_round=1, elapsed_seconds_in_round=45)
     assert settle(_ml(OutcomeKey.FIGHTER_A), facts_a).result is SettlementResult.WIN
     assert settle(_ml(OutcomeKey.FIGHTER_B), facts_a).result is SettlementResult.LOSS
 
@@ -50,19 +64,14 @@ def test_moneyline_technical_decision_settles_on_winner() -> None:
         winner_side="b",
         method="technical_decision",
         ending_round=2,
+        elapsed_seconds_in_round=100,
     )
     assert settle(_ml(OutcomeKey.FIGHTER_B), facts).result is SettlementResult.WIN
     assert settle(_ml(OutcomeKey.FIGHTER_A), facts).result is SettlementResult.LOSS
 
 
 def test_goes_distance_and_inside_distance() -> None:
-    finish = BoutSettlementFacts(
-        scheduled_rounds=3,
-        result_class="decisive",
-        winner_side="a",
-        method="submission",
-        ending_round=2,
-    )
+    finish = _finish(ending_round=2, elapsed_seconds_in_round=60, method="submission")
     decision = BoutSettlementFacts(
         scheduled_rounds=3,
         result_class="decisive",
@@ -91,37 +100,92 @@ def test_goes_distance_and_inside_distance() -> None:
         winner_side="a",
         method="technical_decision",
         ending_round=2,
+        elapsed_seconds_in_round=90,
     )
     assert settle(goes, tech).result is SettlementResult.WIN
 
 
-def test_totals_half_round_boundary_no_push() -> None:
-    r1 = BoutSettlementFacts(
-        scheduled_rounds=3,
-        result_class="decisive",
-        winner_side="a",
-        method="ko_tko",
-        ending_round=1,
+@pytest.mark.parametrize(
+    ("ending_round", "elapsed", "over_15", "under_15"),
+    [
+        (2, 149, SettlementResult.LOSS, SettlementResult.WIN),  # 2:29 — under
+        (2, 150, SettlementResult.PUSH, SettlementResult.PUSH),  # 2:30 — exact 1.5
+        (2, 151, SettlementResult.WIN, SettlementResult.LOSS),  # 2:31 — over
+    ],
+)
+def test_totals_1_5_boundary_before_at_after(
+    ending_round: int,
+    elapsed: int,
+    over_15: SettlementResult,
+    under_15: SettlementResult,
+) -> None:
+    facts = _finish(ending_round=ending_round, elapsed_seconds_in_round=elapsed)
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
     )
-    r2 = BoutSettlementFacts(
-        scheduled_rounds=3,
-        result_class="decisive",
-        winner_side="a",
-        method="ko_tko",
-        ending_round=2,
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
     )
+    assert settle(over, facts).result is over_15
+    assert settle(under, facts).result is under_15
+
+
+@pytest.mark.parametrize(
+    ("ending_round", "elapsed", "over_25", "under_25"),
+    [
+        (3, 149, SettlementResult.LOSS, SettlementResult.WIN),  # 2:29 of R3 — under 2.5
+        (3, 150, SettlementResult.PUSH, SettlementResult.PUSH),  # 2:30 of R3 — exact 2.5
+        (3, 151, SettlementResult.WIN, SettlementResult.LOSS),  # 2:31 of R3 — over 2.5
+    ],
+)
+def test_totals_2_5_boundary_before_at_after(
+    ending_round: int,
+    elapsed: int,
+    over_25: SettlementResult,
+    under_25: SettlementResult,
+) -> None:
+    facts = _finish(ending_round=ending_round, elapsed_seconds_in_round=elapsed)
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=2.5
+    )
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=2.5
+    )
+    assert settle(over, facts).result is over_25
+    assert settle(under, facts).result is under_25
+
+
+def test_totals_round1_stoppage_is_under_1_5() -> None:
+    facts = _finish(ending_round=1, elapsed_seconds_in_round=1)
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
+    )
+    assert settle(over, facts).result is SettlementResult.LOSS
+    assert settle(under, facts).result is SettlementResult.WIN
+
+
+def test_totals_early_round2_stoppage_is_under_1_5() -> None:
+    """Stoppage at 0:01 of round 2 is NOT over 1.5."""
+    facts = _finish(ending_round=2, elapsed_seconds_in_round=1)
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    under = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
+    )
+    assert settle(over, facts).result is SettlementResult.LOSS
+    assert settle(under, facts).result is SettlementResult.WIN
+
+
+def test_totals_decision_settles_as_full_distance() -> None:
     decision = BoutSettlementFacts(
         scheduled_rounds=3,
         result_class="decisive",
         winner_side="b",
         method="decision",
-        ending_round=3,
-    )
-    over_15 = MarketSelection(
-        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
-    )
-    under_15 = MarketSelection(
-        family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=1.5
     )
     over_25 = MarketSelection(
         family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=2.5
@@ -129,42 +193,38 @@ def test_totals_half_round_boundary_no_push() -> None:
     under_25 = MarketSelection(
         family=MarketFamily.TOTALS, outcome=OutcomeKey.UNDER, line_point=2.5
     )
-
-    assert settle(over_15, r1).result is SettlementResult.LOSS
-    assert settle(under_15, r1).result is SettlementResult.WIN
-    assert settle(over_15, r2).result is SettlementResult.WIN
-    assert settle(under_15, r2).result is SettlementResult.LOSS
-    assert settle(over_25, r2).result is SettlementResult.LOSS
-    assert settle(under_25, r2).result is SettlementResult.WIN
     assert settle(over_25, decision).result is SettlementResult.WIN
     assert settle(under_25, decision).result is SettlementResult.LOSS
 
 
-def test_totals_whole_line_push() -> None:
-    # Whole-number line support for push semantics (not in default offered set).
+def test_totals_missing_duration_unresolved() -> None:
     facts = BoutSettlementFacts(
         scheduled_rounds=3,
         result_class="decisive",
         winner_side="a",
         method="ko_tko",
         ending_round=2,
+        # missing elapsed_seconds_in_round and total_elapsed_seconds
     )
+    over = MarketSelection(
+        family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+    )
+    decision = settle(over, facts)
+    assert decision.result is SettlementResult.UNRESOLVED
+    assert "duration" in decision.reason
+
+
+def test_totals_rejects_non_canonical_whole_number_line() -> None:
+    facts = _finish(ending_round=2, elapsed_seconds_in_round=60)
     over_2 = MarketSelection(
         family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=2.0
     )
-    # 2.0 is not in the canonical offered line set → selection validation fails.
     with pytest.raises(ValueError, match="invalid line_point"):
         settle(over_2, facts)
 
 
 def test_method_and_fighter_by_method() -> None:
-    facts = BoutSettlementFacts(
-        scheduled_rounds=3,
-        result_class="decisive",
-        winner_side="a",
-        method="submission",
-        ending_round=1,
-    )
+    facts = _finish(ending_round=1, elapsed_seconds_in_round=30, method="submission")
     sub = MarketSelection(family=MarketFamily.METHOD, outcome=OutcomeKey.SUBMISSION)
     ko = MarketSelection(family=MarketFamily.METHOD, outcome=OutcomeKey.KO_TKO)
     assert settle(sub, facts).result is SettlementResult.WIN
@@ -201,13 +261,7 @@ def test_method_and_fighter_by_method() -> None:
 
 
 def test_exact_round_finish_decision_nc() -> None:
-    r2 = BoutSettlementFacts(
-        scheduled_rounds=3,
-        result_class="decisive",
-        winner_side="a",
-        method="ko_tko",
-        ending_round=2,
-    )
+    r2 = _finish(ending_round=2, elapsed_seconds_in_round=40)
     round_2 = MarketSelection(
         family=MarketFamily.EXACT_ROUND, outcome=OutcomeKey.ROUND_2
     )
@@ -230,6 +284,43 @@ def test_exact_round_finish_decision_nc() -> None:
     assert settle(round_2, nc).result is SettlementResult.VOID
 
 
+def test_exact_round_rejects_round_beyond_schedule() -> None:
+    three = _finish(ending_round=2, elapsed_seconds_in_round=10, scheduled_rounds=3)
+    with pytest.raises(ValueError, match="scheduled_rounds=3"):
+        settle(
+            MarketSelection(family=MarketFamily.EXACT_ROUND, outcome=OutcomeKey.ROUND_5),
+            three,
+        )
+
+    five = _finish(
+        ending_round=5,
+        elapsed_seconds_in_round=20,
+        scheduled_rounds=5,
+    )
+    assert (
+        settle(
+            MarketSelection(family=MarketFamily.EXACT_ROUND, outcome=OutcomeKey.ROUND_5),
+            five,
+        ).result
+        is SettlementResult.WIN
+    )
+
+
+def test_ending_round_beyond_schedule_is_invalid_fact() -> None:
+    with pytest.raises(SettlementFactsError, match="ending_round"):
+        settle(
+            _ml(OutcomeKey.FIGHTER_A),
+            BoutSettlementFacts(
+                scheduled_rounds=3,
+                result_class="decisive",
+                winner_side="a",
+                method="ko_tko",
+                ending_round=4,
+                elapsed_seconds_in_round=10,
+            ),
+        )
+
+
 def test_pending_and_missing_facts_unresolved() -> None:
     pending = BoutSettlementFacts(scheduled_rounds=3, pending=True)
     assert (
@@ -243,7 +334,55 @@ def test_pending_and_missing_facts_unresolved() -> None:
     )
 
 
-def test_settlement_is_versioned_and_deterministic() -> None:
+def test_invalid_fact_combinations_raise() -> None:
+    with pytest.raises(SettlementFactsError, match="unsupported scheduled_rounds"):
+        settle(_ml(OutcomeKey.FIGHTER_A), BoutSettlementFacts(scheduled_rounds=4))
+
+    with pytest.raises(SettlementFactsError, match="elapsed_seconds_in_round"):
+        settle(
+            _ml(OutcomeKey.FIGHTER_A),
+            _finish(ending_round=1, elapsed_seconds_in_round=301),
+        )
+
+    with pytest.raises(SettlementFactsError, match="cancelled bout cannot"):
+        settle(
+            _ml(OutcomeKey.FIGHTER_A),
+            BoutSettlementFacts(
+                scheduled_rounds=3,
+                cancelled=True,
+                result_class="decisive",
+                winner_side="a",
+            ),
+        )
+
+    with pytest.raises(SettlementFactsError, match="draw cannot have winner_side"):
+        settle(
+            _ml(OutcomeKey.FIGHTER_A),
+            BoutSettlementFacts(
+                scheduled_rounds=3,
+                result_class="draw",
+                winner_side="a",
+            ),
+        )
+
+    with pytest.raises(SettlementFactsError, match="disagrees"):
+        settle(
+            MarketSelection(
+                family=MarketFamily.TOTALS, outcome=OutcomeKey.OVER, line_point=1.5
+            ),
+            BoutSettlementFacts(
+                scheduled_rounds=3,
+                result_class="decisive",
+                winner_side="a",
+                method="ko_tko",
+                ending_round=2,
+                elapsed_seconds_in_round=150,
+                total_elapsed_seconds=400,
+            ),
+        )
+
+
+def test_settlement_is_versioned_hashed_and_deterministic() -> None:
     facts = BoutSettlementFacts(
         scheduled_rounds=3,
         result_class="decisive",
@@ -255,7 +394,8 @@ def test_settlement_is_versioned_and_deterministic() -> None:
     second = settle(_ml(OutcomeKey.FIGHTER_A), facts)
     assert first == second
     assert first.rule_set_id == "mma_generic"
-    assert first.rule_set_version == "1.0.0"
+    assert first.rule_set_version == "1.1.0"
+    assert first.content_hash == PINNED_SETTLEMENT_HASH
     assert first.reason
 
 
@@ -273,7 +413,6 @@ def test_provisional_bet365_requires_allow_flag() -> None:
     provisional = get_rule_set("bet365_mma", allow_provisional=True)
     assert provisional.rule_set_id == "bet365_mma"
     assert provisional.status.value == "provisional_pending_approved_source"
-    # Extends generic: draw still push
     facts = BoutSettlementFacts(scheduled_rounds=3, result_class="draw", ending_round=3)
     decision = settle(
         _ml(OutcomeKey.FIGHTER_A),
@@ -285,9 +424,13 @@ def test_provisional_bet365_requires_allow_flag() -> None:
     assert decision.rule_set_id == "bet365_mma"
 
 
-def test_default_rules_load_from_packaged_contract() -> None:
+def test_default_rules_are_internal_contract_not_approved_sportsbook() -> None:
     contract = load_settlement_rules()
     assert contract.contract_id == "dwcs_settlement"
+    assert contract.contract_version == "1.1.0"
     assert contract.default_rule_set_id == "mma_generic"
-    assert "mma_generic" in contract.rule_sets
+    generic = contract.rule_sets["mma_generic"]
+    assert generic.status.value == "internal_contract"
+    assert "not an approved external sportsbook" in generic.source.citation.lower()
+    assert generic.source.references
     assert "bet365_mma" in contract.rule_sets

@@ -102,17 +102,19 @@ immutable `SourcePolicy` and fail-closes on nested ID/tier/clock drift.
 | **Authoritative rules bytes** | Packaged `mma_model/markets/settlement_v1.yaml` |
 | **Plan-visible path** | `config/markets/settlement_v1.yaml` (symlink to packaged file) |
 | **Loader** | `mma_model.markets.rules.load_settlement_rules` / `get_rule_set` |
-| **Contract id / version** | `dwcs_settlement` / `1.0.0` |
-| **Default rule set** | `mma_generic` `1.0.0` (approved) |
+| **Contract id / version** | `dwcs_settlement` / `1.1.0` |
+| **Pinned digest** | `PINNED_SETTLEMENT_HASH` in `rules.py` (SHA-256 of canonical JSON) |
+| **Default rule set** | `mma_generic` `1.1.0` (`internal_contract`) |
 
 ### v1 market families and outcomes
 
 - **moneyline:** `fighter_a`, `fighter_b`
-- **totals:** outcomes `over` / `under`; canonical lines `1.5`, `2.5`
+- **totals:** outcomes `over` / `under`; canonical lines `1.5`, `2.5` only
 - **goes_distance:** `goes_distance`, `inside_distance`
 - **method:** `ko_tko`, `submission`, `decision`, `other_stoppage`
 - **fighter_by_method:** `a_*` / `b_*` method atoms
-- **exact_round:** `round_1`…`round_5` (DWCS cards typically use the 3-round subset)
+- **exact_round:** schedule-specific — 3-round bouts use `round_1`…`round_3`;
+  5-round bouts use `round_1`…`round_5`. Out-of-schedule selections are rejected.
 
 Market-family maturity is `qualified` / `experimental` / `blocked`. Failed or
 non-qualified families may not emit `confirmed_value` or `price_target`.
@@ -128,16 +130,41 @@ Computed from calibrated `p50` / `p25` with no bookmaker dependency:
   confidence), `price_target` (no offer; thresholds still published), `no_bet`
 
 Exact bookmaker lines remain optional enrichment (later tickets). Missing Bet365
-does not block these thresholds.
+does not block these thresholds. Price guidance does **not** depend on settlement
+rule-set approval status.
 
 ### Settlement
 
 Pure functions return `win` / `loss` / `push` / `void` / `unresolved` plus reason,
-versioned by rule set id. Generic MMA conventions cover draw/NC/cancellation,
-technical decision → decision, and half-round totals via ending-round boundary
-with no push. The `bet365_mma` override lane is
-`provisional_pending_approved_source` and hard-fails unless
-`allow_provisional=True` after an approved rule citation exists.
+rule-set id/version, and the contract `content_hash`.
+
+**Totals boundary (v1):** half-round lines use fight duration in rounds
+(`elapsed_rounds = total_elapsed_seconds / 300`). Over wins when
+`elapsed_rounds > line`; under when `elapsed_rounds < line`; exact equality
+(e.g. 2:30 of round 2 for 1.5) is `push`. Duration comes from
+`ending_round` + `elapsed_seconds_in_round`, or `total_elapsed_seconds`, or
+full scheduled duration for decisions/draws. Missing clocks → `unresolved`
+(never invent a grade). Whole-number totals lines are not offered in v1.
+
+**Governance:** `mma_generic` is `internal_contract` — repository-governed grading
+policy with durable internal references (evaluation terminal atoms, data-contracts,
+ADR 0001). It is **not** an approved external sportsbook house-rules source and
+must not be described as universal sportsbook rules. The `bet365_mma` override
+lane is `provisional_pending_approved_source` and hard-fails unless
+`allow_provisional=True` after an approved citation exists.
+
+**Pinned digest bump procedure:** edit packaged `settlement_v1.yaml` → bump
+`contract_version` and affected rule-set `version` → recompute
+`compute_settlement_hash(payload)` → update `PINNED_SETTLEMENT_HASH` and
+`EXPECTED_CONTRACT_VERSION` in `rules.py` in the same change. Default loads
+always verify the pin (fail-closed on silent drift).
+
+**Immutability:** loaded `rule_sets` is a `MappingProxyType`; nested rule models
+are frozen Pydantic models.
+
+**Fact validation:** structurally impossible facts raise `SettlementFactsError`
+(unsupported schedule, out-of-range clocks, contradictory cancel/draw/NC/winner
+combinations). Genuinely incomplete/pending facts settle as `unresolved`.
 
 Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 
