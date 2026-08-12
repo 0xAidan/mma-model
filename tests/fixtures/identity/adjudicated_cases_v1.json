@@ -1,0 +1,259 @@
+{
+  "seeds": [
+    {
+      "espn_id": "10001",
+      "display_name": "John Smith",
+      "dob": "1990-01-01",
+      "same_name_group": "john_smith"
+    },
+    {
+      "espn_id": "10002",
+      "display_name": "John Smith",
+      "dob": "1992-06-15",
+      "same_name_group": "john_smith"
+    },
+    {
+      "espn_id": "10003",
+      "display_name": "José Silva",
+      "dob": "1988-03-03",
+      "wikidata_id": "Q10003"
+    },
+    {
+      "espn_id": "10004",
+      "display_name": "Alex Bones Carter",
+      "dob": "1991-04-04"
+    },
+    {
+      "espn_id": "10005",
+      "display_name": "Maria Lopez",
+      "dob": "1993-05-05"
+    },
+    {
+      "espn_id": "10006",
+      "display_name": "Shared Opp",
+      "dob": "1985-01-01"
+    },
+    {
+      "espn_id": "10007",
+      "display_name": "Wiki Exact",
+      "wikidata_id": "Q70001"
+    },
+    {
+      "espn_id": "10008",
+      "display_name": "Wiki Conflict A",
+      "dob": "1980-01-01",
+      "wikidata_id": "Q80001"
+    },
+    {
+      "espn_id": "10009",
+      "display_name": "Wiki Conflict B",
+      "dob": "1981-02-02"
+    },
+    {
+      "espn_id": "10010",
+      "display_name": "Dup External",
+      "extra_source_ids": [
+        {"source": "tapology_public", "external_id": "dup-ext-1"}
+      ]
+    },
+    {
+      "espn_id": "10011",
+      "display_name": "Context Only",
+      "dob": "1987-07-07"
+    }
+  ],
+  "events": [
+    {
+      "id": "evt-a",
+      "name": "DWCS Context A",
+      "series": "dwcs",
+      "status": "completed",
+      "event_date": "2019-01-10"
+    },
+    {
+      "id": "evt-b",
+      "name": "DWCS Context B",
+      "series": "dwcs",
+      "status": "completed",
+      "event_date": "2020-02-20"
+    },
+    {
+      "id": "evt-up",
+      "name": "DWCS Upcoming",
+      "series": "dwcs",
+      "status": "scheduled",
+      "event_date": "2026-10-01"
+    }
+  ],
+  "bouts": [
+    {
+      "id": "bout-a",
+      "event_id": "evt-a",
+      "fighter_a_espn": "10011",
+      "fighter_b_espn": "10006",
+      "status": "completed"
+    },
+    {
+      "id": "bout-b",
+      "event_id": "evt-b",
+      "fighter_a_espn": "10005",
+      "fighter_b_espn": "10006",
+      "status": "completed"
+    },
+    {
+      "id": "bout-up",
+      "event_id": "evt-up",
+      "fighter_a_espn": "10001",
+      "fighter_b_espn": "10006",
+      "status": "scheduled"
+    }
+  ],
+  "cases": [
+    {
+      "id": "same_name_a_dob",
+      "source": "tapology_public",
+      "external_id": "tp-js-a",
+      "display_name": "John Smith",
+      "dob": "1990-01-01",
+      "same_name_group": "john_smith",
+      "expected": {"kind": "linked", "canonical_espn_id": "10001"}
+    },
+    {
+      "id": "same_name_b_dob",
+      "source": "tapology_public",
+      "external_id": "tp-js-b",
+      "display_name": "John Smith",
+      "dob": "1992-06-15",
+      "same_name_group": "john_smith",
+      "expected": {"kind": "linked", "canonical_espn_id": "10002"}
+    },
+    {
+      "id": "same_name_alone_queues",
+      "source": "sherdog_public",
+      "external_id": "sd-js-alone",
+      "display_name": "John Smith",
+      "same_name_group": "john_smith",
+      "expected": {"kind": "queued"}
+    },
+    {
+      "id": "unicode_diacritics_exact_name_dob",
+      "source": "tapology_public",
+      "external_id": "tp-jose",
+      "display_name": "José Silva",
+      "dob": "1988-03-03",
+      "expected": {"kind": "linked", "canonical_espn_id": "10003"}
+    },
+    {
+      "id": "transliteration_candidate_only",
+      "source": "sherdog_public",
+      "external_id": "sd-jose-ascii",
+      "display_name": "Jose Silva",
+      "candidate_hints": ["transliterated"],
+      "expected": {"kind": "queued"}
+    },
+    {
+      "id": "nickname_candidate_only",
+      "source": "tapology_public",
+      "external_id": "tp-bones",
+      "display_name": "Bones",
+      "candidate_hints": ["nickname"],
+      "expected": {"kind": "created"}
+    },
+    {
+      "id": "reordered_name_candidate_only",
+      "source": "sherdog_public",
+      "external_id": "sd-reord",
+      "display_name": "Lopez Maria",
+      "candidate_hints": ["reordered"],
+      "expected": {"kind": "queued"}
+    },
+    {
+      "id": "dob_conflict_queues",
+      "source": "tapology_public",
+      "external_id": "tp-dob-conflict",
+      "display_name": "Maria Lopez",
+      "dob": "1999-09-09",
+      "expected": {"kind": "queued"}
+    },
+    {
+      "id": "dob_missing_same_name_queues",
+      "source": "sherdog_public",
+      "external_id": "sd-dob-missing",
+      "display_name": "Maria Lopez",
+      "expected": {"kind": "queued"}
+    },
+    {
+      "id": "context_unique_links",
+      "source": "tapology_public",
+      "external_id": "tp-ctx",
+      "display_name": "Context Only",
+      "opponent_normalized_name": "shared opp",
+      "event_id": "evt-a",
+      "event_date": "2019-01-10",
+      "expected": {"kind": "linked", "canonical_espn_id": "10011"}
+    },
+    {
+      "id": "same_opponent_different_date_no_unique_context",
+      "source": "sherdog_public",
+      "external_id": "sd-ctx-amb",
+      "display_name": "Ambiguous Fighter",
+      "opponent_normalized_name": "shared opp",
+      "expected": {"kind": "created"}
+    },
+    {
+      "id": "wikidata_exact",
+      "source": "tapology_public",
+      "external_id": "tp-wiki",
+      "display_name": "Wiki Exact",
+      "wikidata_id": "Q70001",
+      "expected": {"kind": "linked", "canonical_espn_id": "10007"}
+    },
+    {
+      "id": "wikidata_conflict",
+      "source": "sherdog_public",
+      "external_id": "sd-wiki-conflict",
+      "display_name": "Wiki Conflict B",
+      "wikidata_id": "Q80001",
+      "dob": "1981-02-02",
+      "expected": {"kind": "queued"}
+    },
+    {
+      "id": "duplicate_external_id_existing",
+      "source": "tapology_public",
+      "external_id": "dup-ext-1",
+      "display_name": "Dup External",
+      "expected": {"kind": "linked", "canonical_espn_id": "10010"}
+    },
+    {
+      "id": "upcoming_ambiguous_blocks",
+      "source": "sherdog_public",
+      "external_id": "sd-up",
+      "display_name": "John Smith",
+      "bout_id": "bout-up",
+      "bout_status": "upcoming",
+      "same_name_group": "john_smith",
+      "expected": {"kind": "blocked_or_queued"}
+    },
+    {
+      "id": "exact_espn_no_rename",
+      "source": "espn",
+      "external_id": "10004",
+      "display_name": "Should Not Rename Bones",
+      "expected": {"kind": "linked", "canonical_espn_id": "10004"}
+    }
+  ],
+  "review_cases": [
+    {
+      "source": "sherdog_public",
+      "external_id": "sd-js-alone",
+      "action": "reject"
+    },
+    {
+      "source": "sherdog_public",
+      "external_id": "sd-jose-ascii",
+      "action": "approve",
+      "canonical_espn_id": "10003",
+      "reverse": true
+    }
+  ]
+}

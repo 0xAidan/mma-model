@@ -159,6 +159,11 @@ from mma_model.db.tables.provenance import (  # noqa: E402
     RawObservation,
     SourceCheckpoint,
 )
+from mma_model.db.tables.identity import (  # noqa: E402
+    IdentityMatchEvidence,
+    IdentityReviewQueue,
+    IdentityScoringBlock,
+)
 
 __all__ = [
     "Base",
@@ -178,6 +183,9 @@ __all__ = [
     "FighterProfileObservation",
     "FighterSourceId",
     "FighterStatObservation",
+    "IdentityMatchEvidence",
+    "IdentityReviewQueue",
+    "IdentityScoringBlock",
     "IngestCursor",
     "IngestRun",
     "OddsSnapshot",
