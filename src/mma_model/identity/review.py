@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -480,6 +480,67 @@ def apply_review_decision(
     return review
 
 
+def _release_owned_source_mapping(
+    session: Session,
+    *,
+    source: str,
+    external_id: str,
+    before_canonical_id: str | None,
+    prior_mapping_json: str | None,
+) -> None:
+    """Remove or restore the mapping owned by this approval. Core SQL avoids 0-row ORM deletes."""
+    prior = None
+    if prior_mapping_json and prior_mapping_json != "null":
+        prior = json.loads(prior_mapping_json)
+    if prior is None:
+        stmt = delete(FighterSourceId).where(
+            FighterSourceId.source == source,
+            FighterSourceId.external_id == external_id,
+        )
+        if before_canonical_id is not None:
+            stmt = stmt.where(FighterSourceId.fighter_id == before_canonical_id)
+        session.execute(stmt)
+        return
+    prior_fighter = prior.get("fighter_id")
+    if prior_fighter and prior_fighter != before_canonical_id:
+        restore = update(FighterSourceId).where(
+            FighterSourceId.source == source,
+            FighterSourceId.external_id == external_id,
+        )
+        if before_canonical_id is not None:
+            restore = restore.where(FighterSourceId.fighter_id == before_canonical_id)
+        session.execute(restore.values(fighter_id=str(prior_fighter)))
+
+
+def _claim_reverse_transition(
+    session: Session,
+    *,
+    review_id: str,
+    actor: str,
+    stamp: datetime,
+    version: int,
+) -> bool:
+    """Atomically claim approved/rejected → reversed. True if this session won."""
+    result = session.execute(
+        update(IdentityReviewQueue)
+        .where(
+            IdentityReviewQueue.id == review_id,
+            IdentityReviewQueue.status.in_(("approved", "rejected")),
+            IdentityReviewQueue.version == version,
+        )
+        .values(
+            status="reversed",
+            decision_canonical_id=None,
+            decided_by=actor,
+            decided_at=stamp,
+            updated_at=stamp,
+            version=version + 1,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0) == 1
+
+
 def reverse_review_decision(
     session: Session,
     *,
@@ -518,32 +579,45 @@ def reverse_review_decision(
 
     before = review.decision_canonical_id
     reversed_from = review.status
-    if review.status == "approved":
-        mapping = session.scalar(
-            select(FighterSourceId).where(
-                FighterSourceId.source == review.source,
-                FighterSourceId.external_id == review.external_id,
+    prior_mapping_json = review.prior_mapping_json
+    claimed = _claim_reverse_transition(
+        session,
+        review_id=review.id,
+        actor=actor,
+        stamp=stamp,
+        version=int(review.version),
+    )
+    if not claimed:
+        latest = _committed_review_snapshot(session, review_id)
+        if latest is not None and latest[0] == "reversed":
+            _sync_review_from_committed(
+                review,
+                status=latest[0],
+                version=latest[1],
+                decision_canonical_id=latest[2],
             )
+            return review
+        raise ReviewDecisionError(
+            f"review status {review.status!r} cannot be reversed"
         )
-        if mapping is not None and (
-            before is None or mapping.fighter_id == before
-        ):
-            # Only remove the mapping created/owned by this approval path.
-            prior = None
-            if review.prior_mapping_json and review.prior_mapping_json != "null":
-                prior = json.loads(review.prior_mapping_json)
-            if prior is None:
-                session.delete(mapping)
-            elif prior.get("fighter_id") != mapping.fighter_id:
-                # Restore prior fighter_id safely.
-                mapping.fighter_id = str(prior["fighter_id"])
 
-    review.status = "reversed"
-    review.decision_canonical_id = None
-    review.decided_by = actor
-    review.decided_at = stamp
-    review.updated_at = stamp
-    review.version = int(review.version) + 1
+    _sync_review_from_committed(
+        review,
+        status="reversed",
+        version=int(review.version) + 1,
+        decision_canonical_id=None,
+    )
+    set_committed_value(review, "decided_by", actor)
+    set_committed_value(review, "decided_at", stamp)
+    set_committed_value(review, "updated_at", stamp)
+    if reversed_from == "approved":
+        _release_owned_source_mapping(
+            session,
+            source=review.source,
+            external_id=review.external_id,
+            before_canonical_id=before,
+            prior_mapping_json=prior_mapping_json,
+        )
     _write_evidence(
         session,
         action="reversed",

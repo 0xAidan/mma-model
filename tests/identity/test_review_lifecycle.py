@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import warnings
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from mma_model.db.tables.identity import (
     IdentityScoringBlock,
 )
 from mma_model.dwcs.ids import canonical_fighter_id
+from mma_model.identity import review as review_mod
 from mma_model.identity.resolver import IdentityResolver, resolve_fighter
 from mma_model.identity.review import apply_review_decision, reverse_review_decision
 
@@ -608,3 +611,189 @@ def test_concurrent_pending_reviews_are_rejected(env) -> None:
         )
         with pytest.raises(IntegrityError):
             session.commit()
+
+
+def test_sequential_reverse_is_idempotent_single_evidence(env) -> None:
+    Session = env["Session"]
+    with Session() as session:
+        fid = _seed(session, "30071", "Seq Reverse")
+        session.commit()
+        queued = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="seq-rev",
+            display_name="Seq Reverse",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        apply_review_decision(
+            session,
+            review_id=queued.review_id,
+            decision="approve",
+            canonical_id=fid,
+            actor="bob",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        first = reverse_review_decision(
+            session, review_id=queued.review_id, actor="bob", now=FIXED_NOW
+        )
+        session.commit()
+        second = reverse_review_decision(
+            session, review_id=queued.review_id, actor="bob", now=FIXED_NOW
+        )
+        session.commit()
+        reversed_evidence = list(
+            session.scalars(
+                select(IdentityMatchEvidence).where(
+                    IdentityMatchEvidence.action == "reversed"
+                )
+            ).all()
+        )
+        review = session.get(IdentityReviewQueue, queued.review_id)
+        mappings = _mappings(session, source="tapology_public", external_id="seq-rev")
+    assert first.status == "reversed"
+    assert second.status == "reversed"
+    assert first.id == second.id == queued.review_id
+    assert review is not None
+    assert review.status == "reversed"
+    assert len(reversed_evidence) == 1
+    assert mappings == []
+
+
+def test_concurrent_reverse_one_transition_one_evidence(env, monkeypatch) -> None:
+    """Two sessions observe approved together, then reverse; only one transition wins."""
+    Session = env["Session"]
+    with Session() as session:
+        fid = _seed(session, "30081", "Race Reverse")
+        opp = _seed(session, "30082", "Race Opp")
+        session.add(
+            CanonicalEvent(
+                id="race-rev-evt",
+                name="Race Reverse Card",
+                series="dwcs",
+                status="scheduled",
+                event_date=date(2026, 12, 1),
+            )
+        )
+        session.flush()
+        session.add(
+            CanonicalBout(
+                id="race-rev-bout",
+                event_id="race-rev-evt",
+                fighter_a_id=fid,
+                fighter_b_id=opp,
+                status="upcoming",
+            )
+        )
+        session.flush()
+        session.add(BoutParticipant(bout_id="race-rev-bout", fighter_id=fid, corner="a"))
+        session.add(BoutParticipant(bout_id="race-rev-bout", fighter_id=opp, corner="b"))
+        session.commit()
+        queued = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="race-rev",
+            display_name="Race Reverse",
+            bout_id="race-rev-bout",
+            bout_status="upcoming",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        apply_review_decision(
+            session,
+            review_id=queued.review_id,
+            decision="approve",
+            canonical_id=fid,
+            actor="bob",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        review_id = queued.review_id
+        assert len(_mappings(session, source="tapology_public", external_id="race-rev")) == 1
+
+    barrier = threading.Barrier(2, timeout=10)
+    original_snapshot = review_mod._committed_review_snapshot
+
+    def _race_snapshot(session, review_id_arg: str):
+        result = original_snapshot(session, review_id_arg)
+        if result is not None and result[0] == "approved":
+            barrier.wait()
+        return result
+
+    monkeypatch.setattr(review_mod, "_committed_review_snapshot", _race_snapshot)
+
+    errors: list[BaseException] = []
+    returned: list[str] = []
+    warning_messages: list[str] = []
+    lock = threading.Lock()
+    previous_showwarning = warnings.showwarning
+
+    def _capture_warning(message, category, filename, lineno, file=None, line=None):
+        warning_messages.append(str(message))
+        previous_showwarning(message, category, filename, lineno, file=file, line=line)
+
+    warnings.showwarning = _capture_warning
+
+    def _reverse(actor: str) -> None:
+        local = sessionmaker(
+            bind=env["engine"], autoflush=False, autocommit=False, future=True
+        )
+        try:
+            with local() as session:
+                loaded = session.get(IdentityReviewQueue, review_id)
+                assert loaded is not None
+                assert loaded.status == "approved"
+                result = reverse_review_decision(
+                    session,
+                    review_id=review_id,
+                    actor=actor,
+                    now=FIXED_NOW,
+                )
+                status = result.status
+                session.commit()
+            with lock:
+                returned.append(status)
+        except Exception as exc:  # noqa: BLE001 - collect race outcomes
+            errors.append(exc)
+
+    try:
+        t1 = threading.Thread(target=_reverse, args=("t1",))
+        t2 = threading.Thread(target=_reverse, args=("t2",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+    finally:
+        warnings.showwarning = previous_showwarning
+
+    assert errors == []
+    assert returned.count("reversed") == 2
+    mismatch = [
+        msg
+        for msg in warning_messages
+        if "expected to delete" in msg.lower() or "0 were matched" in msg.lower()
+    ]
+    assert mismatch == []
+
+    with Session() as session:
+        review = session.get(IdentityReviewQueue, review_id)
+        reversed_evidence = list(
+            session.scalars(
+                select(IdentityMatchEvidence).where(
+                    IdentityMatchEvidence.action == "reversed",
+                    IdentityMatchEvidence.review_id == review_id,
+                )
+            ).all()
+        )
+        mappings = _mappings(session, source="tapology_public", external_id="race-rev")
+        blocks = _active_blocks(session, source="tapology_public", external_id="race-rev")
+    assert review is not None
+    assert review.status == "reversed"
+    assert len(reversed_evidence) == 1
+    assert mappings == []
+    assert len(blocks) == 1
+    assert blocks[0].reason == "identity_reversed_unresolved"
+    assert blocks[0].review_id == review_id
