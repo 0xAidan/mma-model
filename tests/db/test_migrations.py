@@ -42,6 +42,11 @@ PROVENANCE_TABLES = {
     "raw_observations",
     "source_checkpoints",
 }
+IDENTITY_TABLES = {
+    "identity_review_queue",
+    "identity_match_evidence",
+    "identity_scoring_blocks",
+}
 
 
 def _alembic_config(db_path: Path) -> Config:
@@ -75,6 +80,7 @@ def test_clean_upgrade_creates_baseline_and_canonical_tables(tmp_path: Path) -> 
     assert LEGACY_TABLES.issubset(names)
     assert CANONICAL_TABLES.issubset(names)
     assert PROVENANCE_TABLES.issubset(names)
+    assert IDENTITY_TABLES.issubset(names)
 
 
 def _seed_legacy_schema(db_path: Path) -> None:

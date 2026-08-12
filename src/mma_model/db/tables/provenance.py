@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from mma_model.db.models import Base
+from mma_model.db.base import Base
 
 
 def _utc_now() -> datetime:

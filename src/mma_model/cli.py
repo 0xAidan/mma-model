@@ -13,6 +13,13 @@ from sqlalchemy.orm import sessionmaker
 from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
 from mma_model.dwcs.ingest import sync_dwcs_history
+from mma_model.identity.audit import build_identity_audit
+from mma_model.identity.review import (
+    ReviewDecisionError,
+    apply_review_decision,
+    list_reviews,
+    reverse_review_decision,
+)
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.the_odds_api import fetch_mma_odds
@@ -27,6 +34,13 @@ from mma_model.sources.ufcstats_public.probe import (
 )
 from mma_model.ufcstats.client import UFCStatsClient
 from mma_model.ufcstats.ingest import sync_pipeline
+
+LIVE_DB_URLS = frozenset(
+    {
+        "sqlite:///data/mma.db",
+        "sqlite:///./data/mma.db",
+    }
+)
 
 
 def _parse_years(spec: str) -> range:
@@ -183,6 +197,75 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional override path for dwcs_bouts_v1.jsonl",
+    )
+
+    p_identity = sub.add_parser("identity", help="Deterministic identity resolution utilities")
+    identity_sub = p_identity.add_subparsers(dest="identity_cmd", required=True)
+
+    def _add_identity_db_args(parser: argparse.ArgumentParser, *, mutating: bool) -> None:
+        parser.add_argument(
+            "--database-url",
+            required=True,
+            help="Explicit SQLite URL (never implied live data/mma.db)",
+        )
+        parser.add_argument("--json", action="store_true", help="Print JSON output")
+        if mutating:
+            parser.add_argument(
+                "--allow-user-db",
+                action="store_true",
+                help=(
+                    "Required override to mutate a live/user DB path "
+                    "(sqlite:///data/mma.db or MMA_DATABASE_URL default)"
+                ),
+            )
+            parser.add_argument("--actor", required=True, help="Decision actor id")
+
+    p_id_audit = identity_sub.add_parser("audit", help="Read-only identity audit report")
+    _add_identity_db_args(p_id_audit, mutating=False)
+    p_id_audit.add_argument("--series", default="dwcs", help="Series label for report")
+
+    p_id_list = identity_sub.add_parser("list", help="Read-only list review queue rows")
+    _add_identity_db_args(p_id_list, mutating=False)
+    p_id_list.add_argument(
+        "--status",
+        default="pending",
+        choices=["pending", "approved", "rejected", "reversed", "all"],
+        help="Filter by review status",
+    )
+
+    p_id_approve = identity_sub.add_parser("approve", help="Approve a pending review")
+    _add_identity_db_args(p_id_approve, mutating=True)
+    p_id_approve.add_argument("--review-id", required=True, help="Explicit review id")
+    p_id_approve.add_argument(
+        "--canonical-id",
+        required=True,
+        help="Explicit canonical fighter id (must exist)",
+    )
+    p_id_approve.add_argument(
+        "--expected-version",
+        type=int,
+        default=None,
+        help="Optional optimistic lock version",
+    )
+
+    p_id_reject = identity_sub.add_parser("reject", help="Reject a pending review")
+    _add_identity_db_args(p_id_reject, mutating=True)
+    p_id_reject.add_argument("--review-id", required=True, help="Explicit review id")
+    p_id_reject.add_argument(
+        "--expected-version",
+        type=int,
+        default=None,
+        help="Optional optimistic lock version",
+    )
+
+    p_id_reverse = identity_sub.add_parser("reverse", help="Reverse an approved or rejected review")
+    _add_identity_db_args(p_id_reverse, mutating=True)
+    p_id_reverse.add_argument("--review-id", required=True, help="Explicit review id")
+    p_id_reverse.add_argument(
+        "--expected-version",
+        type=int,
+        default=None,
+        help="Optional optimistic lock version",
     )
 
     args = p.parse_args(argv)
@@ -369,6 +452,137 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(report.human_summary())
             return 0
+        finally:
+            engine.dispose()
+
+    if args.cmd == "identity":
+        db_url = str(args.database_url).strip()
+        if not db_url:
+            print("refusing empty --database-url")
+            return 2
+
+        mutating = args.identity_cmd in {"approve", "reject", "reverse"}
+        if mutating:
+            default_url = get_settings().mma_database_url
+            is_live = db_url in LIVE_DB_URLS or db_url == default_url
+            if is_live and not bool(getattr(args, "allow_user_db", False)):
+                print(
+                    "refusing identity mutation against live/user DB; "
+                    "pass --allow-user-db to override, or use an explicit disposable "
+                    "--database-url"
+                )
+                return 2
+
+        engine = create_engine(db_url, future=True)
+        _attach_sqlite_listeners(engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        try:
+            if args.identity_cmd == "audit":
+                try:
+                    with Session() as session:
+                        report = build_identity_audit(session, series=args.series)
+                except ValueError as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+                    return 2
+                if args.json:
+                    print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+                else:
+                    print(report.human_summary())
+                return 0
+
+            if args.identity_cmd == "list":
+                status = None if args.status == "all" else args.status
+                with Session() as session:
+                    rows = list_reviews(session, status=status)
+                    payload = {
+                        "reviews": [
+                            {
+                                "id": r.id,
+                                "status": r.status,
+                                "version": r.version,
+                                "source": r.source,
+                                "external_id": r.external_id,
+                                "display_name": r.display_name,
+                                "normalized_name": r.normalized_name,
+                                "rule_id": r.rule_id,
+                                "candidate_canonical_ids_json": r.candidate_canonical_ids_json,
+                                "bout_id": r.bout_id,
+                            }
+                            for r in rows
+                        ]
+                    }
+                if args.json:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    print(f"reviews={len(payload['reviews'])} status={args.status}")
+                    for row in payload["reviews"]:
+                        print(
+                            f"{row['id']} {row['status']} {row['source']}:{row['external_id']} "
+                            f"{row['display_name']}"
+                        )
+                return 0
+
+            if args.identity_cmd in {"approve", "reject"}:
+                decision = "approve" if args.identity_cmd == "approve" else "reject"
+                canonical_id = getattr(args, "canonical_id", None)
+                try:
+                    with Session() as session:
+                        review = apply_review_decision(
+                            session,
+                            review_id=args.review_id,
+                            decision=decision,
+                            canonical_id=canonical_id,
+                            actor=args.actor,
+                            expected_version=args.expected_version,
+                        )
+                        session.commit()
+                        payload = {
+                            "review_id": review.id,
+                            "status": review.status,
+                            "decision_canonical_id": review.decision_canonical_id,
+                            "version": review.version,
+                            "actor": review.decided_by,
+                        }
+                except ReviewDecisionError as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+                    return 2
+                if args.json:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    print(
+                        f"{decision} review={payload['review_id']} "
+                        f"status={payload['status']} version={payload['version']}"
+                    )
+                return 0
+
+            if args.identity_cmd == "reverse":
+                try:
+                    with Session() as session:
+                        review = reverse_review_decision(
+                            session,
+                            review_id=args.review_id,
+                            actor=args.actor,
+                            expected_version=args.expected_version,
+                        )
+                        session.commit()
+                        payload = {
+                            "review_id": review.id,
+                            "status": review.status,
+                            "decision_canonical_id": review.decision_canonical_id,
+                            "version": review.version,
+                            "actor": review.decided_by,
+                        }
+                except ReviewDecisionError as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+                    return 2
+                if args.json:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    print(
+                        f"reverse review={payload['review_id']} "
+                        f"status={payload['status']} version={payload['version']}"
+                    )
+                return 0
         finally:
             engine.dispose()
 

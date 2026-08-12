@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from mma_model.config import get_settings
+from mma_model.db.identity_guards import install_identity_sqlite_guards
 from mma_model.db.models import Base
 
 
@@ -81,6 +82,7 @@ def init_db() -> None:
     """Apply Alembic migrations to head (compatible replacement for create_all-only init)."""
     # Ensure metadata modules are imported before upgrade (env.py also imports them).
     import mma_model.db.tables.core  # noqa: F401
+    import mma_model.db.tables.identity  # noqa: F401
     import mma_model.db.tables.provenance  # noqa: F401
 
     command.upgrade(_alembic_config(), "head")
@@ -91,6 +93,7 @@ def create_all_for_tests(bind: Engine | None = None) -> None:
     target = bind or engine
     _attach_sqlite_listeners(target)
     Base.metadata.create_all(bind=target)
+    install_identity_sqlite_guards(target)
 
 
 @contextmanager

@@ -37,6 +37,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "mma_model.evaluation" = ["dwcs_v1.json"]
+"mma_model.identity.data" = ["adjudicated_cases_v1.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

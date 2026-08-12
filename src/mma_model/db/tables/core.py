@@ -19,7 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from mma_model.db.models import Base
+from mma_model.db.base import Base
 
 
 def _utc_now() -> datetime:

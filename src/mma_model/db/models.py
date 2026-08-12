@@ -11,15 +11,36 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from mma_model.db.base import Base
+from mma_model.db.tables.core import (
+    BoutParticipant,
+    BoutResultVersion,
+    BoutSourceId,
+    CanonicalBout,
+    CanonicalEvent,
+    CanonicalFighter,
+    EventSourceId,
+    FighterAlias,
+    FighterProfileObservation,
+    FighterSourceId,
+    FighterStatObservation,
+)
+from mma_model.db.tables.identity import (
+    IdentityMatchEvidence,
+    IdentityReviewQueue,
+    IdentityScoringBlock,
+)
+from mma_model.db.tables.provenance import (
+    IngestRun,
+    RawObservation,
+    SourceCheckpoint,
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-class Base(DeclarativeBase):
-    pass
 
 
 class Fighter(Base):
@@ -140,26 +161,6 @@ class FighterComposite(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
-# Canonical core schema (registered on the same Base.metadata).
-from mma_model.db.tables.core import (  # noqa: E402
-    BoutParticipant,
-    BoutResultVersion,
-    BoutSourceId,
-    CanonicalBout,
-    CanonicalEvent,
-    CanonicalFighter,
-    EventSourceId,
-    FighterAlias,
-    FighterProfileObservation,
-    FighterSourceId,
-    FighterStatObservation,
-)
-from mma_model.db.tables.provenance import (  # noqa: E402
-    IngestRun,
-    RawObservation,
-    SourceCheckpoint,
-)
-
 __all__ = [
     "Base",
     "BoutParticipant",
@@ -178,6 +179,9 @@ __all__ = [
     "FighterProfileObservation",
     "FighterSourceId",
     "FighterStatObservation",
+    "IdentityMatchEvidence",
+    "IdentityReviewQueue",
+    "IdentityScoringBlock",
     "IngestCursor",
     "IngestRun",
     "OddsSnapshot",
