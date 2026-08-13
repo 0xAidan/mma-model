@@ -90,9 +90,11 @@ here in DWCS-001.
 4. **Parser fragility** — method detection uses substring / keyword heuristics over
    table text; fighter names or malformed cells can be misread as methods
    (`src/mma_model/ufcstats/parsers.py`).
-5. **Odds limitations** — The Odds API integration is live `h2h` pass-through without
-   durable bout-matched snapshots, lock handling, or Bet365 DWCS coverage proof.
-   Missing Bet365 must not block sportsbook-agnostic price targets.
+5. **Odds limitations** — The Odds API integration historically was live `h2h`
+   pass-through without durable bout-matched snapshots. DWCS-201 adds typed
+   events/markets/current/historical normalization, quota persistence, and
+   append-only quote storage. Missing Bet365 must not block sportsbook-agnostic
+   price targets; reference quotes are never labeled as Bet365.
 
 ## Consequences
 

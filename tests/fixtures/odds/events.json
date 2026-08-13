@@ -1,0 +1,17 @@
+{
+  "headers": {
+    "x-requests-remaining": "500",
+    "x-requests-used": "0",
+    "x-requests-last": "0"
+  },
+  "data": [
+    {
+      "id": "evt-dwcs-ref-001",
+      "sport_key": "mma_mixed_martial_arts",
+      "sport_title": "MMA",
+      "commence_time": "2026-08-12T00:00:00Z",
+      "home_team": "Jon Kunneman",
+      "away_team": "Nick Kropschot"
+    }
+  ]
+}
