@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
+from mma_model.labels.outcomes import canonicalize_method_text, match_exact_method_token
+
 
 def _id_from_url(url: str) -> str:
     path = urlparse(url).path.strip("/")
@@ -96,12 +98,22 @@ def parse_event_fights(html: str) -> list[EventFightRow]:
             if t and any(x in t.lower() for x in ("weight", "fly", "bantam", "feather", "light", "welter", "middle", "light heavy", "heavy", "women", "catch")):
                 wc = t.replace("\n", " ").strip()
                 break
-        methods = [p.get_text(" ", strip=True) for p in tr.select("td.l-page_align_left p.b-fight-details__table-text")]
+        methods = [
+            p.get_text(" ", strip=True)
+            for p in tr.select("td.l-page_align_left p.b-fight-details__table-text")
+        ]
+        fighter_tokens = {
+            canonicalize_method_text(fa.get_text(strip=True)),
+            canonicalize_method_text(fb.get_text(strip=True)),
+        }
         method = ""
         for m in methods:
-            if m and len(m) < 40 and any(
-                k in m.upper() for k in ("DEC", "KO", "TKO", "SUB", "DQ", "NC", "M-DEC", "U-DEC", "S-DEC")
-            ):
+            if not m:
+                continue
+            canonical = canonicalize_method_text(m)
+            if canonical in fighter_tokens:
+                continue
+            if match_exact_method_token(m) is not None:
                 method = m
                 break
         fight_round: Optional[int] = None
