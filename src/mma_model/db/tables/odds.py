@@ -350,6 +350,60 @@ _BOUT_LIFECYCLE_SQL = (
     "'active', 'stale', 'missing_unknown', 'locked', "
     "'cancelled', 'replaced', 'review_blocked'"
 )
+# Selection scope: bout-wide (all null) OR quote_id OR bookmaker+market_family.
+_LIFECYCLE_SCOPE_SHAPE_SQL = (
+    "("
+    "bookmaker_key IS NULL AND region IS NULL AND market_family IS NULL "
+    "AND outcome_key IS NULL AND line_point IS NULL AND quote_id IS NULL"
+    ") OR ("
+    "quote_id IS NOT NULL"
+    ") OR ("
+    "bookmaker_key IS NOT NULL AND length(trim(bookmaker_key)) > 0 "
+    "AND market_family IS NOT NULL AND length(trim(market_family)) > 0"
+    ")"
+)
+_LIFECYCLE_TERMINAL_BOUT_SCOPE_SQL = (
+    "lifecycle NOT IN ('cancelled', 'replaced', 'review_blocked') OR ("
+    "bookmaker_key IS NULL AND region IS NULL AND market_family IS NULL "
+    "AND outcome_key IS NULL AND line_point IS NULL AND quote_id IS NULL"
+    ")"
+)
+_LIFECYCLE_SCOPE_NONEMPTY_SQL = (
+    "(bookmaker_key IS NULL OR length(trim(bookmaker_key)) > 0) AND "
+    "(region IS NULL OR length(trim(region)) > 0) AND "
+    "(market_family IS NULL OR length(trim(market_family)) > 0) AND "
+    "(outcome_key IS NULL OR length(trim(outcome_key)) > 0)"
+)
+# When outcome_key is populated, family/outcome/line must be catalog-valid.
+# Book/market locks may omit outcome_key (line_point must then be null).
+_LIFECYCLE_SCOPE_FAMILY_OUTCOME_SQL = (
+    "("
+    "outcome_key IS NULL AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'moneyline' AND outcome_key IN ('fighter_a', 'fighter_b') "
+    "AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'totals' AND outcome_key IN ('over', 'under') "
+    "AND line_point IN (1.5, 2.5)"
+    ") OR ("
+    "market_family = 'goes_distance' "
+    "AND outcome_key IN ('goes_distance', 'inside_distance') "
+    "AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'method' "
+    "AND outcome_key IN ('ko_tko', 'submission', 'decision', 'other_stoppage') "
+    "AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'fighter_by_method' AND outcome_key IN ("
+    "'a_ko_tko', 'a_submission', 'a_other_stoppage', 'a_decision', "
+    "'b_ko_tko', 'b_submission', 'b_other_stoppage', 'b_decision'"
+    ") AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'exact_round' "
+    "AND outcome_key IN ('round_1', 'round_2', 'round_3', 'round_4', 'round_5') "
+    "AND line_point IS NULL"
+    ")"
+)
 _REVIEW_STATUS_SQL = "'pending', 'approved', 'rejected', 'reversed'"
 _ALIAS_STATUS_SUPERSEDED_SQL = (
     "("
@@ -536,6 +590,22 @@ class OddsBoutLifecycleObservation(Base):
             "length(trim(evidence_kind)) > 0",
             name="ck_odds_bout_lifecycle_evidence_kind",
         ),
+        CheckConstraint(
+            _LIFECYCLE_SCOPE_SHAPE_SQL,
+            name="ck_odds_bout_lifecycle_scope_shape",
+        ),
+        CheckConstraint(
+            _LIFECYCLE_TERMINAL_BOUT_SCOPE_SQL,
+            name="ck_odds_bout_lifecycle_terminal_bout_scope",
+        ),
+        CheckConstraint(
+            _LIFECYCLE_SCOPE_NONEMPTY_SQL,
+            name="ck_odds_bout_lifecycle_scope_nonempty",
+        ),
+        CheckConstraint(
+            _LIFECYCLE_SCOPE_FAMILY_OUTCOME_SQL,
+            name="ck_odds_bout_lifecycle_scope_family_outcome",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -558,7 +628,9 @@ class OddsBoutLifecycleObservation(Base):
         String(64), nullable=True, index=True
     )
     line_point: Mapped[float | None] = mapped_column(Float, nullable=True)
-    quote_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    quote_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("odds_quotes.id"), nullable=True, index=True
+    )
     lifecycle: Mapped[str] = mapped_column(String(32), index=True)
     evidence_kind: Mapped[str] = mapped_column(String(128))
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)

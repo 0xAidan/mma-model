@@ -134,12 +134,21 @@ class QuoteValueEligibility(StrEnum):
 class QuoteBlockReason(StrEnum):
     NONE = "none"
     UNMATCHED = "unmatched"
+    ALIAS_BOUT_MISMATCH = "alias_bout_mismatch"
     BOUT_TERMINAL = "bout_terminal"
     SELECTION_LOCKED = "selection_locked"
     MARKET_UNKNOWN = "market_unknown"
     QUOTE_UNAVAILABLE = "quote_unavailable"
     STALE = "stale"
     NOT_VISIBLE = "not_visible"
+
+
+class AvailabilityNote(StrEnum):
+    """Non-blocking availability history note for operators."""
+
+    NONE = "none"
+    UNKNOWN_BLOCKING = "unknown_blocking"
+    RECOVERED_BY_NEWER_QUOTE = "recovered_by_newer_quote"
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,8 @@ class QuoteEligibilityDecision:
     outcome_key: str
     line_point: float | None
     freshness_at: datetime | None
+    resolved_bout_id: str | None = None
+    availability_note: AvailabilityNote = AvailabilityNote.NONE
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +186,8 @@ class QuoteEligibilityDecision:
             "freshness_at": (
                 self.freshness_at.isoformat() if self.freshness_at is not None else None
             ),
+            "resolved_bout_id": self.resolved_bout_id,
+            "availability_note": self.availability_note.value,
         }
 
 
@@ -592,10 +605,13 @@ def market_availability_unknown_at(
     market_family: str,
     provider_market_key: str | None = None,
     as_of: datetime,
+    quote_evidence_at: datetime | None = None,
 ) -> OddsAvailabilityObservation | None:
-    """Latest UNKNOWN availability for book/region/market at as_of, else None.
+    """Latest blocking UNKNOWN for book/region/market at as_of, else None.
 
     Never infers SUSPENDED/LOCKED from absence — only explicit UNKNOWN rows.
+    When ``quote_evidence_at`` is set (available quote observe/source clock), an
+    UNKNOWN older than that evidence is treated as cleared by the newer quote.
     """
     cutoff = _require_aware_utc(as_of, field="as_of")
     candidates = [
@@ -623,7 +639,62 @@ def market_availability_unknown_at(
     def _sort_key(row: OddsAvailabilityObservation) -> tuple[datetime, int]:
         return (_as_utc_sqlite(row.observed_at), int(row.id or 0))
 
-    return max(candidates, key=_sort_key)
+    latest = max(candidates, key=_sort_key)
+    if quote_evidence_at is not None:
+        evidence = _require_aware_utc(quote_evidence_at, field="quote_evidence_at")
+        if _as_utc_sqlite(latest.observed_at) < evidence:
+            return None
+    return latest
+
+
+def quote_availability_evidence_at(
+    quote: OddsQuote,
+    *,
+    as_of: datetime,
+) -> datetime | None:
+    """Clock proving the quote's market was available (for UNKNOWN recovery).
+
+    Uses observed_at (when the available quote was acquired). Future observations
+    relative to as_of are rejected.
+    """
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    observed = _as_utc_sqlite(quote.observed_at)
+    if observed > cutoff:
+        return None
+    return observed
+
+
+def prior_unknown_cleared_by_quote(
+    session: Session,
+    *,
+    quote: OddsQuote,
+    as_of: datetime,
+) -> bool:
+    """True when a prior UNKNOWN exists but is older than this available quote."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    evidence = quote_availability_evidence_at(quote, as_of=cutoff)
+    if evidence is None or quote.availability != "available":
+        return False
+    candidates = [
+        row
+        for row in availability_observations_visible_under_alias_at(
+            session,
+            provider=quote.provider,
+            external_event_id=quote.external_event_id,
+            as_of=cutoff,
+        )
+        if row.availability == "unknown"
+        and (row.bookmaker_key or "") == quote.bookmaker_key
+        and row.region == quote.region
+        and (
+            row.market_family == quote.market_family
+            or row.provider_market_key == quote.provider_market_key
+        )
+    ]
+    if not candidates:
+        return False
+    latest = max(candidates, key=lambda row: _as_utc_sqlite(row.observed_at))
+    return _as_utc_sqlite(latest.observed_at) < evidence
 
 
 def resolve_match_lifecycle(
@@ -694,7 +765,14 @@ def resolve_quote_value_eligibility(
     as_of: datetime,
     stale_after_minutes: int,
 ) -> QuoteEligibilityDecision:
-    """Combine alias-effective match with quote-scoped freshness/availability/lock."""
+    """Combine alias-effective bout identity with quote-scoped gates.
+
+    Bout identity is derived from the alias effective at ``as_of``. A caller
+    ``bout_id`` that disagrees with ``alias.bout_id`` is rejected (wrong-bout /
+    historical-alias mismatch). ``match_status`` alone is never authority for
+    lifecycle lookup.
+    """
+    del match_status  # alias at cutoff is authoritative for bout identity
     cutoff = _require_aware_utc(as_of, field="as_of")
     selection = _quote_selection_identity(quote)
     base = dict(
@@ -706,15 +784,9 @@ def resolve_quote_value_eligibility(
         outcome_key=quote.outcome_key,
         line_point=quote.line_point,
         freshness_at=quote_authoritative_freshness(quote, as_of=cutoff),
+        availability_note=AvailabilityNote.NONE,
+        resolved_bout_id=None,
     )
-    if match_status != "matched" or not bout_id:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.UNMATCHED,
-            detail="bout match required for value",
-            **base,
-        )
 
     visible = quotes_visible_under_alias_at(
         session,
@@ -731,9 +803,47 @@ def resolve_quote_value_eligibility(
             **base,
         )
 
+    alias = alias_effective_at(
+        session,
+        provider=quote.provider,
+        external_event_id=quote.external_event_id,
+        as_of=cutoff,
+    )
+    if alias is None:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.UNMATCHED,
+            detail="no effective alias at as_of for quote value eligibility",
+            **base,
+        )
+    if bout_id is not None and bout_id != alias.bout_id:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.ALIAS_BOUT_MISMATCH,
+            detail=(
+                f"caller bout_id={bout_id!r} != alias.bout_id={alias.bout_id!r} "
+                f"(alias_version={alias.alias_version})"
+            ),
+            resolved_bout_id=alias.bout_id,
+            availability_note=AvailabilityNote.NONE,
+            quote_id=int(quote.id),
+            selection_identity=selection,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family,
+            outcome_key=quote.outcome_key,
+            line_point=quote.line_point,
+            freshness_at=base["freshness_at"],
+        )
+
+    resolved_bout_id = alias.bout_id
+    base["resolved_bout_id"] = resolved_bout_id
+
     bout_life = latest_bout_lifecycle(
         session,
-        bout_id=bout_id,
+        bout_id=resolved_bout_id,
         as_of=cutoff,
         provider=quote.provider,
         external_event_id=quote.external_event_id,
@@ -749,7 +859,7 @@ def resolve_quote_value_eligibility(
 
     selection_life = latest_selection_lifecycle(
         session,
-        bout_id=bout_id,
+        bout_id=resolved_bout_id,
         quote=quote,
         as_of=cutoff,
         provider=quote.provider,
@@ -767,6 +877,7 @@ def resolve_quote_value_eligibility(
             **base,
         )
 
+    quote_evidence = quote_availability_evidence_at(quote, as_of=cutoff)
     unknown = market_availability_unknown_at(
         session,
         provider=quote.provider,
@@ -776,6 +887,7 @@ def resolve_quote_value_eligibility(
         market_family=quote.market_family,
         provider_market_key=quote.provider_market_key,
         as_of=cutoff,
+        quote_evidence_at=quote_evidence,
     )
     if unknown is not None:
         return QuoteEligibilityDecision(
@@ -786,8 +898,22 @@ def resolve_quote_value_eligibility(
                 f"availability unknown for {quote.bookmaker_key}/"
                 f"{quote.provider_market_key} (preserved UNKNOWN)"
             ),
-            **base,
+            availability_note=AvailabilityNote.UNKNOWN_BLOCKING,
+            resolved_bout_id=resolved_bout_id,
+            quote_id=int(quote.id),
+            selection_identity=selection,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family,
+            outcome_key=quote.outcome_key,
+            line_point=quote.line_point,
+            freshness_at=base["freshness_at"],
         )
+
+    availability_note = AvailabilityNote.NONE
+    if prior_unknown_cleared_by_quote(session, quote=quote, as_of=cutoff):
+        availability_note = AvailabilityNote.RECOVERED_BY_NEWER_QUOTE
+    base["availability_note"] = availability_note
 
     if quote.availability != "available":
         return QuoteEligibilityDecision(
@@ -813,7 +939,14 @@ def resolve_quote_value_eligibility(
         eligible=True,
         status=QuoteValueEligibility.ELIGIBLE,
         reason=QuoteBlockReason.NONE,
-        detail="matched alias + available + fresh + not locked",
+        detail=(
+            "alias-bound bout + available + fresh + not locked"
+            + (
+                "; prior UNKNOWN cleared by newer quote"
+                if availability_note is AvailabilityNote.RECOVERED_BY_NEWER_QUOTE
+                else ""
+            )
+        ),
         **base,
     )
 
@@ -857,6 +990,8 @@ def summarize_quote_eligibility(
         "visible": len(decisions),
         "eligible": 0,
         "blocked": 0,
+        "availability_recovered": 0,
+        "availability_unknown_blocking": 0,
     }
     by_reason: dict[str, int] = {}
     for row in decisions:
@@ -865,11 +1000,96 @@ def summarize_quote_eligibility(
         else:
             counts["blocked"] += 1
             by_reason[row.reason.value] = by_reason.get(row.reason.value, 0) + 1
+        if row.availability_note is AvailabilityNote.RECOVERED_BY_NEWER_QUOTE:
+            counts["availability_recovered"] += 1
+        elif row.availability_note is AvailabilityNote.UNKNOWN_BLOCKING:
+            counts["availability_unknown_blocking"] += 1
     return {
         **counts,
         "blocked_by_reason": dict(sorted(by_reason.items())),
         "quotes": [row.as_dict() for row in decisions],
     }
+
+
+def _bind_lifecycle_quote_scope(
+    session: Session,
+    *,
+    provider: str | None,
+    external_event_id: str | None,
+    bookmaker_key: str | None,
+    region: str | None,
+    market_family: str | None,
+    outcome_key: str | None,
+    line_point: float | None,
+    quote_id: int | None,
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    float | None,
+    int | None,
+]:
+    """Validate quote_id exists/belongs and scope fields agree; derive blanks."""
+    if quote_id is None:
+        return (
+            bookmaker_key,
+            region,
+            market_family,
+            outcome_key,
+            line_point,
+            None,
+        )
+    row = session.get(OddsQuote, int(quote_id))
+    if row is None:
+        raise ValueError(f"quote_id {quote_id} not found")
+    if provider is not None and row.provider != provider:
+        raise ValueError(
+            f"quote_id {quote_id} provider mismatch: "
+            f"got {row.provider!r}, expected {provider!r}"
+        )
+    if (
+        external_event_id is not None
+        and row.external_event_id != external_event_id
+    ):
+        raise ValueError(
+            f"quote_id {quote_id} external_event_id mismatch: "
+            f"got {row.external_event_id!r}, expected {external_event_id!r}"
+        )
+
+    def _agree(name: str, supplied: str | None, actual: str) -> str:
+        if supplied is None:
+            return actual
+        if supplied != actual:
+            raise ValueError(
+                f"scope {name} mismatches quote_id {quote_id}: "
+                f"got {supplied!r}, quote has {actual!r}"
+            )
+        return supplied
+
+    bound_book = _agree("bookmaker_key", bookmaker_key, row.bookmaker_key)
+    bound_region = _agree("region", region, row.region)
+    bound_family = _agree("market_family", market_family, row.market_family)
+    bound_outcome = _agree("outcome_key", outcome_key, row.outcome_key)
+    if line_point is not None:
+        if row.line_point is None or float(line_point) != float(row.line_point):
+            raise ValueError(
+                f"scope line_point mismatches quote_id {quote_id}: "
+                f"got {line_point!r}, quote has {row.line_point!r}"
+            )
+        bound_line: float | None = float(line_point)
+    else:
+        bound_line = (
+            float(row.line_point) if row.line_point is not None else None
+        )
+    return (
+        bound_book,
+        bound_region,
+        bound_family,
+        bound_outcome,
+        bound_line,
+        int(quote_id),
+    )
 
 
 def _lifecycle_dedupe_key(
@@ -1003,6 +1223,24 @@ def apply_bout_lifecycle(
     transition matrix (provider unlock exits LOCKED only; cancelled/replaced
     require canonical correction evidence; review approval exits REVIEW_BLOCKED).
     """
+    (
+        bookmaker_key,
+        region,
+        market_family,
+        outcome_key,
+        line_point,
+        quote_id,
+    ) = _bind_lifecycle_quote_scope(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        bookmaker_key=bookmaker_key,
+        region=region,
+        market_family=market_family,
+        outcome_key=outcome_key,
+        line_point=line_point,
+        quote_id=quote_id,
+    )
     _validate_lifecycle_evidence(
         lifecycle=lifecycle,
         evidence_kind=evidence_kind,

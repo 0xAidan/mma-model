@@ -7,6 +7,7 @@ from mma_model.odds.bookmaker_keys import (
     normalize_bookmaker_key,
 )
 from mma_model.odds.lifecycle import (
+    AvailabilityNote,
     OddsBoutLifecycleState,
     QuoteBlockReason,
     QuoteEligibilityDecision,
@@ -132,6 +133,7 @@ __all__ = [
     "PriceGuidanceSelectionError",
     "PriceSourceKind",
     "QuotaHeaders",
+    "AvailabilityNote",
     "QuoteAvailability",
     "QuoteBlockReason",
     "QuoteEligibilityDecision",

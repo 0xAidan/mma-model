@@ -38,6 +38,7 @@ from mma_model.db.tables.odds import (
 )
 from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.lifecycle import (
+    AvailabilityNote,
     OddsBoutLifecycleState,
     QuoteBlockReason,
     QuoteValueEligibility,
@@ -1444,6 +1445,18 @@ def test_migration_upgrade_downgrade_preserves_schema_roundtrip(tmp_path: Path) 
         }
         assert "bookmaker_key" in life_cols
         assert "quote_id" in life_cols
+        assert "ix_odds_bout_lifecycle_observations_quote_id" in indexes
+        assert "ix_odds_bout_lifecycle_observations_bookmaker_key" in indexes
+        fk_sql = conn.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='odds_bout_lifecycle_observations'"
+            )
+        ).scalar_one()
+        assert "quote_id" in fk_sql
+        assert "REFERENCES odds_quotes" in fk_sql or "references odds_quotes" in fk_sql.lower()
+        assert "ck_odds_bout_lifecycle_scope_shape" in fk_sql
+        assert "ck_odds_bout_lifecycle_terminal_bout_scope" in fk_sql
 
     command.downgrade(_alembic_config(db_path), "0013_odds_manual_prices")
     with engine.begin() as conn:
@@ -1534,6 +1547,100 @@ def test_raw_sql_rejects_integrity_violations(tmp_path: Path) -> None:
                 f"'{now}', NULL)"
             )
         )
+
+    # Selection-scoped CANCELLED rejected (terminal must be bout-wide).
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.execute(
+            text(
+                "INSERT INTO odds_bout_lifecycle_observations ("
+                "dedupe_key, bout_id, provider, external_event_id, bookmaker_key, "
+                "region, market_family, outcome_key, line_point, quote_id, "
+                "lifecycle, evidence_kind, detail, price_decimal, observed_at, created_at"
+                ") VALUES ("
+                "'life-term-scoped', 'b1', 'the_odds_api', 'ext', 'fanduel', "
+                "'us', 'moneyline', NULL, NULL, NULL, "
+                f"'cancelled', 'canonical_bout_cancelled', NULL, NULL, '{now}', '{now}')"
+            )
+        )
+
+    # Malformed selection scope (book without market) rejected.
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.execute(
+            text(
+                "INSERT INTO odds_bout_lifecycle_observations ("
+                "dedupe_key, bout_id, provider, external_event_id, bookmaker_key, "
+                "region, market_family, outcome_key, line_point, quote_id, "
+                "lifecycle, evidence_kind, detail, price_decimal, observed_at, created_at"
+                ") VALUES ("
+                "'life-bad-scope', 'b1', 'the_odds_api', 'ext', 'fanduel', "
+                "NULL, NULL, NULL, NULL, NULL, "
+                f"'locked', 'provider_lock_signal', NULL, NULL, '{now}', '{now}')"
+            )
+        )
+
+    # Bad quote_id FK rejected.
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.execute(
+            text(
+                "INSERT INTO odds_bout_lifecycle_observations ("
+                "dedupe_key, bout_id, provider, external_event_id, bookmaker_key, "
+                "region, market_family, outcome_key, line_point, quote_id, "
+                "lifecycle, evidence_kind, detail, price_decimal, observed_at, created_at"
+                ") VALUES ("
+                "'life-bad-fk', 'b1', 'the_odds_api', 'ext', NULL, "
+                "NULL, NULL, NULL, NULL, 999999, "
+                f"'locked', 'provider_lock_signal', NULL, NULL, '{now}', '{now}')"
+            )
+        )
+
+    # Invalid family/outcome when outcome_key present.
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.execute(
+            text(
+                "INSERT INTO odds_bout_lifecycle_observations ("
+                "dedupe_key, bout_id, provider, external_event_id, bookmaker_key, "
+                "region, market_family, outcome_key, line_point, quote_id, "
+                "lifecycle, evidence_kind, detail, price_decimal, observed_at, created_at"
+                ") VALUES ("
+                "'life-bad-fam', 'b1', 'the_odds_api', 'ext', 'fanduel', "
+                "'us', 'moneyline', 'over', NULL, NULL, "
+                f"'locked', 'provider_lock_signal', NULL, NULL, '{now}', '{now}')"
+            )
+        )
+
+
+def test_migration_0015_downgrade_drops_scope_then_reupgrade(tmp_path: Path) -> None:
+    db_path = tmp_path / "mig0015.db"
+    command.upgrade(_alembic_config(db_path), "head")
+    command.downgrade(_alembic_config(db_path), "0014_odds_matching")
+    engine = create_engine(f"sqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        life_cols = {
+            row[1]
+            for row in conn.execute(
+                text("PRAGMA table_info(odds_bout_lifecycle_observations)")
+            )
+        }
+        assert "quote_id" not in life_cols
+        assert "bookmaker_key" not in life_cols
+        quote_cols = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(odds_quotes)"))
+        }
+        assert "dedupe_version" not in quote_cols
+    command.upgrade(_alembic_config(db_path), "head")
+    with engine.begin() as conn:
+        life_cols = {
+            row[1]
+            for row in conn.execute(
+                text("PRAGMA table_info(odds_bout_lifecycle_observations)")
+            )
+        }
+        assert "quote_id" in life_cols
+        assert "bookmaker_key" in life_cols
 
 
 # --- CLI ------------------------------------------------------------------
@@ -3266,10 +3373,10 @@ def test_mixed_book_fresh_does_not_unstale_other_quotes(tmp_path: Path) -> None:
 
 def test_availability_unknown_blocks_only_that_book_market(tmp_path: Path) -> None:
     from mma_model.db.tables.odds import OddsAvailabilityObservation
-    from mma_model.odds.store import OddsQuoteStore
 
     session = _session(tmp_path)
     start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    past = OBSERVED - timedelta(minutes=8)
     _seed_bout(
         session,
         bout_id="bout-av",
@@ -3302,6 +3409,18 @@ def test_availability_unknown_blocks_only_that_book_market(tmp_path: Path) -> No
         raw_ref="dk-h2h",
         bookmaker_key="draftkings",
     )
+    session.commit()
+    # Alias must exist at historical PIT for quote eligibility.
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-av",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=past,
+    )
+    persist_match_decision(session, decision, observed_at=past)
     store = OddsQuoteStore(session)
     event_row = store.upsert_event(
         OddsEvent(
@@ -3349,17 +3468,6 @@ def test_availability_unknown_blocks_only_that_book_market(tmp_path: Path) -> No
         )
     )
     session.commit()
-    decision = match_provider_event(
-        session,
-        provider=PROVIDER_THE_ODDS_API,
-        external_event_id="prov-av",
-        home_team="Alpha Fighter",
-        away_team="Bravo Fighter",
-        commence_time=start,
-        observed_at=OBSERVED,
-    )
-    persist_match_decision(session, decision, observed_at=OBSERVED)
-    session.commit()
     assert decision.lifecycle == OddsBoutLifecycleState.ACTIVE
 
     rows = resolve_visible_quotes_value_eligibility(
@@ -3377,9 +3485,9 @@ def test_availability_unknown_blocks_only_that_book_market(tmp_path: Path) -> No
     assert by_ref["fd-h2h"].eligible is True
     assert by_ref["dk-h2h"].eligible is False
     assert by_ref["dk-h2h"].reason == QuoteBlockReason.MARKET_UNKNOWN
+    assert by_ref["dk-h2h"].availability_note == AvailabilityNote.UNKNOWN_BLOCKING
 
-    # Historical PIT: unknown observed in the future must not block the past.
-    past = OBSERVED - timedelta(minutes=8)
+    # Historical PIT: unknown observed later must not block the past.
     past_rows = resolve_visible_quotes_value_eligibility(
         session,
         provider=PROVIDER_THE_ODDS_API,
@@ -3390,6 +3498,9 @@ def test_availability_unknown_blocks_only_that_book_market(tmp_path: Path) -> No
         stale_after_minutes=360,
     )
     assert all(row.eligible for row in past_rows)
+    assert all(
+        row.availability_note == AvailabilityNote.NONE for row in past_rows
+    )
 
 
 def test_selection_scoped_lock_isolates_from_other_books(tmp_path: Path) -> None:
@@ -3760,3 +3871,371 @@ def test_quote_eligibility_pit_rejects_future_clocks(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0].eligible is True
     assert session.get(OddsQuote, rows[0].quote_id).raw_ref == "past-q"  # type: ignore[union-attr]
+
+
+def test_quote_eligibility_rejects_wrong_bout_vs_alias(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 9, 1, 2, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="old-bout-alias",
+        event_id="evt-aa",
+        fighter_a="Alex Original",
+        fighter_b="Blake Opponent",
+        start=start,
+    )
+    _seed_bout(
+        session,
+        bout_id="new-bout-alias",
+        event_id="evt-ab",
+        fighter_a="Alex Original",
+        fighter_b="Casey Replacement",
+        start=start,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-alias-bout",
+        home="Alex Original",
+        away="Blake Opponent",
+        commence=start,
+        observed_at=OBSERVED - timedelta(hours=2),
+        source_updated_at=OBSERVED - timedelta(hours=2),
+        price_decimal=1.9,
+        raw_ref="old-vis",
+    )
+    session.commit()
+    first = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-alias-bout",
+        home_team="Alex Original",
+        away_team="Blake Opponent",
+        commence_time=start,
+        observed_at=OBSERVED - timedelta(hours=2),
+    )
+    persist_match_decision(session, first, observed_at=OBSERVED - timedelta(hours=2))
+    apply_replacement(
+        session,
+        old_bout_id="old-bout-alias",
+        new_bout_id="new-bout-alias",
+        provider=PROVIDER_THE_ODDS_API,
+        old_external_event_id="prov-alias-bout",
+        new_external_event_id="prov-alias-bout",
+        new_home_team="Casey Replacement",
+        new_away_team="Alex Original",
+        new_commence_time=start,
+        observed_at=OBSERVED,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-alias-bout",
+        home="Casey Replacement",
+        away="Alex Original",
+        commence=start,
+        observed_at=OBSERVED + timedelta(minutes=1),
+        source_updated_at=OBSERVED + timedelta(minutes=1),
+        price_decimal=1.91,
+        raw_ref="new-vis",
+    )
+    session.commit()
+
+    new_quote = session.scalars(
+        select(OddsQuote).where(OddsQuote.raw_ref == "new-vis")
+    ).one()
+    # Current alias is new-bout; caller passing old bout must mismatch.
+    wrong = resolve_quote_value_eligibility(
+        session,
+        quote=new_quote,
+        bout_id="old-bout-alias",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED + timedelta(minutes=2),
+        stale_after_minutes=360,
+    )
+    assert wrong.eligible is False
+    assert wrong.reason == QuoteBlockReason.ALIAS_BOUT_MISMATCH
+    assert wrong.resolved_bout_id == "new-bout-alias"
+
+    ok = resolve_quote_value_eligibility(
+        session,
+        quote=new_quote,
+        bout_id="new-bout-alias",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED + timedelta(minutes=2),
+        stale_after_minutes=360,
+    )
+    assert ok.eligible is True
+    assert ok.resolved_bout_id == "new-bout-alias"
+
+    # Historical PIT: at pre-replacement as_of, alias is old bout.
+    old_quote = session.scalars(
+        select(OddsQuote).where(OddsQuote.raw_ref == "old-vis")
+    ).one()
+    hist_wrong = resolve_quote_value_eligibility(
+        session,
+        quote=old_quote,
+        bout_id="new-bout-alias",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED - timedelta(hours=1),
+        stale_after_minutes=360,
+    )
+    assert hist_wrong.reason == QuoteBlockReason.ALIAS_BOUT_MISMATCH
+    hist_ok = resolve_quote_value_eligibility(
+        session,
+        quote=old_quote,
+        bout_id="old-bout-alias",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED - timedelta(hours=1),
+        stale_after_minutes=360,
+    )
+    assert hist_ok.eligible is True
+    assert hist_ok.resolved_bout_id == "old-bout-alias"
+
+
+def test_availability_unknown_cleared_by_newer_quote_multi_book(tmp_path: Path) -> None:
+    from mma_model.db.tables.odds import OddsAvailabilityObservation
+
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-rec",
+        event_id="evt-rec",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    t_unknown = OBSERVED - timedelta(hours=2)
+    t_recover = OBSERVED - timedelta(hours=1)
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id="prov-rec",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=start,
+            home_team="Alpha Fighter",
+            away_team="Bravo Fighter",
+        ),
+        provider=PROVIDER_THE_ODDS_API,
+    )
+    session.add(
+        OddsAvailabilityObservation(
+            dedupe_key="unk-fd-early",
+            provider=PROVIDER_THE_ODDS_API,
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-rec",
+            bookmaker_key="fanduel",
+            bookmaker_title="FanDuel",
+            provider_market_key="h2h",
+            market_family=MarketFamily.MONEYLINE.value,
+            availability="unknown",
+            observed_at=t_unknown,
+            commence_time=start,
+            snapshot_at=None,
+        )
+    )
+    session.add(
+        OddsAvailabilityObservation(
+            dedupe_key="unk-dk-still",
+            provider=PROVIDER_THE_ODDS_API,
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-rec",
+            bookmaker_key="draftkings",
+            bookmaker_title="DraftKings",
+            provider_market_key="h2h",
+            market_family=MarketFamily.MONEYLINE.value,
+            availability="unknown",
+            observed_at=t_unknown,
+            commence_time=start,
+            snapshot_at=None,
+        )
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-rec",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=t_recover,
+        source_updated_at=t_recover,
+        price_decimal=1.9,
+        raw_ref="fd-recovered",
+        bookmaker_key="fanduel",
+    )
+    # DK still missing a post-unknown quote.
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-rec",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+
+    # Before recovery quote: FanDuel unknown still blocks (no quote yet at that PIT).
+    mid = t_unknown + timedelta(minutes=30)
+    assert (
+        resolve_visible_quotes_value_eligibility(
+            session,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-rec",
+            bout_id=decision.bout_id,
+            match_status=MATCH_STATUS_MATCHED,
+            as_of=mid,
+            stale_after_minutes=360,
+        )
+        == []
+    )
+
+    rows = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-rec",
+        bout_id=decision.bout_id,
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    assert len(rows) == 1
+    assert rows[0].eligible is True
+    assert rows[0].availability_note == AvailabilityNote.RECOVERED_BY_NEWER_QUOTE
+    summary = summarize_quote_eligibility(rows)
+    assert summary["availability_recovered"] == 1
+    assert summary["availability_unknown_blocking"] == 0
+
+    # Later UNKNOWN after recovery re-blocks that book.
+    session.add(
+        OddsAvailabilityObservation(
+            dedupe_key="unk-fd-again",
+            provider=PROVIDER_THE_ODDS_API,
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-rec",
+            bookmaker_key="fanduel",
+            bookmaker_title="FanDuel",
+            provider_market_key="h2h",
+            market_family=MarketFamily.MONEYLINE.value,
+            availability="unknown",
+            observed_at=OBSERVED - timedelta(minutes=5),
+            commence_time=start,
+            snapshot_at=None,
+        )
+    )
+    session.commit()
+    blocked = resolve_quote_value_eligibility(
+        session,
+        quote=session.scalars(
+            select(OddsQuote).where(OddsQuote.raw_ref == "fd-recovered")
+        ).one(),
+        bout_id=decision.bout_id,
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    assert blocked.eligible is False
+    assert blocked.reason == QuoteBlockReason.MARKET_UNKNOWN
+    assert blocked.availability_note == AvailabilityNote.UNKNOWN_BLOCKING
+
+
+def test_scoped_lifecycle_quote_id_must_match_provider_and_scope(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-qid",
+        event_id="evt-qid",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-qid",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED,
+        source_updated_at=OBSERVED,
+        price_decimal=1.9,
+        raw_ref="qid-fd",
+        bookmaker_key="fanduel",
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-qid-other",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED,
+        source_updated_at=OBSERVED,
+        price_decimal=1.91,
+        raw_ref="qid-other",
+        bookmaker_key="draftkings",
+    )
+    session.commit()
+    quote = session.scalars(select(OddsQuote).where(OddsQuote.raw_ref == "qid-fd")).one()
+
+    with pytest.raises(ValueError, match="not found"):
+        apply_bout_lifecycle(
+            session,
+            bout_id="bout-qid",
+            lifecycle=OddsBoutLifecycleState.LOCKED,
+            evidence_kind="provider_lock_signal",
+            observed_at=OBSERVED,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-qid",
+            quote_id=999999,
+        )
+
+    with pytest.raises(ValueError, match="external_event_id mismatch"):
+        apply_bout_lifecycle(
+            session,
+            bout_id="bout-qid",
+            lifecycle=OddsBoutLifecycleState.LOCKED,
+            evidence_kind="provider_lock_signal",
+            observed_at=OBSERVED,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-qid",
+            quote_id=session.scalars(
+                select(OddsQuote).where(OddsQuote.raw_ref == "qid-other")
+            )
+            .one()
+            .id,
+        )
+
+    with pytest.raises(ValueError, match="bookmaker_key mismatches"):
+        apply_bout_lifecycle(
+            session,
+            bout_id="bout-qid",
+            lifecycle=OddsBoutLifecycleState.LOCKED,
+            evidence_kind="provider_lock_signal",
+            observed_at=OBSERVED,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-qid",
+            quote_id=quote.id,
+            bookmaker_key="draftkings",
+            market_family=MarketFamily.MONEYLINE.value,
+        )
+
+    locked = apply_bout_lifecycle(
+        session,
+        bout_id="bout-qid",
+        lifecycle=OddsBoutLifecycleState.LOCKED,
+        evidence_kind="provider_lock_signal",
+        observed_at=OBSERVED,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-qid",
+        quote_id=quote.id,
+    )
+    session.commit()
+    assert locked is not None
+    assert locked.quote_id == quote.id
+    assert locked.bookmaker_key == "fanduel"
+    assert locked.market_family == MarketFamily.MONEYLINE.value
