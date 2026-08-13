@@ -71,6 +71,9 @@ GRADE_LEDGER_TABLES = {
     "prediction_grades",
     "recommendation_settlements",
 }
+PIPELINE_JOB_TABLES = {
+    "pipeline_job_runs",
+}
 
 
 def _alembic_config(db_path: Path) -> Config:
@@ -108,6 +111,7 @@ def test_clean_upgrade_creates_baseline_and_canonical_tables(tmp_path: Path) -> 
     assert HISTORY_TABLES.issubset(names)
     assert ODDS_TABLES.issubset(names)
     assert GRADE_LEDGER_TABLES.issubset(names)
+    assert PIPELINE_JOB_TABLES.issubset(names)
 
 
 def _seed_legacy_schema(db_path: Path) -> None:

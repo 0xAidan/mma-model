@@ -64,6 +64,10 @@ from mma_model.odds.schedule import (
     compute_due_work_for_events,
 )
 from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
+from mma_model.jobs.due import load_orchestrator_cadence
+from mma_model.jobs.locking import FileFlockLock
+from mma_model.jobs.orchestrator import TickOverlapError, run_jobs_tick
+from mma_model.jobs.types import EventContext
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
@@ -496,6 +500,33 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="Allow zero-cost events bootstrap when remaining is missing/stale "
         "(use --no-quota-bootstrap to fail closed)",
+    )
+    p_jobs_tick = jobs_sub.add_parser(
+        "tick",
+        help="Event-relative scheduler tick (DWCS-401 discover-to-grade)",
+    )
+    p_jobs_tick.add_argument(
+        "--now",
+        required=True,
+        help="Explicit timezone-aware UTC instant for due calculation",
+    )
+    p_jobs_tick.add_argument("--series", default="dwcs")
+    p_jobs_tick.add_argument("--database-url", default=None)
+    p_jobs_tick.add_argument("--lock-path", type=Path, default=None)
+    p_jobs_tick.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print due plan JSON; no DB writes and no handler side effects",
+    )
+    p_jobs_tick.add_argument(
+        "--event-id",
+        default=None,
+        help="Optional single event id for due calculation (tests/fixtures)",
+    )
+    p_jobs_tick.add_argument(
+        "--event-start",
+        default=None,
+        help="Optional ISO UTC event start paired with --event-id",
     )
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
@@ -1682,6 +1713,154 @@ def main(argv: list[str] | None = None) -> int:
             engine.dispose()
             print(json.dumps(result.as_dict(), indent=2))
             # Zero upcoming is an explicit report, not a silent success with frozen history.
+            return 0 if result.failures == 0 else 2
+        if args.jobs_cmd == "tick":
+            now_raw = str(args.now).strip()
+            if now_raw.endswith("Z"):
+                now_raw = now_raw[:-1] + "+00:00"
+            try:
+                now_dt = datetime.fromisoformat(now_raw)
+            except ValueError:
+                print("--now must be an ISO-8601 timezone-aware UTC datetime")
+                return 2
+            if now_dt.tzinfo is None:
+                print("--now must be timezone-aware UTC")
+                return 2
+
+            events: list[EventContext] = []
+            event_id = getattr(args, "event_id", None)
+            event_start_raw = getattr(args, "event_start", None)
+            if event_id and event_start_raw:
+                start_raw = str(event_start_raw).strip()
+                if start_raw.endswith("Z"):
+                    start_raw = start_raw[:-1] + "+00:00"
+                start_dt = datetime.fromisoformat(start_raw)
+                if start_dt.tzinfo is None:
+                    print("--event-start must be timezone-aware UTC")
+                    return 2
+                events.append(
+                    EventContext(
+                        event_id=str(event_id),
+                        event_start=start_dt,
+                        series=str(args.series),
+                    )
+                )
+            elif event_id or event_start_raw:
+                print("--event-id and --event-start must be provided together")
+                return 2
+
+            dry_run = bool(getattr(args, "dry_run", False))
+            database_url = getattr(args, "database_url", None)
+            default_url = get_settings().mma_database_url
+
+            if dry_run:
+                # Dry-run may omit DB; still refuse accidental live URL if passed.
+                if database_url is not None:
+                    db_url = str(database_url).strip()
+                    if not db_url:
+                        print("refusing empty --database-url")
+                        return 2
+                    if (
+                        db_url in LIVE_DB_URLS
+                        or db_url == default_url
+                        or db_url.endswith("/data/mma.db")
+                        or db_url.endswith("data/mma.db")
+                    ):
+                        print(
+                            "refusing live data/mma.db "
+                            "--database-url for jobs tick"
+                        )
+                        return 2
+                result = run_jobs_tick(
+                    None,
+                    as_of=now_dt,
+                    events=events,
+                    dry_run=True,
+                    cadence=load_orchestrator_cadence(),
+                    acquire_lock=False,
+                )
+                print(json.dumps(result.dry_run_plan(), sort_keys=True, indent=2))
+                return 0
+
+            if database_url is None:
+                print("jobs tick requires --database-url (or --dry-run)")
+                return 2
+            db_url = str(database_url).strip()
+            if not db_url:
+                print("refusing empty --database-url")
+                return 2
+            if (
+                db_url in LIVE_DB_URLS
+                or db_url == default_url
+                or db_url.endswith("/data/mma.db")
+                or db_url.endswith("data/mma.db")
+            ):
+                print("refusing live data/mma.db --database-url for jobs tick")
+                return 2
+
+            engine = create_engine(db_url, future=True)
+            _attach_sqlite_listeners(engine)
+            root = get_settings().project_root
+            cfg = Config(str(root / "alembic.ini"))
+            cfg.set_main_option("script_location", str(root / "migrations"))
+            cfg.set_main_option("sqlalchemy.url", db_url)
+            command.upgrade(cfg, "head")
+            SessionLocal = sessionmaker(bind=engine, future=True)
+            lock_path = getattr(args, "lock_path", None)
+            try:
+                with SessionLocal() as session:
+                    # When no explicit event is passed, load upcoming from DB.
+                    if not events:
+                        raw_events = load_upcoming_dwcs_events_from_db(
+                            session, as_of=now_dt, series=args.series
+                        )
+                        for item in raw_events:
+                            start_val = item.get("event_start") or item.get("start_time")
+                            if start_val is None:
+                                continue
+                            if isinstance(start_val, datetime):
+                                start_dt = start_val
+                            else:
+                                text = str(start_val).strip()
+                                if text.endswith("Z"):
+                                    text = text[:-1] + "+00:00"
+                                start_dt = datetime.fromisoformat(text)
+                            if start_dt.tzinfo is None:
+                                continue
+                            events.append(
+                                EventContext(
+                                    event_id=str(
+                                        item.get("event_id") or item.get("id") or ""
+                                    ),
+                                    event_start=start_dt,
+                                    series=str(args.series),
+                                    bout_ids=tuple(
+                                        str(b)
+                                        for b in (item.get("bout_ids") or ())
+                                    ),
+                                )
+                            )
+                    lock = (
+                        FileFlockLock(Path(lock_path))
+                        if lock_path is not None
+                        else FileFlockLock(Path("/tmp/mma-jobs-tick.lock"))
+                    )
+                    try:
+                        result = run_jobs_tick(
+                            session,
+                            as_of=now_dt,
+                            events=events,
+                            dry_run=False,
+                            lock=lock,
+                            cadence=load_orchestrator_cadence(),
+                        )
+                    except TickOverlapError as exc:
+                        print(f"jobs tick overlap: {exc}")
+                        return 2
+                    session.commit()
+            finally:
+                engine.dispose()
+            print(json.dumps(result.as_dict(), sort_keys=True, indent=2))
             return 0 if result.failures == 0 else 2
         print(f"unsupported jobs command: {args.jobs_cmd}")
         return 1

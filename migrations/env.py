@@ -17,6 +17,7 @@ import mma_model.db.tables.history  # noqa: F401
 import mma_model.db.tables.identity  # noqa: F401
 import mma_model.db.tables.odds  # noqa: F401
 import mma_model.db.tables.odds_jobs  # noqa: F401
+import mma_model.db.tables.pipeline_jobs  # noqa: F401
 import mma_model.db.tables.provenance  # noqa: F401
 import mma_model.db.tables.recommendations  # noqa: F401
 

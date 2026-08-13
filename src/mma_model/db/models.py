@@ -51,6 +51,8 @@ from mma_model.db.tables.odds import (
     OddsQuotaObservation,
     OddsQuote,
 )
+from mma_model.db.tables.odds_jobs import OddsSnapshotJobRun
+from mma_model.db.tables.pipeline_jobs import PipelineJobRun
 from mma_model.db.tables.recommendations import (
     ModelRun,
     ObservedPrice,
@@ -221,7 +223,9 @@ __all__ = [
     "OddsQuotaObservation",
     "OddsQuote",
     "OddsSnapshot",
+    "OddsSnapshotJobRun",
     "OfficialPublication",
+    "PipelineJobRun",
     "Prediction",
     "PredictionGrade",
     "PriceTarget",
