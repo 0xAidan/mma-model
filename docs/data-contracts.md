@@ -240,6 +240,7 @@ Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 | **Client** | `mma_model.odds.the_odds_api.TheOddsApiClient` |
 | **Normalize** | `mma_model.odds.normalize.normalize_odds_payload` |
 | **Storage** | `odds_events`, `odds_quotes` (append-only + dedupe), `odds_quota_observations`, `odds_availability_observations` (append-only unknown markets) |
+| **Quote dedupe key** | SHA-256 over provider/event/book/region/market/outcome/line/price/`source_updated_at`/commence/`snapshot_at` **plus** sanitized `raw_ref` and order-independent participant names. Same-external-ID opponent/label changes must not collide with prior rows when price/source clocks are otherwise equal; identical same-version polls still dedupe. Key-material change is forward-compatible (new rows get new keys; old rows keep stored keys). |
 | **Migrations** | `0011_odds_quotes`, `0012_odds_availability` |
 | **CLI** | `mma-model odds` (legacy live fetch); `mma-model odds snapshot …`; `mma-model odds audit …` |
 | **Markets** | Supported provider keys: `h2h` → `moneyline`, `totals` → `totals` with DWCS-200 catalog line points `(1.5, 2.5)`. Unsupported props/points are skipped, never fabricated. |
@@ -276,11 +277,11 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 | Field | Value |
 |-------|--------|
 | **Contract** | Packaged `mma_model/odds/matching_v1.yaml` (`config/odds/matching_v1.yaml` symlink); pinned content hash + frozen load |
-| **Matcher** | Stored provider IDs are a strong candidate only after active-DWCS / participant / time-window verification; then exact participant pair within `match_window_minutes` (default 30). `stale_after_minutes` uses latest quote timestamps on the active alias version |
+| **Matcher** | Stored provider IDs are a strong candidate only after active-DWCS / participant / time-window verification; then exact participant pair within `match_window_minutes` (default 30). Staleness uses each visible quote’s authoritative freshness: `source_updated_at` when present, else `observed_at`; across quotes take the latest. Freshly fetched rows with stale provider source clocks remain stale. |
 | **Ordering** | Provider home/away ignored; both canonical fighters required |
-| **Ambiguity** | Dedicated `odds_bout_match_reviews` queue (not fighter identity); approve activates alias after version CAS; reject stays blocked; no fighter mapping writes |
+| **Ambiguity** | Dedicated `odds_bout_match_reviews` queue (not fighter identity); approve **claims** the review via version CAS first (savepoint), then activates/attaches the owned alias; CAS loss rolls back claim+alias with zero side effects; reject stays blocked; no fighter mapping writes |
 | **Aliases / source IDs** | Immutable `BoutSourceId` + versioned `odds_provider_event_aliases`; exactly one active alias per provider/external ID (partial unique index). Same-ID replacements supersede history and do not expose prior quotes under the new active alias |
-| **Lifecycle** | Latest explicit lifecycle wins; bare match→ACTIVE cannot override locked/cancelled/replaced/review_blocked without explicit transition evidence |
+| **Lifecycle** | Latest explicit lifecycle wins. Terminal→ACTIVE matrix: `provider_unlock_signal` exits **locked** only; `odds_bout_match_review_approved` / `operator_lifecycle_clear` exit **review_blocked**; **cancelled**/**replaced** require `canonical_bout_correction_reactivate` (else remain terminal). No boolean terminal bypass. Fresh quotes deterministically clear nonterminal **stale** / **missing_unknown** with persisted `fresh_quote_clears_observational_block` evidence while preserving terminals. |
 | **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations`, `odds_bout_match_reviews`; migration `0014_odds_matching` (final unshipped schema) |
 | **Next DWCS** | `--next-dwcs --as-of <UTC>` selects nearest upcoming DWCS card (fight-night cluster), scopes provider events, fail-closed on zero bouts/events |
 | **CLI** | `mma-model odds reconcile --next-dwcs --strict [--as-of …]`; golden seeding only with `--golden-card` + `--offline-fixtures` + disposable `--database-url` |

@@ -125,11 +125,22 @@ def quote_dedupe_key(
     source_updated_at: datetime | None,
     commence_time: datetime,
     snapshot_at: datetime | None,
+    raw_ref: str,
+    home_team: str,
+    away_team: str,
 ) -> str:
-    """Stable identity for append-only quote deduplication."""
+    """Stable identity for append-only quote deduplication.
+
+    Includes sanitized ``raw_ref`` plus participant names so same-external-ID
+    replacement quotes (changed opponents / labels) cannot collide with prior
+    rows when book/market/outcome-key/price/commence/source are otherwise equal.
+    Identical same-version polls that share the same raw fragment still dedupe.
+    """
     point = "" if line_point is None else f"{float(line_point):.4f}"
     src = "" if source_updated_at is None else source_updated_at.isoformat()
     snap = "" if snapshot_at is None else snapshot_at.isoformat()
+    # Order-independent participant identity (home/away may flip across polls).
+    participants = "|".join(sorted((home_team.strip(), away_team.strip())))
     material = "|".join(
         [
             provider,
@@ -143,6 +154,8 @@ def quote_dedupe_key(
             src,
             commence_time.isoformat(),
             snap,
+            (raw_ref or "").strip(),
+            participants,
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -384,6 +397,9 @@ def normalize_odds_payload(
                         source_updated_at=source_updated,
                         commence_time=commence,
                         snapshot_at=snapshot_utc,
+                        raw_ref=raw_ref,
+                        home_team=home_team,
+                        away_team=away_team,
                     )
                     quotes.append(
                         NormalizedQuote(

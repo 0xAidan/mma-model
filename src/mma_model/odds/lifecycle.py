@@ -37,14 +37,20 @@ TERMINAL_LIFECYCLES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Explicit evidence kinds allowed to leave a terminal lifecycle.
-_TERMINAL_EXIT_EVIDENCE: Final[frozenset[str]] = frozenset(
-    {
-        "explicit_lifecycle_reactivation",
-        "operator_lifecycle_clear",
-        "provider_unlock_signal",
-    }
-)
+# Explicit transition matrix: terminal → ACTIVE only via listed evidence.
+# provider_unlock exits LOCKED only; review approval exits REVIEW_BLOCKED;
+# cancelled/replaced require canonical correction (else remain terminal).
+_TERMINAL_TO_ACTIVE_EVIDENCE: Final[dict[str, frozenset[str]]] = {
+    "locked": frozenset({"provider_unlock_signal"}),
+    "review_blocked": frozenset(
+        {
+            "odds_bout_match_review_approved",
+            "operator_lifecycle_clear",
+        }
+    ),
+    "cancelled": frozenset({"canonical_bout_correction_reactivate"}),
+    "replaced": frozenset({"canonical_bout_correction_reactivate"}),
+}
 
 # Fail-closed allowlists: unknown evidence kinds are rejected.
 LIFECYCLE_EVIDENCE_KINDS: Final[dict[str, frozenset[str]]] = {
@@ -54,9 +60,10 @@ LIFECYCLE_EVIDENCE_KINDS: Final[dict[str, frozenset[str]]] = {
             "match_participant_pair",
             "match_manual_review",
             "odds_bout_match_review_approved",
-            "explicit_lifecycle_reactivation",
-            "operator_lifecycle_clear",
+            "fresh_quote_clears_observational_block",
             "provider_unlock_signal",
+            "operator_lifecycle_clear",
+            "canonical_bout_correction_reactivate",
         }
     ),
     "stale": frozenset({"quote_age_exceeds_stale_after_minutes"}),
@@ -91,6 +98,14 @@ _CANONICAL_IDENTITY_EVIDENCE: Final[frozenset[str]] = frozenset(
     {
         "canonical_bout_cancelled",
         "canonical_bout_replaced",
+        "canonical_bout_correction_reactivate",
+    }
+)
+
+_OBSERVATIONAL_CLEARABLE: Final[frozenset[str]] = frozenset(
+    {
+        "stale",
+        "missing_unknown",
     }
 )
 
@@ -294,6 +309,29 @@ def quotes_visible_under_active_alias(
     )
 
 
+def quote_authoritative_freshness(
+    row: OddsQuote,
+    *,
+    as_of: datetime,
+) -> datetime | None:
+    """Authoritative freshness clock for one quote at as_of.
+
+    Prefer ``source_updated_at`` when present (book/provider line age). Fall back
+    to ``observed_at`` only when source update is absent. Future source clocks
+    relative to as_of are rejected (None).
+    """
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    observed = _as_utc_sqlite(row.observed_at)
+    if observed > cutoff:
+        return None
+    if row.source_updated_at is not None:
+        source = _as_utc_sqlite(row.source_updated_at)
+        if source > cutoff:
+            return None
+        return source
+    return observed
+
+
 def latest_quote_timestamp(
     session: Session,
     *,
@@ -301,7 +339,7 @@ def latest_quote_timestamp(
     external_event_id: str,
     as_of: datetime,
 ) -> datetime | None:
-    """Latest observed/source timestamp for quotes visible at as_of."""
+    """Latest authoritative freshness among quotes visible at as_of."""
     cutoff = _require_aware_utc(as_of, field="as_of")
     rows = quotes_visible_under_alias_at(
         session,
@@ -311,12 +349,9 @@ def latest_quote_timestamp(
     )
     stamps: list[datetime] = []
     for row in rows:
-        observed = _as_utc_sqlite(row.observed_at)
-        stamps.append(observed)
-        if row.source_updated_at is not None:
-            source = _as_utc_sqlite(row.source_updated_at)
-            if source <= cutoff:
-                stamps.append(source)
+        freshness = quote_authoritative_freshness(row, as_of=cutoff)
+        if freshness is not None:
+            stamps.append(freshness)
     if not stamps:
         return None
     return max(stamps)
@@ -381,13 +416,19 @@ def resolve_match_lifecycle(
     ):
         return OddsBoutLifecycleState.STALE, False
 
-    if latest is not None and latest.lifecycle == OddsBoutLifecycleState.STALE.value:
-        return OddsBoutLifecycleState.ACTIVE, True
-
-    if latest is not None and latest.lifecycle in VALUE_BLOCKING_LIFECYCLES:
-        return OddsBoutLifecycleState(latest.lifecycle), False
-
+    # Fresh quotes clear nonterminal observational blocks (STALE / MISSING).
     return OddsBoutLifecycleState.ACTIVE, True
+
+
+def clears_observational_block(
+    *,
+    previous: OddsBoutLifecycleObservation | None,
+    resolved: OddsBoutLifecycleState,
+) -> bool:
+    """True when a fresh-quote ACTIVE should persist clear-of-STALE/MISSING evidence."""
+    if resolved is not OddsBoutLifecycleState.ACTIVE or previous is None:
+        return False
+    return previous.lifecycle in _OBSERVATIONAL_CLEARABLE
 
 
 def _lifecycle_dedupe_key(
@@ -439,6 +480,15 @@ def _validate_lifecycle_evidence(
         pass
 
 
+def _terminal_active_transition_allowed(
+    *,
+    from_lifecycle: str,
+    evidence_kind: str,
+) -> bool:
+    allowed = _TERMINAL_TO_ACTIVE_EVIDENCE.get(from_lifecycle, frozenset())
+    return evidence_kind in allowed
+
+
 def apply_bout_lifecycle(
     session: Session,
     *,
@@ -450,12 +500,12 @@ def apply_bout_lifecycle(
     external_event_id: str | None = None,
     detail: str | None = None,
     price_decimal: float | None = None,
-    allow_terminal_override: bool = False,
 ) -> OddsBoutLifecycleObservation | None:
     """Append an explicit lifecycle observation; never forward-fill prices.
 
-    Returns ``None`` when an ACTIVE transition is refused because a terminal
-    lifecycle is already in force and ``allow_terminal_override`` is false.
+    Returns ``None`` when an ACTIVE transition is refused by the terminal
+    transition matrix (provider unlock exits LOCKED only; cancelled/replaced
+    require canonical correction evidence; review approval exits REVIEW_BLOCKED).
     """
     _validate_lifecycle_evidence(
         lifecycle=lifecycle,
@@ -482,8 +532,10 @@ def apply_bout_lifecycle(
         lifecycle is OddsBoutLifecycleState.ACTIVE
         and latest is not None
         and latest.lifecycle in TERMINAL_LIFECYCLES
-        and not allow_terminal_override
-        and kind not in _TERMINAL_EXIT_EVIDENCE
+        and not _terminal_active_transition_allowed(
+            from_lifecycle=latest.lifecycle,
+            evidence_kind=kind,
+        )
     ):
         return None
 

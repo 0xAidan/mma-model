@@ -173,7 +173,12 @@ def approve_bout_match_review(
     expected_version: int,
     observed_at: datetime | None = None,
 ) -> OddsBoutMatchReview:
-    """Approve a pending review and activate the selected bout alias."""
+    """Approve a pending review and activate the selected bout alias.
+
+    Claims the review transition via optimistic CAS first (inside a savepoint),
+    then activates and attaches the owned alias. CAS loss or later failure rolls
+    back claim/alias/lifecycle together — no orphan side effects.
+    """
     from mma_model.odds.reconcile import activate_provider_alias
 
     actor_text = (actor or "").strip()
@@ -193,6 +198,11 @@ def approve_bout_match_review(
         raise OddsBoutMatchReviewError(
             f"stale review version: expected {expected_version}, got {version}"
         )
+
+    # Refresh evidence/candidates after the committed-version check.
+    session.expire(review)
+    session.refresh(review)
+
     candidates = _parse_candidates(review.candidate_bout_ids_json)
     if not candidates:
         raise OddsBoutMatchReviewError(
@@ -215,52 +225,74 @@ def approve_bout_match_review(
     if not ok:
         raise OddsBoutMatchReviewError(f"approval revalidation failed: {reason}")
 
-    alias = activate_provider_alias(
-        session,
-        provider=review.provider,
-        external_event_id=review.external_event_id,
-        bout_id=bout_id,
-        match_rule=MATCH_RULE_MANUAL_REVIEW,
-        observed_at=stamp,
-        evidence={
-            "review_id": review_id,
-            "approved_by": actor_text,
-            "reason": review.reason,
-        },
-        write_immutable_source_id=True,
-    )
-    result = session.execute(
-        update(OddsBoutMatchReview)
-        .where(
-            OddsBoutMatchReview.id == review_id,
-            OddsBoutMatchReview.status == "pending",
-            OddsBoutMatchReview.version == expected_version,
-        )
-        .values(
-            status="approved",
-            version=expected_version + 1,
-            decision_bout_id=bout_id,
-            activated_alias_id=alias.id,
-            activated_alias_version=alias.alias_version,
-            decided_by=actor_text,
-            decided_at=stamp,
-            updated_at=stamp,
-        )
-    )
-    if result.rowcount != 1:
+    alias: OddsProviderEventAlias | None = None
+    try:
+        with session.begin_nested():
+            claim = session.execute(
+                update(OddsBoutMatchReview)
+                .where(
+                    OddsBoutMatchReview.id == review_id,
+                    OddsBoutMatchReview.status == "pending",
+                    OddsBoutMatchReview.version == expected_version,
+                )
+                .values(
+                    status="approved",
+                    version=expected_version + 1,
+                    decision_bout_id=bout_id,
+                    decided_by=actor_text,
+                    decided_at=stamp,
+                    updated_at=stamp,
+                )
+            )
+            if claim.rowcount != 1:
+                raise OddsBoutMatchReviewError("concurrent review update rejected")
+
+            alias = activate_provider_alias(
+                session,
+                provider=review.provider,
+                external_event_id=review.external_event_id,
+                bout_id=bout_id,
+                match_rule=MATCH_RULE_MANUAL_REVIEW,
+                observed_at=stamp,
+                evidence={
+                    "review_id": review_id,
+                    "approved_by": actor_text,
+                    "reason": review.reason,
+                },
+                write_immutable_source_id=True,
+            )
+            attach = session.execute(
+                update(OddsBoutMatchReview)
+                .where(
+                    OddsBoutMatchReview.id == review_id,
+                    OddsBoutMatchReview.status == "approved",
+                    OddsBoutMatchReview.version == expected_version + 1,
+                )
+                .values(
+                    activated_alias_id=alias.id,
+                    activated_alias_version=alias.alias_version,
+                    updated_at=stamp,
+                )
+            )
+            if attach.rowcount != 1:
+                raise OddsBoutMatchReviewError("concurrent review update rejected")
+
+            apply_bout_lifecycle(
+                session,
+                bout_id=bout_id,
+                lifecycle=OddsBoutLifecycleState.ACTIVE,
+                evidence_kind="odds_bout_match_review_approved",
+                observed_at=stamp,
+                provider=review.provider,
+                external_event_id=review.external_event_id,
+                detail=f"review_id={review_id}",
+            )
+    except OddsBoutMatchReviewError:
+        raise
+
+    if alias is None:
         raise OddsBoutMatchReviewError("concurrent review update rejected")
 
-    apply_bout_lifecycle(
-        session,
-        bout_id=bout_id,
-        lifecycle=OddsBoutLifecycleState.ACTIVE,
-        evidence_kind="odds_bout_match_review_approved",
-        observed_at=stamp,
-        provider=review.provider,
-        external_event_id=review.external_event_id,
-        detail=f"review_id={review_id}",
-        allow_terminal_override=False,
-    )
     session.refresh(review)
     set_committed_value(review, "status", "approved")
     set_committed_value(review, "version", expected_version + 1)

@@ -23,6 +23,8 @@ from mma_model.odds.lifecycle import (
     OddsBoutLifecycleState,
     apply_bout_lifecycle,
     classify_quote_value_eligibility,
+    clears_observational_block,
+    latest_bout_lifecycle,
 )
 from mma_model.odds.match_review import enqueue_bout_match_review
 from mma_model.odds.matching import (
@@ -348,16 +350,28 @@ def persist_match_decision(
                 "candidate_bout_ids": list(decision.candidate_bout_ids),
             },
         )
+        previous = latest_bout_lifecycle(
+            session,
+            bout_id=decision.bout_id,
+            as_of=stamp,
+            provider=decision.provider,
+            external_event_id=decision.external_event_id,
+        )
+        evidence_kind = f"match_{decision.match_rule}"
+        if clears_observational_block(
+            previous=previous,
+            resolved=OddsBoutLifecycleState.ACTIVE,
+        ):
+            evidence_kind = "fresh_quote_clears_observational_block"
         apply_bout_lifecycle(
             session,
             bout_id=decision.bout_id,
             lifecycle=OddsBoutLifecycleState.ACTIVE,
-            evidence_kind=f"match_{decision.match_rule}",
+            evidence_kind=evidence_kind,
             observed_at=stamp,
             provider=decision.provider,
             external_event_id=decision.external_event_id,
             detail=decision.reason,
-            allow_terminal_override=False,
         )
     elif (
         decision.status == MATCH_STATUS_MATCHED
