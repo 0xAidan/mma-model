@@ -25,11 +25,14 @@ from mma_model.db.tables.recommendations import (
 )
 from mma_model.domain.markets import MarketFamily, OutcomeKey, RecommendationState
 from mma_model.grade.service import (
+    GradeLedgerValidationError,
     StateEventType,
     append_state_event,
     audit_series,
     grade_predictions,
+    publish_model_run,
     publish_official_t60,
+    publish_predictions,
     quote_content_hash,
     reconstruct_model_identity,
     reconstruct_quote,
@@ -44,6 +47,11 @@ from mma_model.recommend.policy import QuoteSourceKind
 from tests.grade.helpers import (
     FIXED_CUTOFF,
     FIXED_PUBLISHED,
+    HASH_A,
+    HASH_B,
+    HASH_C,
+    HASH_D,
+    HASH_E,
     REPO_ROOT,
     alembic_config,
     decisive_a_ko,
@@ -71,12 +79,13 @@ def test_official_t60_republish_idempotent_and_line_change_appends(tmp_path: Pat
         assert target_before is not None
         fair_before = target_before.fair_decimal
 
+        # Same-payload retry is a true no-op.
         second, created_again = publish_official_t60(
             session,
             event_id="evt-1",
             bout_id="bout-1",
             selection_id="evt-1:bout-1:moneyline:fighter_a",
-            state=RecommendationState.PRICE_TARGET,  # would-be overwrite ignored
+            state=RecommendationState.CONFIRMED_VALUE,
             cutoff_at=FIXED_CUTOFF,
             published_at=FIXED_PUBLISHED,
             market_family=MarketFamily.MONEYLINE,
@@ -84,6 +93,8 @@ def test_official_t60_republish_idempotent_and_line_change_appends(tmp_path: Pat
             prediction_id=prediction.id,
             thresholds=sample_thresholds(),
             model_run_id=run.id,
+            policy_hash=HASH_A,
+            config_hash=HASH_D,
             performance_lane="paper",
         )
         assert created_again is False
@@ -93,6 +104,30 @@ def test_official_t60_republish_idempotent_and_line_change_appends(tmp_path: Pat
         target_after = session.get(PriceTarget, thresholds_id)
         assert target_after is not None
         assert target_after.fair_decimal == fair_before
+
+        # Conflicting payload under the same key fails closed.
+        with pytest.raises(GradeLedgerValidationError, match="idempotency key conflict"):
+            publish_official_t60(
+                session,
+                event_id="evt-1",
+                bout_id="bout-1",
+                selection_id="evt-1:bout-1:moneyline:fighter_a",
+                state=RecommendationState.PRICE_TARGET,
+                cutoff_at=FIXED_CUTOFF,
+                published_at=FIXED_PUBLISHED,
+                market_family=MarketFamily.MONEYLINE,
+                outcome_key=OutcomeKey.FIGHTER_A,
+                prediction_id=prediction.id,
+                thresholds=sample_thresholds(),
+                model_run_id=run.id,
+                policy_hash=HASH_A,
+                config_hash=HASH_D,
+                performance_lane="paper",
+            )
+        assert session.get(OfficialPublication, first.id) is not None
+        assert session.get(OfficialPublication, first.id).state == (
+            RecommendationState.CONFIRMED_VALUE.value
+        )
 
         event, event_created = append_state_event(
             session,
@@ -112,6 +147,109 @@ def test_official_t60_republish_idempotent_and_line_change_appends(tmp_path: Pat
         assert refreshed is not None
         assert refreshed.state == RecommendationState.CONFIRMED_VALUE.value
         assert event.official_publication_id == first.id
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_model_run_and_prediction_key_conflicts_fail_closed(tmp_path: Path) -> None:
+    session, engine = open_test_session(tmp_path)
+    try:
+        run, _created = publish_model_run(
+            session,
+            idempotency_key="run:conflict",
+            spec_id="ridge_v1",
+            artifact_digest=HASH_A,
+            model_hash=HASH_B,
+            feature_hash=HASH_C,
+            config_hash=HASH_D,
+            data_hash=HASH_E,
+            created_at=FIXED_PUBLISHED,
+        )
+        again, created = publish_model_run(
+            session,
+            idempotency_key="run:conflict",
+            spec_id="ridge_v1",
+            artifact_digest=HASH_A,
+            model_hash=HASH_B,
+            feature_hash=HASH_C,
+            config_hash=HASH_D,
+            data_hash=HASH_E,
+            created_at=FIXED_PUBLISHED,
+        )
+        assert created is False
+        assert again.id == run.id
+        with pytest.raises(GradeLedgerValidationError, match="model_run"):
+            publish_model_run(
+                session,
+                idempotency_key="run:conflict",
+                spec_id="ridge_v2",
+                artifact_digest=HASH_A,
+                model_hash=HASH_B,
+                feature_hash=HASH_C,
+                config_hash=HASH_D,
+                data_hash=HASH_E,
+            )
+
+        preds = publish_predictions(
+            session,
+            model_run=run,
+            rows=[
+                {
+                    "idempotency_key": "pred:conflict",
+                    "event_id": "evt-1",
+                    "bout_id": "bout-1",
+                    "selection_id": "sel-1",
+                    "market_family": MarketFamily.MONEYLINE,
+                    "outcome_key": OutcomeKey.FIGHTER_A,
+                    "p50": 0.55,
+                    "p25": 0.48,
+                    "cutoff_at": FIXED_CUTOFF,
+                    "published_at": FIXED_PUBLISHED,
+                }
+            ],
+        )
+        pred, created_pred = preds[0]
+        assert created_pred is True
+        retry = publish_predictions(
+            session,
+            model_run=run,
+            rows=[
+                {
+                    "idempotency_key": "pred:conflict",
+                    "event_id": "evt-1",
+                    "bout_id": "bout-1",
+                    "selection_id": "sel-1",
+                    "market_family": MarketFamily.MONEYLINE,
+                    "outcome_key": OutcomeKey.FIGHTER_A,
+                    "p50": 0.55,
+                    "p25": 0.48,
+                    "cutoff_at": FIXED_CUTOFF,
+                    "published_at": FIXED_PUBLISHED,
+                }
+            ],
+        )
+        assert retry[0][1] is False
+        assert retry[0][0].id == pred.id
+        with pytest.raises(GradeLedgerValidationError, match="prediction"):
+            publish_predictions(
+                session,
+                model_run=run,
+                rows=[
+                    {
+                        "idempotency_key": "pred:conflict",
+                        "event_id": "evt-1",
+                        "bout_id": "bout-1",
+                        "selection_id": "sel-1",
+                        "market_family": MarketFamily.MONEYLINE,
+                        "outcome_key": OutcomeKey.FIGHTER_A,
+                        "p50": 0.70,
+                        "p25": 0.48,
+                        "cutoff_at": FIXED_CUTOFF,
+                        "published_at": FIXED_PUBLISHED,
+                    }
+                ],
+            )
     finally:
         session.close()
         engine.dispose()
@@ -200,6 +338,55 @@ def test_price_target_only_grades_without_pnl_or_manufactured_price(tmp_path: Pa
         assert (
             session.scalar(select(func.count()).select_from(RecommendationSettlement)) == 0
         )
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_price_target_with_observed_price_never_settles_or_gets_pnl(
+    tmp_path: Path,
+) -> None:
+    """Even with a real later quote, price_target rows must not settle/PnL."""
+    session, engine = open_test_session(tmp_path)
+    try:
+        run, prediction = seed_model_and_prediction(session)
+        pub, _ = seed_official(
+            session,
+            state=RecommendationState.PRICE_TARGET,
+            prediction_id=prediction.id,
+            model_run_id=run.id,
+            performance_lane="experimental",
+        )
+        quote, created_quote = record_observed_price(
+            session,
+            official_publication_id=pub.id,
+            sportsbook="bet365",
+            decimal_odds=2.4,
+            source_type=QuoteSourceKind.USER_OBSERVED,
+            source_timestamp=FIXED_PUBLISHED,
+        )
+        assert created_quote is True
+        assert quote.decimal_odds == 2.4
+
+        grades = grade_predictions(
+            session,
+            prediction_ids=[prediction.id],
+            facts_by_bout={"bout-1": decisive_a_ko()},
+        )
+        assert grades[0][0].sporting_result == SettlementResult.WIN.value
+
+        settlements = settle_recommendations(
+            session,
+            official_publication_ids=[pub.id],
+            facts_by_bout={"bout-1": decisive_a_ko()},
+            closing_decimal_by_publication={pub.id: 2.1},
+        )
+        assert settlements == []
+        assert session.scalar(select(func.count()).select_from(ObservedPrice)) == 1
+        assert (
+            session.scalar(select(func.count()).select_from(RecommendationSettlement)) == 0
+        )
+        assert session.scalar(select(func.count()).select_from(PredictionGrade)) == 1
     finally:
         session.close()
         engine.dispose()
@@ -668,3 +855,69 @@ def test_audit_series_and_cli_deterministic(tmp_path: Path) -> None:
     parsed = json.loads(first_cli.stdout)
     assert parsed["series"] == "dwcs"
     assert "performance" in parsed
+
+
+def test_grade_audit_refuses_live_data_mma_db(tmp_path: Path) -> None:
+    """grade audit must not open live data/mma.db when URL resolves there."""
+    python = Path(sys.executable)
+    env = {**os.environ, "PYTHONPATH": "src", "MMA_DATABASE_URL": "sqlite:///data/mma.db"}
+    # Omitted --database-url with live default.
+    omitted = subprocess.run(
+        [str(python), "-m", "mma_model.cli", "grade", "audit", "--series", "dwcs", "--json"],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert omitted.returncode != 0
+    combined = (omitted.stdout + omitted.stderr).lower()
+    assert "refusing" in combined and "mma.db" in combined
+
+    # Explicit live URL also refused.
+    explicit = subprocess.run(
+        [
+            str(python),
+            "-m",
+            "mma_model.cli",
+            "grade",
+            "audit",
+            "--series",
+            "dwcs",
+            "--database-url",
+            "sqlite:///data/mma.db",
+            "--json",
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert explicit.returncode != 0
+    assert "refusing" in (explicit.stdout + explicit.stderr).lower()
+
+    # Disposable URL still works.
+    db_path = tmp_path / "grade_live_guard.db"
+    command.upgrade(alembic_config(db_path), "head")
+    ok = subprocess.run(
+        [
+            str(python),
+            "-m",
+            "mma_model.cli",
+            "grade",
+            "audit",
+            "--series",
+            "dwcs",
+            "--database-url",
+            f"sqlite:///{db_path}",
+            "--json",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert ok.returncode == 0
+    assert json.loads(ok.stdout)["series"] == "dwcs"

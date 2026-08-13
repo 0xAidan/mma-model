@@ -673,7 +673,10 @@ def main(argv: list[str] | None = None) -> int:
     p_grade_audit.add_argument(
         "--database-url",
         default=None,
-        help="Explicit disposable SQLite URL (defaults to MMA_DATABASE_URL / settings)",
+        help=(
+            "Explicit disposable SQLite URL (required when settings would resolve "
+            "to live data/mma.db; never opens the live DB)"
+        ),
     )
     p_grade_audit.add_argument(
         "--json",
@@ -1832,19 +1835,41 @@ def main(argv: list[str] | None = None) -> int:
             print(f"unsupported grade command: {getattr(args, 'grade_cmd', None)}")
             return EXIT_INTERNAL
         database_url = getattr(args, "database_url", None)
+        default_url = get_settings().mma_database_url
+        if database_url is None:
+            db_url = str(default_url).strip()
+            live = (
+                db_url in LIVE_DB_URLS
+                or db_url.endswith("/data/mma.db")
+                or db_url.endswith("data/mma.db")
+                or is_prohibited_live_url(db_url)
+            )
+        else:
+            db_url = str(database_url).strip()
+            live = (
+                db_url in LIVE_DB_URLS
+                or db_url.endswith("/data/mma.db")
+                or db_url.endswith("data/mma.db")
+                or is_prohibited_live_url(db_url, default_url=default_url)
+            )
+        if not db_url:
+            print("grade audit error: empty database url")
+            return EXIT_INTERNAL
+        if live:
+            print(
+                "refusing default live data/mma.db; pass an explicit disposable "
+                "--database-url for grade audit"
+            )
+            return EXIT_INTERNAL
         engine = None
         try:
-            if database_url:
-                engine = create_engine(str(database_url).strip(), future=True)
-                _attach_sqlite_listeners(engine)
-                Session = sessionmaker(
-                    bind=engine, autoflush=False, autocommit=False, future=True
-                )
-                with Session() as session:
-                    audit = audit_series(session, series=str(args.series))
-            else:
-                with session_scope() as session:
-                    audit = audit_series(session, series=str(args.series))
+            engine = create_engine(db_url, future=True)
+            _attach_sqlite_listeners(engine)
+            Session = sessionmaker(
+                bind=engine, autoflush=False, autocommit=False, future=True
+            )
+            with Session() as session:
+                audit = audit_series(session, series=str(args.series))
         except GradeLedgerError as exc:
             print(f"grade audit error: {exc}")
             return EXIT_INTERNAL

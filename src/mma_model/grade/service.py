@@ -37,7 +37,7 @@ from mma_model.markets.settlement import (
     settle,
 )
 from mma_model.recommend.policy import QuoteSourceKind, RenderedThresholds
-from mma_model.value.ev import flat_unit_profit
+from mma_model.value.ev import flat_unit_profit, unsafe_same_line_probability_clv
 from mma_model.value.odds import validate_decimal_odds
 
 ResultVersionKind = Literal["event_night", "current"]
@@ -92,6 +92,31 @@ def _sha256_payload(payload: Mapping[str, Any]) -> str:
 
 def _json_list(values: Sequence[str]) -> str:
     return json.dumps(list(values), sort_keys=False, separators=(",", ":"), ensure_ascii=True)
+
+
+def _same_optional_float(left: float | None, right: float | None) -> bool:
+    if left is None and right is None:
+        return True
+    if left is None or right is None:
+        return False
+    return float(left) == float(right)
+
+
+def _same_aware_dt(left: datetime, right: datetime) -> bool:
+    return _require_aware(left, field="left") == _require_aware(right, field="right")
+
+
+def _raise_key_conflict(entity: str, mismatches: Sequence[str]) -> None:
+    fields = ", ".join(mismatches)
+    raise GradeLedgerValidationError(
+        f"{entity} idempotency key conflict: material fields differ ({fields})"
+    )
+
+
+def _collect_mismatches(
+    pairs: Sequence[tuple[str, bool]],
+) -> list[str]:
+    return [name for name, matches in pairs if not matches]
 
 
 def official_t60_idempotency_key(
@@ -241,25 +266,45 @@ def publish_model_run(
     series: str = DEFAULT_SERIES,
     created_at: datetime | None = None,
 ) -> tuple[ModelRun, bool]:
-    """Insert a model run or return the existing row for the same key.
+    """Insert a model run or return the existing row for an identical retry.
 
+    Same key with material field mismatches fails closed (no insert/mutate).
     Returns ``(row, created)``.
     """
     key = idempotency_key.strip()
     if not key:
         raise GradeLedgerValidationError("idempotency_key must be non-empty")
+    artifact = _require_sha256(artifact_digest, field="artifact_digest")
+    model = _require_sha256(model_hash, field="model_hash")
+    feature = _require_sha256(feature_hash, field="feature_hash")
+    config = _require_sha256(config_hash, field="config_hash")
+    data = _require_sha256(data_hash, field="data_hash")
+    spec = spec_id.strip()
     existing = session.scalar(select(ModelRun).where(ModelRun.idempotency_key == key))
     if existing is not None:
+        mismatches = _collect_mismatches(
+            (
+                ("series", existing.series == series),
+                ("spec_id", existing.spec_id == spec),
+                ("artifact_digest", existing.artifact_digest == artifact),
+                ("model_hash", existing.model_hash == model),
+                ("feature_hash", existing.feature_hash == feature),
+                ("config_hash", existing.config_hash == config),
+                ("data_hash", existing.data_hash == data),
+            )
+        )
+        if mismatches:
+            _raise_key_conflict("model_run", mismatches)
         return existing, False
     row = ModelRun(
         idempotency_key=key,
         series=series,
-        spec_id=spec_id.strip(),
-        artifact_digest=_require_sha256(artifact_digest, field="artifact_digest"),
-        model_hash=_require_sha256(model_hash, field="model_hash"),
-        feature_hash=_require_sha256(feature_hash, field="feature_hash"),
-        config_hash=_require_sha256(config_hash, field="config_hash"),
-        data_hash=_require_sha256(data_hash, field="data_hash"),
+        spec_id=spec,
+        artifact_digest=artifact,
+        model_hash=model,
+        feature_hash=feature,
+        config_hash=config,
+        data_hash=data,
         created_at=_require_aware(created_at or datetime.now(UTC), field="created_at"),
     )
     session.add(row)
@@ -273,16 +318,15 @@ def publish_predictions(
     model_run: ModelRun,
     rows: Sequence[Mapping[str, Any]],
 ) -> list[tuple[Prediction, bool]]:
-    """Publish prediction snapshots; duplicate idempotency keys are no-ops."""
+    """Publish prediction snapshots.
+
+    Identical retry for the same key is a no-op; material mismatches fail closed.
+    """
     out: list[tuple[Prediction, bool]] = []
     for raw in rows:
         key = str(raw["idempotency_key"]).strip()
         if not key:
             raise GradeLedgerValidationError("prediction idempotency_key must be non-empty")
-        existing = session.scalar(select(Prediction).where(Prediction.idempotency_key == key))
-        if existing is not None:
-            out.append((existing, False))
-            continue
         cutoff = _require_aware(raw["cutoff_at"], field="cutoff_at")
         published = _require_aware(raw["published_at"], field="published_at")
         if published < cutoff:
@@ -291,18 +335,54 @@ def publish_predictions(
         outcome = raw["outcome_key"]
         family_value = family.value if isinstance(family, MarketFamily) else str(family)
         outcome_value = outcome.value if isinstance(outcome, OutcomeKey) else str(outcome)
+        series = str(raw.get("series") or model_run.series)
+        line_point = raw.get("line_point")
+        p50 = float(raw["p50"])
+        p25 = None if raw.get("p25") is None else float(raw["p25"])
+        semantics = str(raw.get("probability_semantics") or "exhaustive")
+        event_id = str(raw["event_id"])
+        bout_id = str(raw["bout_id"])
+        selection_id = str(raw["selection_id"])
+        existing = session.scalar(select(Prediction).where(Prediction.idempotency_key == key))
+        if existing is not None:
+            mismatches = _collect_mismatches(
+                (
+                    ("series", existing.series == series),
+                    ("event_id", existing.event_id == event_id),
+                    ("bout_id", existing.bout_id == bout_id),
+                    ("selection_id", existing.selection_id == selection_id),
+                    ("market_family", existing.market_family == family_value),
+                    ("outcome_key", existing.outcome_key == outcome_value),
+                    ("line_point", _same_optional_float(existing.line_point, line_point)),
+                    ("p50", _same_optional_float(existing.p50, p50)),
+                    ("p25", _same_optional_float(existing.p25, p25)),
+                    ("probability_semantics", existing.probability_semantics == semantics),
+                    ("cutoff_at", _same_aware_dt(existing.cutoff_at, cutoff)),
+                    ("published_at", _same_aware_dt(existing.published_at, published)),
+                    ("model_run_id", existing.model_run_id == model_run.id),
+                    ("artifact_digest", existing.artifact_digest == model_run.artifact_digest),
+                    ("model_hash", existing.model_hash == model_run.model_hash),
+                    ("feature_hash", existing.feature_hash == model_run.feature_hash),
+                    ("config_hash", existing.config_hash == model_run.config_hash),
+                    ("data_hash", existing.data_hash == model_run.data_hash),
+                )
+            )
+            if mismatches:
+                _raise_key_conflict("prediction", mismatches)
+            out.append((existing, False))
+            continue
         row = Prediction(
             idempotency_key=key,
-            series=str(raw.get("series") or model_run.series),
-            event_id=str(raw["event_id"]),
-            bout_id=str(raw["bout_id"]),
-            selection_id=str(raw["selection_id"]),
+            series=series,
+            event_id=event_id,
+            bout_id=bout_id,
+            selection_id=selection_id,
             market_family=family_value,
             outcome_key=outcome_value,
-            line_point=raw.get("line_point"),
-            p50=float(raw["p50"]),
-            p25=None if raw.get("p25") is None else float(raw["p25"]),
-            probability_semantics=str(raw.get("probability_semantics") or "exhaustive"),
+            line_point=line_point,
+            p50=p50,
+            p25=p25,
+            probability_semantics=semantics,
             cutoff_at=cutoff,
             published_at=published,
             model_run_id=model_run.id,
@@ -327,8 +407,35 @@ def _persist_price_target(
     published_at: datetime,
 ) -> tuple[PriceTarget, bool]:
     key = idempotency_key.strip()
+    published = _require_aware(published_at, field="published_at")
+    digest = thresholds_content_hash(thresholds)
     existing = session.scalar(select(PriceTarget).where(PriceTarget.idempotency_key == key))
     if existing is not None:
+        mismatches = _collect_mismatches(
+            (
+                ("prediction_id", existing.prediction_id == prediction_id),
+                ("thresholds_hash", existing.thresholds_hash == digest),
+                (
+                    "fair_decimal",
+                    _same_optional_float(existing.fair_decimal, thresholds.fair_decimal),
+                ),
+                (
+                    "actionable_decimal",
+                    _same_optional_float(
+                        existing.actionable_decimal, thresholds.actionable_decimal
+                    ),
+                ),
+                (
+                    "strong_value_decimal",
+                    _same_optional_float(
+                        existing.strong_value_decimal, thresholds.strong_value_decimal
+                    ),
+                ),
+                ("published_at", _same_aware_dt(existing.published_at, published)),
+            )
+        )
+        if mismatches:
+            _raise_key_conflict("price_target", mismatches)
         return existing, False
     row = PriceTarget(
         idempotency_key=key,
@@ -341,12 +448,69 @@ def _persist_price_target(
         strong_value_american=thresholds.strong_value_american,
         actionable_ev_target=thresholds.actionable_ev_target,
         strong_value_ev_target=thresholds.strong_value_ev_target,
-        thresholds_hash=thresholds_content_hash(thresholds),
-        published_at=_require_aware(published_at, field="published_at"),
+        thresholds_hash=digest,
+        published_at=published,
     )
     session.add(row)
     session.flush()
     return row, True
+
+
+def _assert_official_t60_matches(
+    session: Session,
+    existing: OfficialPublication,
+    *,
+    event_id: str,
+    bout_id: str,
+    selection_id: str,
+    state_value: str,
+    cutoff: datetime,
+    published: datetime,
+    market_family: str | None,
+    outcome_key: str | None,
+    line_point: float | None,
+    prediction_id: str | None,
+    model_run_id: str | None,
+    policy_hash: str | None,
+    config_hash: str | None,
+    performance_lane: str,
+    series: str,
+    publication_kind: str,
+    thresholds: RenderedThresholds | None,
+) -> None:
+    mismatches = _collect_mismatches(
+        (
+            ("series", existing.series == series),
+            ("publication_kind", existing.publication_kind == publication_kind),
+            ("event_id", existing.event_id == event_id),
+            ("bout_id", existing.bout_id == bout_id),
+            ("selection_id", existing.selection_id == selection_id),
+            ("state", existing.state == state_value),
+            ("market_family", existing.market_family == market_family),
+            ("outcome_key", existing.outcome_key == outcome_key),
+            ("line_point", _same_optional_float(existing.line_point, line_point)),
+            ("prediction_id", existing.prediction_id == prediction_id),
+            ("model_run_id", existing.model_run_id == model_run_id),
+            ("policy_hash", existing.policy_hash == policy_hash),
+            ("config_hash", existing.config_hash == config_hash),
+            ("performance_lane", existing.performance_lane == performance_lane),
+            ("cutoff_at", _same_aware_dt(existing.cutoff_at, cutoff)),
+            ("published_at", _same_aware_dt(existing.published_at, published)),
+        )
+    )
+    if thresholds is None:
+        if existing.price_target_id is not None:
+            mismatches.append("thresholds")
+    else:
+        digest = thresholds_content_hash(thresholds)
+        if existing.price_target_id is None:
+            mismatches.append("thresholds_hash")
+        else:
+            target = session.get(PriceTarget, existing.price_target_id)
+            if target is None or target.thresholds_hash != digest:
+                mismatches.append("thresholds_hash")
+    if mismatches:
+        _raise_key_conflict("official_publication", mismatches)
 
 
 def publish_official_t60(
@@ -373,7 +537,11 @@ def publish_official_t60(
     series: str = DEFAULT_SERIES,
     publication_kind: PublicationKind = PUBLICATION_KIND_T60,
 ) -> tuple[OfficialPublication, bool]:
-    """Persist the official T-60m outcome. Same key → existing row, no overwrite."""
+    """Persist the official T-60m outcome.
+
+    Same key + identical immutable fields → existing row (retry).
+    Same key + material mismatch → fail closed (no insert/mutate).
+    """
     state_value = state.value if isinstance(state, RecommendationState) else str(state)
     if state_value not in {
         RecommendationState.CONFIRMED_VALUE.value,
@@ -392,10 +560,46 @@ def publish_official_t60(
         cutoff_at=cutoff,
         publication_kind=publication_kind,
     )
+    family_value = None
+    if market_family is not None:
+        family_value = (
+            market_family.value
+            if isinstance(market_family, MarketFamily)
+            else str(market_family)
+        )
+    outcome_value = None
+    if outcome_key is not None:
+        outcome_value = (
+            outcome_key.value if isinstance(outcome_key, OutcomeKey) else str(outcome_key)
+        )
+    policy = None if policy_hash is None else _require_sha256(policy_hash, field="policy_hash")
+    config = None if config_hash is None else _require_sha256(config_hash, field="config_hash")
+
     existing = session.scalar(
         select(OfficialPublication).where(OfficialPublication.idempotency_key == key)
     )
     if existing is not None:
+        _assert_official_t60_matches(
+            session,
+            existing,
+            event_id=event_id,
+            bout_id=bout_id,
+            selection_id=selection_id,
+            state_value=state_value,
+            cutoff=cutoff,
+            published=published,
+            market_family=family_value,
+            outcome_key=outcome_value,
+            line_point=line_point,
+            prediction_id=prediction_id,
+            model_run_id=model_run_id,
+            policy_hash=policy,
+            config_hash=config,
+            performance_lane=performance_lane,
+            series=series,
+            publication_kind=publication_kind,
+            thresholds=thresholds,
+        )
         return existing, False
 
     price_target_id: str | None = None
@@ -423,19 +627,6 @@ def publish_official_t60(
         )
         price_target_id = target.id
 
-    family_value = None
-    if market_family is not None:
-        family_value = (
-            market_family.value
-            if isinstance(market_family, MarketFamily)
-            else str(market_family)
-        )
-    outcome_value = None
-    if outcome_key is not None:
-        outcome_value = (
-            outcome_key.value if isinstance(outcome_key, OutcomeKey) else str(outcome_key)
-        )
-
     row = OfficialPublication(
         idempotency_key=key,
         series=series,
@@ -454,16 +645,8 @@ def publish_official_t60(
         prediction_id=prediction_id,
         price_target_id=price_target_id,
         model_run_id=model_run_id,
-        policy_hash=(
-            None
-            if policy_hash is None
-            else _require_sha256(policy_hash, field="policy_hash")
-        ),
-        config_hash=(
-            None
-            if config_hash is None
-            else _require_sha256(config_hash, field="config_hash")
-        ),
+        policy_hash=policy,
+        config_hash=config,
         cutoff_at=cutoff,
         published_at=published,
     )
@@ -673,10 +856,10 @@ def _settlement_pnl(
     roi = profit  # flat 1-unit stake
     clv: float | None = None
     if closing_decimal is not None:
-        # Probability-point CLV: close_implied - bet_implied.
-        bet_implied = 1.0 / observed.decimal_odds
-        close_implied = 1.0 / validate_decimal_odds(closing_decimal, field="closing_decimal")
-        clv = close_implied - bet_implied
+        clv = unsafe_same_line_probability_clv(
+            bet_decimal=observed.decimal_odds,
+            close_decimal=validate_decimal_odds(closing_decimal, field="closing_decimal"),
+        )
     return profit, roi, clv
 
 
