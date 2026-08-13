@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -22,6 +23,7 @@ from mma_model.domain.markets import (
     RecommendationState,
 )
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
+from mma_model.odds.bookmaker_keys import is_bet365_bookmaker_key
 from mma_model.odds.manual_price import (
     MANUAL_SOURCE_LABEL,
     EntitlementFailure,
@@ -39,6 +41,7 @@ from mma_model.odds.price_guidance import (
 from mma_model.odds.provider_decision import (
     DECISION_PATH_REFERENCE_FALLBACK,
     PINNED_ODDS_DECISION_HASH,
+    FrozenStrMapping,
     LicensedBookmakerAdapterError,
     assert_no_sportsbook_scraper_modules,
     licensed_bookmaker_adapter_authorized,
@@ -89,10 +92,44 @@ def test_packaged_decision_contract_is_authority() -> None:
     assert visible.resolve() == packaged.resolve()
     cfg = load_odds_source_config()
     contract = load_odds_decision_contract()
-    assert cfg["content_hash"] == contract["content_hash"] == PINNED_DIGEST_LITERAL
-    assert contract["decision"]["licensed_bookmaker_adapter_authorized"] is False
-    assert contract["manual_observation"]["source_label"] == MANUAL_SOURCE_LABEL
-    assert "sportsbook_website_scraping" in contract["prohibited"]
+    assert cfg["content_hash"] == contract.content_hash == PINNED_DIGEST_LITERAL
+    assert contract.decision.licensed_bookmaker_adapter_authorized is False
+    assert contract.manual_observation.source_label == MANUAL_SOURCE_LABEL
+    assert "sportsbook_website_scraping" in contract.prohibited
+
+
+def test_odds_decision_contract_is_deeply_immutable() -> None:
+    """Cached authority must reject mutation attempts (typed + compatibility view)."""
+    load_odds_decision_contract.cache_clear()
+    load_odds_source_config.cache_clear()
+    load_phase0_odds_decision.cache_clear()
+
+    contract = load_odds_decision_contract()
+    phase0 = load_phase0_odds_decision()
+    readonly = load_odds_source_config()
+
+    assert isinstance(contract.trial_providers, FrozenStrMapping)
+    assert isinstance(phase0.trial_providers, FrozenStrMapping)
+
+    with pytest.raises((ValidationError, TypeError, AttributeError)):
+        contract.content_hash = "0" * 64  # type: ignore[misc]
+    with pytest.raises((ValidationError, TypeError, AttributeError)):
+        contract.decision.path = "licensed_bet365_primary"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        contract.trial_providers["opticodds"] = "pass"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        phase0.trial_providers["opticodds"] = "pass"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        readonly["ticket"] = "mutated"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        readonly["decision"]["path"] = "mutated"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        readonly["trial_providers"]["opticodds"] = "pass"  # type: ignore[index]
+
+    # Authority still matches pin after failed mutations.
+    assert load_odds_decision_contract().content_hash == PINNED_DIGEST_LITERAL
+    assert load_phase0_odds_decision().trial_providers["opticodds"] == "not_configured"
+    assert load_odds_decision_contract().trial_providers["opticodds"] == "not_configured"
 
 
 def test_odds_package_scraper_heuristic_is_scoped() -> None:
@@ -598,6 +635,119 @@ def test_reference_quotes_never_mislabeled_bet365_in_guidance() -> None:
         prob_ev_positive=0.80,
     )
     assert guidance.source_label == "the_odds_api"
+    assert guidance.claims_bet365 is False
+
+
+@pytest.mark.parametrize(
+    "bookmaker_key",
+    ["bet365", "bet365_au", "BET365", "Bet365_AU", " bet365 "],
+)
+def test_reference_rejects_bet365_aliases_while_fallback_active(
+    bookmaker_key: str,
+) -> None:
+    with pytest.raises(ValueError, match="Bet365 aliases"):
+        ObservedPrice.from_reference_quote(
+            provider="the_odds_api",
+            bookmaker_key=bookmaker_key,
+            bookmaker_title="Bet365",
+            region="uk",
+            market_family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            price_decimal=1.91,
+            observed_at=OBSERVED,
+            event_external_id="ref-bet365",
+        )
+
+
+def test_bet365fake_is_not_bet365_alias_and_not_claimed() -> None:
+    assert is_bet365_bookmaker_key("bet365fake") is False
+    reference = ObservedPrice.from_reference_quote(
+        provider="the_odds_api",
+        bookmaker_key="bet365fake",
+        bookmaker_title="Not Bet365",
+        region="us",
+        market_family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        price_decimal=1.90,
+        observed_at=OBSERVED,
+        event_external_id="ref-fake",
+    )
+    guidance = build_price_guidance(
+        family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        maturity=MarketMaturity.QUALIFIED,
+        p50=0.52,
+        p25=0.48,
+        gates_pass=True,
+        observed=reference,
+        prob_ev_positive=0.80,
+    )
+    assert guidance.claims_bet365 is False
+    assert guidance.source_label == "the_odds_api"
+
+
+@pytest.mark.parametrize("bookmaker_key", ["bet365", "bet365_au", "BET365"])
+def test_manual_user_observed_bet365_may_claim_label(bookmaker_key: str) -> None:
+    observed = ObservedPrice(
+        source_kind=PriceSourceKind.USER_OBSERVED,
+        automated=False,
+        provider=None,
+        bookmaker_key=bookmaker_key,
+        bookmaker_title="Bet365",
+        region="uk",
+        market_family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        line_point=None,
+        price_decimal=1.91,
+        lifecycle=LineLifecycleState.AVAILABLE,
+        observed_at=OBSERVED,
+        source_updated_at=None,
+        event_external_id="manual-bet365",
+        settlement_identity=None,
+    )
+    guidance = build_price_guidance(
+        family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        maturity=MarketMaturity.QUALIFIED,
+        p50=0.55,
+        p25=0.50,
+        gates_pass=True,
+        observed=observed,
+        prob_ev_positive=0.80,
+    )
+    assert guidance.source_label == MANUAL_SOURCE_LABEL
+    assert guidance.automated_line is False
+    assert guidance.claims_bet365 is True
+
+
+def test_manual_bet365fake_does_not_claim_bet365() -> None:
+    observed = ObservedPrice(
+        source_kind=PriceSourceKind.USER_OBSERVED,
+        automated=False,
+        provider=None,
+        bookmaker_key="bet365fake",
+        bookmaker_title="Fake",
+        region="us",
+        market_family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        line_point=None,
+        price_decimal=1.91,
+        lifecycle=LineLifecycleState.AVAILABLE,
+        observed_at=OBSERVED,
+        source_updated_at=None,
+        event_external_id="manual-fake",
+        settlement_identity=None,
+    )
+    guidance = build_price_guidance(
+        family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        maturity=MarketMaturity.QUALIFIED,
+        p50=0.55,
+        p25=0.50,
+        gates_pass=True,
+        observed=observed,
+        prob_ev_positive=0.80,
+    )
     assert guidance.claims_bet365 is False
 
 

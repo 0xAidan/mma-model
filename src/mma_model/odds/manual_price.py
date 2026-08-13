@@ -20,7 +20,9 @@ from mma_model.domain.markets import (
     assert_known_outcome,
     catalog_for_family,
 )
+from mma_model.odds.bookmaker_keys import is_bet365_bookmaker_key
 from mma_model.odds.normalize import ensure_utc, parse_utc_datetime
+from mma_model.odds.provider_decision import licensed_bookmaker_adapter_authorized
 from mma_model.odds.types import PROVIDER_THE_ODDS_API
 
 MANUAL_SOURCE_LABEL: Final[str] = "user_observed"
@@ -110,6 +112,19 @@ class ObservedPrice:
             raise ValueError("user_observed prices must set automated=False")
         if self.source_kind is PriceSourceKind.USER_OBSERVED and self.provider is not None:
             raise ValueError("user_observed prices must not claim a provider id")
+        if (
+            (
+                self.automated
+                or self.source_kind is PriceSourceKind.REFERENCE_PROVIDER
+            )
+            and is_bet365_bookmaker_key(self.bookmaker_key)
+            and not licensed_bookmaker_adapter_authorized()
+        ):
+            raise ValueError(
+                "automated/reference observations may not use Bet365 aliases "
+                f"({self.bookmaker_key!r}) while Phase 0 fallback is active; "
+                "record Bet365 only via non-automated user_observed prices"
+            )
         if self.lifecycle in _PRICED_STATES:
             if self.price_decimal is None or self.price_decimal <= 1.0:
                 raise ValueError(

@@ -18,6 +18,7 @@ from mma_model.markets.price_targets import (
     classify_recommendation,
     compute_price_thresholds,
 )
+from mma_model.odds.bookmaker_keys import is_bet365_bookmaker_key
 from mma_model.odds.manual_price import (
     MANUAL_SOURCE_LABEL,
     LineLifecycleState,
@@ -190,14 +191,13 @@ def build_price_guidance(
         if observed.source_kind is PriceSourceKind.USER_OBSERVED:
             source_label = MANUAL_SOURCE_LABEL
             automated_line = False
+            # Only explicit non-automated user_observed Bet365 aliases may claim Bet365.
+            claims_bet365 = (
+                not observed.automated and is_bet365_bookmaker_key(observed.bookmaker_key)
+            )
         elif observed.source_kind is PriceSourceKind.REFERENCE_PROVIDER:
             source_label = observed.provider or "reference_provider"
             automated_line = True
-        claims_bet365 = observed.bookmaker_key.lower().startswith("bet365")
-        if (
-            observed.source_kind is PriceSourceKind.REFERENCE_PROVIDER
-            and not observed.bookmaker_key.lower().startswith("bet365")
-        ):
             claims_bet365 = False
 
     return PriceGuidanceRow(

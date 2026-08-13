@@ -3,20 +3,31 @@
 Authoritative bytes ship inside ``mma_model.odds.odds_decision_v1.yaml``.
 ``config/sources/odds.yaml`` is the plan-visible symlink in a checkout.
 Runtime never depends on checkout-only evidence paths.
+
+Loaded contracts are deeply immutable (frozen Pydantic models + mapping proxies).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
-from typing import Any, Final
+from types import MappingProxyType
+from typing import Any, Final, Literal
 
 import yaml
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    ValidationError,
+    field_validator,
+)
+from pydantic_core import core_schema
 
 DECISION_PATH_REFERENCE_FALLBACK: Final[str] = "the_odds_api_reference_fallback"
 DECISION_PATH_LICENSED_BET365: Final[str] = "licensed_bet365_primary"
@@ -30,7 +41,6 @@ PINNED_ODDS_DECISION_HASH: Final[str] = (
     "85e036e1717ba9df41bd31ed7aed1e2fcc1a54747fc0175ce5d53679ac6a1637"
 )
 
-# Scoped filename heuristics inside mma_model.odds only (not a repo-wide proof).
 _FORBIDDEN_SCRAPER_SUFFIXES: Final[tuple[str, ...]] = (
     "bet365_scraper",
     "sportsbook_scraper",
@@ -38,11 +48,13 @@ _FORBIDDEN_SCRAPER_SUFFIXES: Final[tuple[str, ...]] = (
     "scrape_sportsbook",
 )
 
-_REQUIRED_TRIAL_STATUSES: Final[Mapping[str, str]] = {
-    "opticodds": "not_configured",
-    "sportsgameodds": "not_configured",
-    "sportsdataio": "not_configured",
-}
+_REQUIRED_TRIAL_STATUSES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "opticodds": "not_configured",
+        "sportsgameodds": "not_configured",
+        "sportsdataio": "not_configured",
+    }
+)
 
 
 class LicensedBookmakerAdapterError(RuntimeError):
@@ -57,16 +69,131 @@ class OddsDecisionHashMismatch(OddsDecisionError):
     """Pinned digest mismatch."""
 
 
-@dataclass(frozen=True)
-class Phase0OddsDecision:
+class FrozenStrMapping(Mapping[str, str]):
+    """Read-only str→str mapping that Pydantic will not coerce back to dict."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self, data: Mapping[str, Any]) -> None:
+        self._data = MappingProxyType({str(k): str(v) for k, v in data.items()})
+
+    def __getitem__(self, key: str) -> str:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"FrozenStrMapping({dict(self._data)!r})"
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        _source: Any,
+        _handler: GetCoreSchemaHandler,
+    ) -> core_schema.CoreSchema:
+        def _validate(value: Any) -> FrozenStrMapping:
+            if isinstance(value, cls):
+                return value
+            if not isinstance(value, Mapping):
+                raise TypeError("expected a mapping")
+            return cls(value)
+
+        return core_schema.no_info_plain_validator_function(
+            _validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda v: dict(v),
+                info_arg=False,
+                return_schema=core_schema.dict_schema(
+                    core_schema.str_schema(),
+                    core_schema.str_schema(),
+                ),
+            ),
+        )
+
+
+class _FrozenModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class OddsDecisionBlock(_FrozenModel):
+    path: Literal["the_odds_api_reference_fallback"]
+    licensed_bookmaker_adapter_authorized: Literal[False]
+    bet365_dwcs_status: Literal["scoped_absent"]
+    rationale: str
+
+
+class OddsReferenceBlock(_FrozenModel):
+    provider: Literal["the_odds_api"]
+    role: str
+    never_label_as_bet365: Literal[True]
+
+
+class OddsManualObservationBlock(_FrozenModel):
+    source_label: Literal["user_observed"]
+    automated: Literal[False]
+    required_for_price_targets: bool
+    required_for_exact_ev: bool
+    retention: str
+
+
+class OddsEvidenceRefs(_FrozenModel):
+    phase0_summary: str
+    audit_doc: str
+
+
+class OddsDecisionContract(_FrozenModel):
+    """Deeply immutable packaged odds decision contract."""
+
+    contract_id: Literal["dwcs_odds_decision"]
+    contract_version: Literal["1.0.0"]
+    schema_version: Literal[1]
+    ticket: Literal["DWCS-202"]
+    decision: OddsDecisionBlock
+    trial_providers: FrozenStrMapping
+    reference_odds: OddsReferenceBlock
+    manual_observation: OddsManualObservationBlock
+    line_lifecycle_states: tuple[str, ...]
+    prohibited: tuple[str, ...]
+    evidence_refs: OddsEvidenceRefs
+    content_hash: str = Field(min_length=64, max_length=64)
+
+    @field_validator("line_lifecycle_states", "prohibited", mode="before")
+    @classmethod
+    def _tupleize_str_sequences(cls, value: Any) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        return tuple(str(item) for item in value)
+
+    def as_readonly_mapping(self) -> Mapping[str, Any]:
+        """Compatibility read-only nested mapping (deep MappingProxyType/tuple)."""
+        return _deep_freeze(self.model_dump(mode="python"))
+
+
+class Phase0OddsDecision(_FrozenModel):
     path: str
     bet365_dwcs_status: str
     licensed_bookmaker_adapter_authorized: bool
     rationale: str
     evidence_path: str
-    trial_providers: dict[str, str]
+    trial_providers: FrozenStrMapping
     content_hash: str
     contract_version: str
+
+
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, FrozenStrMapping):
+        return MappingProxyType(dict(value))
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(k): _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(v) for v in value)
+    if isinstance(value, tuple):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
 
 
 def _repo_root() -> Path:
@@ -89,7 +216,7 @@ def visible_decision_path() -> Path:
 def compute_odds_decision_hash(payload: Mapping[str, Any]) -> str:
     """SHA-256 of canonical JSON (sorted keys, compact)."""
     raw = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -119,28 +246,12 @@ def _read_package_payload() -> dict[str, Any]:
     return payload
 
 
-def _validate_payload(
+def _validate_raw_payload(
     payload: Mapping[str, Any],
     *,
     enforce_pinned_digest: bool,
-) -> dict[str, Any]:
+) -> OddsDecisionContract:
     content_hash = compute_odds_decision_hash(payload)
-    if payload.get("contract_id") != CONTRACT_ID:
-        raise OddsDecisionError(
-            f"contract_id mismatch: got {payload.get('contract_id')!r}, "
-            f"expected {CONTRACT_ID!r}"
-        )
-    if payload.get("schema_version") != EXPECTED_SCHEMA_VERSION:
-        raise OddsDecisionError(
-            f"schema_version mismatch: got {payload.get('schema_version')!r}, "
-            f"expected {EXPECTED_SCHEMA_VERSION!r}"
-        )
-    if payload.get("contract_version") != EXPECTED_CONTRACT_VERSION:
-        raise OddsDecisionError(
-            "contract_version mismatch: "
-            f"got {payload.get('contract_version')!r}, "
-            f"expected {EXPECTED_CONTRACT_VERSION!r}"
-        )
     if enforce_pinned_digest and content_hash != PINNED_ODDS_DECISION_HASH:
         raise OddsDecisionHashMismatch(
             f"content hash mismatch versus pinned digest: got {content_hash}, "
@@ -160,11 +271,6 @@ def _validate_payload(
             "contract claims licensed_bookmaker_adapter_authorized=true but "
             "DWCS-202 fallback refuses to invent a licensed adapter"
         )
-    if str(decision.get("bet365_dwcs_status") or "") != "scoped_absent":
-        raise OddsDecisionError(
-            "bet365_dwcs_status drift: expected 'scoped_absent', got "
-            f"{decision.get('bet365_dwcs_status')!r}"
-        )
 
     trials = payload.get("trial_providers")
     if not isinstance(trials, Mapping):
@@ -177,29 +283,27 @@ def _validate_payload(
                 f"expected {expected!r}"
             )
 
-    manual = payload.get("manual_observation")
-    if not isinstance(manual, Mapping):
-        raise OddsDecisionError("manual_observation must be a mapping")
-    if manual.get("source_label") != "user_observed":
-        raise OddsDecisionError("manual_observation.source_label must be user_observed")
-    if manual.get("automated") is not False:
-        raise OddsDecisionError("manual_observation.automated must be false")
-
-    reference = payload.get("reference_odds")
-    if not isinstance(reference, Mapping):
-        raise OddsDecisionError("reference_odds must be a mapping")
-    if reference.get("never_label_as_bet365") is not True:
-        raise OddsDecisionError("reference_odds.never_label_as_bet365 must be true")
-
     prohibited = payload.get("prohibited")
     if not isinstance(prohibited, list) or "sportsbook_website_scraping" not in prohibited:
         raise OddsDecisionError("prohibited must include sportsbook_website_scraping")
 
-    return {**dict(payload), "content_hash": content_hash}
+    try:
+        return OddsDecisionContract.model_validate(
+            {
+                **dict(payload),
+                "trial_providers": FrozenStrMapping(dict(trials)),
+                "line_lifecycle_states": tuple(
+                    str(x) for x in (payload.get("line_lifecycle_states") or ())
+                ),
+                "prohibited": tuple(str(x) for x in prohibited),
+                "content_hash": content_hash,
+            }
+        )
+    except ValidationError as exc:
+        raise OddsDecisionError(str(exc)) from exc
 
 
 def _cross_check_visible_symlink(package_payload: Mapping[str, Any]) -> None:
-    """Fail closed when checkout symlink exists but drifts from packaged authority."""
     visible = visible_decision_path()
     if not visible.exists():
         return
@@ -214,7 +318,6 @@ def _cross_check_visible_symlink(package_payload: Mapping[str, Any]) -> None:
 
 
 def _cross_check_phase0_evidence(decision: Phase0OddsDecision) -> None:
-    """When checkout evidence exists, require matching path/status cells."""
     refs = _repo_root() / "output" / "research" / "odds-coverage-summary.json"
     if not refs.is_file():
         return
@@ -245,39 +348,35 @@ def _cross_check_phase0_evidence(decision: Phase0OddsDecision) -> None:
 def load_odds_decision_contract(
     *,
     enforce_pinned_digest: bool = True,
-) -> dict[str, Any]:
-    """Load the authoritative packaged odds decision contract."""
+) -> OddsDecisionContract:
+    """Load the authoritative packaged odds decision contract (immutable)."""
     payload = _read_package_payload()
-    validated = _validate_payload(payload, enforce_pinned_digest=enforce_pinned_digest)
+    contract = _validate_raw_payload(
+        payload, enforce_pinned_digest=enforce_pinned_digest
+    )
     _cross_check_visible_symlink(payload)
-    return validated
+    return contract
 
 
 @lru_cache(maxsize=1)
-def load_odds_source_config() -> dict[str, Any]:
-    """Compatibility alias: returns the packaged decision contract mapping."""
-    return load_odds_decision_contract()
+def load_odds_source_config() -> Mapping[str, Any]:
+    """Compatibility read-only mapping view of the packaged decision contract."""
+    return load_odds_decision_contract().as_readonly_mapping()
 
 
 @lru_cache(maxsize=1)
 def load_phase0_odds_decision() -> Phase0OddsDecision:
     """Load Phase 0 decision from the packaged contract; never invent approval."""
-    payload = load_odds_decision_contract()
-    decision = payload["decision"]
-    trials = {str(k): str(v) for k, v in dict(payload["trial_providers"]).items()}
-    evidence_refs = payload.get("evidence_refs") or {}
+    contract = load_odds_decision_contract()
     result = Phase0OddsDecision(
-        path=str(decision["path"]),
-        bet365_dwcs_status=str(decision["bet365_dwcs_status"]),
+        path=contract.decision.path,
+        bet365_dwcs_status=contract.decision.bet365_dwcs_status,
         licensed_bookmaker_adapter_authorized=False,
-        rationale=str(decision.get("rationale") or "").strip(),
-        evidence_path=str(
-            evidence_refs.get("phase0_summary")
-            or "output/research/odds-coverage-summary.json"
-        ),
-        trial_providers=trials,
-        content_hash=str(payload["content_hash"]),
-        contract_version=str(payload["contract_version"]),
+        rationale=contract.decision.rationale.strip(),
+        evidence_path=contract.evidence_refs.phase0_summary,
+        trial_providers=FrozenStrMapping(contract.trial_providers),
+        content_hash=contract.content_hash,
+        contract_version=contract.contract_version,
     )
     _cross_check_phase0_evidence(result)
     return result

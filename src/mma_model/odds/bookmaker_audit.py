@@ -62,7 +62,7 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
             "bet365_dwcs_status": decision.bet365_dwcs_status,
             "rationale": decision.rationale,
             "evidence_path": decision.evidence_path,
-            "trial_providers": decision.trial_providers,
+            "trial_providers": dict(decision.trial_providers),
             "contract_version": decision.contract_version,
             "content_hash": decision.content_hash,
             "pinned_hash": PINNED_ODDS_DECISION_HASH,
@@ -74,11 +74,9 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
             "manual_observation_source": MANUAL_SOURCE_LABEL,
             "manual_observation_automated": False,
             "exact_ev_requires_observed_price": True,
-            "label": config.get("manual_observation", {}).get(
-                "source_label", MANUAL_SOURCE_LABEL
-            ),
+            "label": config.manual_observation.source_label,
         },
-        "prohibited": list(config.get("prohibited") or []),
+        "prohibited": list(config.prohibited),
         "odds_package_scraper_heuristic": {
             "scope": "mma_model.odds package modules only",
             "hit": not scraper_ok,
@@ -88,7 +86,6 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
                 "that no scraper exists elsewhere in the repository."
             ),
         },
-        # Backward-compatible boolean for operators; see scoped note above.
         "scraper_paths_present": not scraper_ok,
         "next_dwcs": {
             "requested": bool(next_dwcs),

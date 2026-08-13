@@ -1,6 +1,11 @@
 """Odds package exports (DWCS-201 / DWCS-202)."""
 
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
+from mma_model.odds.bookmaker_keys import (
+    BET365_BOOKMAKER_ALIASES,
+    is_bet365_bookmaker_key,
+    normalize_bookmaker_key,
+)
 from mma_model.odds.manual_price import (
     MANUAL_SOURCE_LABEL,
     EntitlementFailure,
@@ -24,7 +29,9 @@ from mma_model.odds.provider_decision import (
     DECISION_PATH_REFERENCE_FALLBACK,
     EXPECTED_CONTRACT_VERSION,
     PINNED_ODDS_DECISION_HASH,
+    FrozenStrMapping,
     LicensedBookmakerAdapterError,
+    OddsDecisionContract,
     OddsDecisionError,
     OddsDecisionHashMismatch,
     Phase0OddsDecision,
@@ -47,6 +54,7 @@ from mma_model.odds.types import (
 )
 
 __all__ = [
+    "BET365_BOOKMAKER_ALIASES",
     "CONTRACT_ID",
     "DECISION_PATH_REFERENCE_FALLBACK",
     "EXPECTED_CONTRACT_VERSION",
@@ -55,10 +63,12 @@ __all__ = [
     "PINNED_ODDS_DECISION_HASH",
     "PROVIDER_THE_ODDS_API",
     "EntitlementFailure",
+    "FrozenStrMapping",
     "LicensedBookmakerAdapterError",
     "LineLifecycleState",
     "NormalizedQuote",
     "ObservedPrice",
+    "OddsDecisionContract",
     "OddsDecisionError",
     "OddsDecisionHashMismatch",
     "OddsQuoteStore",
@@ -74,10 +84,12 @@ __all__ = [
     "build_unpriced_price_targets",
     "compute_exact_ev",
     "fetch_mma_odds",
+    "is_bet365_bookmaker_key",
     "licensed_bookmaker_adapter_authorized",
     "load_odds_decision_contract",
     "load_odds_source_config",
     "load_phase0_odds_decision",
+    "normalize_bookmaker_key",
     "normalize_odds_payload",
     "package_decision_resource_path",
     "parse_manual_price_observation",
