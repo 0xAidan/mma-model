@@ -330,3 +330,19 @@ never receive synthetic betting performance.
 - [Stats / identity source decision](research/stats-source-decision.md)
 - [Baseline command outputs](baseline/dwcs-001-command-outputs.md)
 - [Odds provider audit](research/odds-provider-audit.md)
+
+
+## Odds snapshot scheduling + historical backfill (DWCS-205)
+
+| Concern | Contract |
+|---------|----------|
+| **Cadence** | Event-relative half-open UTC windows: T−72h→−24h /30m; −24h→−6h /10m; −6h→−1h /5m; final hour /2m when quota permits. Outside `[T−72h, T)` is a deterministic no-op. |
+| **Due work** | Pure functions take explicit UTC `as_of`, event start, last success, provider/market/region — no hidden wall-clock. |
+| **Quota** | Cost from The Odds API contract (`current`=1×markets×regions; `historical`=10×markets×regions) plus persisted raw/inferred quota provenance. Never exceed monthly limit / run reserve; explicit `deferred` / `exhausted`. |
+| **Overlap + idempotency** | One-writer flock interface; durable `idempotency_key` so retries do not duplicate logical snapshots. |
+| **Historical cutoff** | Requested historical timestamp is a strict upper bound; `snapshot_at` must be `<=` cutoff or fail closed. Sparse checkpoints first: T−24h / T−6h / T−1h / close-proxy from 2020. |
+| **Coverage/cost** | Reports by card/book/market/time separate `absent`, `failed`, `deferred_quota`, `unmatched`, `observed`. |
+| **Archive** | Optional `bestfightodds_archive` reconciliation only as public historical odds (never stats/PIT evidence, never sportsbook-page scraping). Licensed bookmaker history refused unless DWCS-202 authorizes. |
+| **CLI** | `mma-model odds backfill --series dwcs --from 2020 --contract config/evaluation/dwcs_v1.json`; `mma-model odds due --as-of …`; `mma-model jobs snapshot-odds --as-of …`. |
+
+Exact bookmaker lines remain optional enrichment; sportsbook-agnostic actionable guidance remains the mandatory fallback. Quote value still requires matched alias + quote-level eligibility (DWCS-203/204) — scheduling alone never confers value.

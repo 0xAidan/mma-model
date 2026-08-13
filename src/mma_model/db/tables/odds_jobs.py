@@ -1,0 +1,95 @@
+"""Durable odds job run / idempotency ledger (DWCS-205)."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from mma_model.db.base import Base
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _new_uuid() -> str:
+    return str(uuid.uuid4())
+
+
+_JOB_STATUS_SQL = (
+    "'started', 'success', 'failed', 'deferred_quota', 'exhausted', "
+    "'no_op', 'duplicate'"
+)
+
+
+class OddsSnapshotJobRun(Base):
+    """Append-ish job ledger keyed by durable idempotency_key.
+
+    Successful logical snapshots are unique on ``idempotency_key`` so retries
+    do not duplicate work. Failed/deferred rows may share a key only when the
+    prior attempt was non-success (enforced in application CAS helpers).
+    """
+
+    __tablename__ = "odds_snapshot_job_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            "success_token",
+            name="uq_odds_snapshot_job_runs_idem_success",
+        ),
+        CheckConstraint(
+            f"status IN ({_JOB_STATUS_SQL})",
+            name="ck_odds_snapshot_job_runs_status",
+        ),
+        CheckConstraint(
+            "estimated_cost >= 0 AND (actual_cost IS NULL OR actual_cost >= 0)",
+            name="ck_odds_snapshot_job_runs_costs",
+        ),
+        CheckConstraint(
+            "length(trim(idempotency_key)) > 0",
+            name="ck_odds_snapshot_job_runs_idem_nonempty",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
+    # success_token is 1 for terminal success, null otherwise so multiple
+    # non-success attempts can exist while success remains unique per key.
+    success_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    job_name: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    region: Mapped[str] = mapped_column(String(32))
+    markets: Mapped[str] = mapped_column(String(128))
+    event_id: Mapped[str] = mapped_column(String(128), index=True)
+    mode: Mapped[str] = mapped_column(String(64))
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    requested_cutoff: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    snapshot_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    window_name: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    estimated_cost: Mapped[int] = mapped_column(Integer, default=0)
+    actual_cost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+__all__ = ["OddsSnapshotJobRun"]

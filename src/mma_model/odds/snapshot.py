@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from mma_model.config import get_settings
 from mma_model.odds.normalize import ensure_utc, normalize_odds_payload, parse_single_region
+from mma_model.odds.schedule import SnapshotCutoffError, assert_snapshot_at_or_before
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, TheOddsApiClient
 from mma_model.odds.types import (
@@ -232,6 +233,7 @@ def run_odds_snapshot(
     fixture_dir: Path | None = None,
     offline_fixtures: bool = False,
     observed_at: datetime | None = None,
+    enforce_historical_cutoff: bool = False,
 ) -> SnapshotResult:
     """Fetch (or explicit-fixture-load), normalize, and append-only store quotes."""
     requested_series = validate_requested_series(series)
@@ -245,7 +247,17 @@ def run_odds_snapshot(
     )
     store = OddsQuoteStore(session)
 
+    requested_cutoff: datetime | None = None
     if historical_date is not None:
+        if isinstance(historical_date, datetime):
+            requested_cutoff = ensure_utc(historical_date, field="historical_date")
+        else:
+            text_date = str(historical_date).strip()
+            if text_date.endswith("Z"):
+                text_date = text_date[:-1] + "+00:00"
+            requested_cutoff = ensure_utc(
+                datetime.fromisoformat(text_date), field="historical_date"
+            )
         response = client.fetch_historical_odds(
             date=historical_date,
             regions=region,
@@ -254,6 +266,11 @@ def run_odds_snapshot(
         )
         endpoint = "historical_odds"
         mode = "historical"
+        if enforce_historical_cutoff:
+            assert_snapshot_at_or_before(
+                snapshot_at=response.snapshot_at,
+                requested_cutoff=requested_cutoff,
+            )
     else:
         response = client.fetch_current_odds(
             regions=region,
@@ -438,6 +455,7 @@ __all__ = [
     "OddsApiError",
     "OddsConfigurationError",
     "OddsOfflineModeError",
+    "SnapshotCutoffError",
     "SnapshotResult",
     "empty_quota_report",
     "require_disposable_database_url",
