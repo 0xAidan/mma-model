@@ -22,6 +22,7 @@ from mma_model.evaluation.contract import PINNED_CONTRACT_HASH, load_evaluation_
 from mma_model.modeling.splits import (
     FoldRole,
     HoldoutLockedError,
+    TargetCardCountError,
     cards_from_manifest,
     inspect_folds,
     outer_folds,
@@ -33,6 +34,8 @@ from mma_model.modeling.splits import (
     verify_fold_plan,
 )
 from mma_model.quality.constants import EXIT_INTERNAL, EXIT_OK
+
+PROTOCOL = {"require_target_cards": False}
 
 
 @pytest.fixture
@@ -52,7 +55,7 @@ def _fold_by_event(plan, event_id: str):
 
 
 def test_same_event_bouts_excluded_from_training(cards) -> None:
-    plan = outer_folds(cards)
+    plan = outer_folds(cards, **PROTOCOL)
     fold = _fold_by_event(plan, "dev-2017")
     assert fold.test_bout_ids == ("2017-a", "2017-b")
     assert "dev-2017" not in fold.train_event_ids
@@ -62,7 +65,7 @@ def test_same_event_bouts_excluded_from_training(cards) -> None:
 
 
 def test_train_timestamps_strictly_before_test_cutoff(cards) -> None:
-    plan = outer_folds(cards, allow_holdout=True)
+    plan = outer_folds(cards, allow_holdout=True, **PROTOCOL)
     starts = {
         card.event_id: card.scheduled_start_at
         for card in cards
@@ -77,17 +80,17 @@ def test_train_timestamps_strictly_before_test_cutoff(cards) -> None:
 
 
 def test_holdout_cannot_be_selected_for_ordinary_tuning(cards) -> None:
-    tuned = tuning_folds(cards)
+    tuned = tuning_folds(cards, **PROTOCOL)
     assert all(fold.role is FoldRole.DEVELOPMENT for fold in tuned.folds)
     assert all(fold.test_event_id != "hold-2025" for fold in tuned.folds)
-    validated = validation_folds(cards)
+    validated = validation_folds(cards, **PROTOCOL)
     assert all(fold.role is FoldRole.VALIDATION for fold in validated.folds)
     assert all(fold.test_event_id != "hold-2025" for fold in validated.folds)
-    default_outer = outer_folds(cards)
+    default_outer = outer_folds(cards, **PROTOCOL)
     assert all(fold.role is not FoldRole.HOLDOUT for fold in default_outer.folds)
     with pytest.raises(HoldoutLockedError, match="locked"):
-        sealed_holdout_folds(cards, allow_holdout=False)
-    sealed = sealed_holdout_folds(cards, allow_holdout=True)
+        sealed_holdout_folds(cards, allow_holdout=False, **PROTOCOL)
+    sealed = sealed_holdout_folds(cards, allow_holdout=True, **PROTOCOL)
     assert all(fold.role is FoldRole.HOLDOUT for fold in sealed.folds)
     assert all(fold.locked for fold in sealed.folds)
     assert {fold.test_event_id for fold in sealed.folds} == {"hold-2025"}
@@ -100,7 +103,7 @@ def test_brazil_sensitivity_membership_is_explicit(cards) -> None:
     std_all, std_only = sensitivity_membership(SeriesVariant.STANDARD)
     assert std_all is True
     assert std_only is True
-    plan = outer_folds(cards)
+    plan = outer_folds(cards, **PROTOCOL)
     brazil = _fold_by_event(plan, "brazil-2018")
     assert brazil.series_variant is SeriesVariant.BRAZIL
     assert brazil.in_all_dwcs is True
@@ -112,7 +115,7 @@ def test_brazil_sensitivity_membership_is_explicit(cards) -> None:
 
 
 def test_hash_mismatch_hard_fails(cards, contract) -> None:
-    plan = outer_folds(cards, contract=contract)
+    plan = outer_folds(cards, contract=contract, **PROTOCOL)
     assert plan.contract_hash == PINNED_CONTRACT_HASH
     assert plan.feature_spec_hash == PINNED_FEATURE_SPEC_HASH
     assert plan.config_hash == PINNED_SPLITS_CONFIG_HASH
@@ -146,7 +149,7 @@ def test_hash_mismatch_hard_fails(cards, contract) -> None:
 
 
 def test_inner_folds_never_include_2024_or_2025_labels(cards) -> None:
-    inner = tuning_folds(cards)
+    inner = tuning_folds(cards, **PROTOCOL)
     forbidden = {"val-2024", "hold-2025"}
     assert {fold.test_event_id for fold in inner.folds} == {
         "dev-2017",
@@ -161,7 +164,7 @@ def test_inner_folds_never_include_2024_or_2025_labels(cards) -> None:
 
 
 def test_rolling_origin_later_development_trains_on_earlier(cards) -> None:
-    plan = outer_folds(cards)
+    plan = outer_folds(cards, **PROTOCOL)
     first = _fold_by_event(plan, "dev-2017")
     brazil = _fold_by_event(plan, "brazil-2018")
     later = _fold_by_event(plan, "dev-2023")
@@ -188,6 +191,15 @@ def test_manifest_targets_89_cards(contract) -> None:
     default = outer_folds(cards, allow_holdout=False, contract=contract)
     assert all(fold.role is not FoldRole.HOLDOUT for fold in default.folds)
     assert len(default.folds) == 89 - len(holdout)
+    assert default.n_cards == 89
+    assert plan.n_cards == 89
+
+
+def test_universe_wrong_card_count_hard_fails(cards, contract) -> None:
+    with pytest.raises(TargetCardCountError, match="exclusions must be explicit") as exc:
+        outer_folds(cards, contract=contract, require_target_cards=True)
+    assert exc.value.got == 5
+    assert exc.value.expected == contract.splits.target_cards
 
 
 def test_inspect_folds_cli_refuses_live_db(capsys) -> None:
@@ -222,9 +234,11 @@ def test_inspect_folds_cli_default_omits_holdout(capsys) -> None:
     assert "development" in roles
     assert "validation" in roles
     assert payload["include_holdout"] is False
+    assert payload["n_cards"] == 89
+    assert payload["n_folds"] < 89
     ids = {fold["test_event_id"] for fold in payload["folds"]}
     assert "hold-2025" not in ids
-    assert "dev-2017" in ids
+    assert "dev-2017" not in ids
 
 
 def test_inspect_folds_cli_include_holdout_labels_locked(capsys) -> None:
@@ -242,8 +256,30 @@ def test_inspect_folds_cli_include_holdout_labels_locked(capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     holdout = [fold for fold in payload["folds"] if fold["role"] == "holdout"]
     assert holdout
+    assert payload["n_cards"] == 89
     assert all(fold["locked"] is True for fold in holdout)
-    assert all(fold["test_event_id"] == "hold-2025" for fold in holdout)
+    assert all(fold["test_event_id"] != "hold-2025" for fold in holdout)
+
+
+def test_inspect_folds_cli_protocol_fixture_stays_small(capsys) -> None:
+    code = main(
+        [
+            "evaluation",
+            "inspect-folds",
+            "--contract",
+            "config/evaluation/dwcs_v1.json",
+            "--fixture",
+            "protocol",
+            "--json",
+        ]
+    )
+    assert code == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["n_cards"] == 5
+    ids = {fold["test_event_id"] for fold in payload["folds"]}
+    assert "dev-2017" in ids
+    assert "hold-2025" not in ids
+    assert "holdout" not in {fold["role"] for fold in payload["folds"]}
 
 
 def test_inspect_folds_cli_contract_hash_mismatch_exits(tmp_path: Path, capsys) -> None:
@@ -262,13 +298,22 @@ def test_inspect_folds_api_uses_contract_path(cards) -> None:
     plan = inspect_folds(
         contract_path=Path("config/evaluation/dwcs_v1.json"),
         cards=cards,
+        require_target_cards=False,
     )
     assert all(fold.role is not FoldRole.HOLDOUT for fold in plan.folds)
     assert plan.contract_hash == PINNED_CONTRACT_HASH
+    assert plan.n_cards == 5
+
+
+def test_inspect_folds_default_universe_has_89_cards() -> None:
+    plan = inspect_folds(contract_path=Path("config/evaluation/dwcs_v1.json"))
+    assert plan.n_cards == 89
+    assert all(fold.role is not FoldRole.HOLDOUT for fold in plan.folds)
+    assert plan.n_folds < 89
 
 
 def test_identical_cutoff_shared_across_card_bouts(cards) -> None:
-    plan = outer_folds(cards)
+    plan = outer_folds(cards, **PROTOCOL)
     fold = _fold_by_event(plan, "dev-2017")
     expected = datetime(2017, 7, 11, 18, 0, tzinfo=UTC)
     assert fold.cutoff == expected

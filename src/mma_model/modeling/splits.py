@@ -65,6 +65,18 @@ class HoldoutLockedError(SplitError):
     """2025 holdout was requested without the sealed allow_holdout path."""
 
 
+class TargetCardCountError(SplitError):
+    """Universe card count did not match the frozen splits.target_cards value."""
+
+    def __init__(self, got: int, expected: int) -> None:
+        self.got = got
+        self.expected = expected
+        super().__init__(
+            f"split universe has {got} cards, expected {expected}; "
+            "exclusions must be explicit"
+        )
+
+
 @dataclass(frozen=True)
 class SplitCard:
     """One canonical event and its bouts, used as a fold grouping unit."""
@@ -147,6 +159,11 @@ class FoldPlan:
     config_hash: str
     include_holdout: bool
     kind: FoldKind
+    n_cards: int
+
+    @property
+    def n_folds(self) -> int:
+        return len(self.folds)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -157,6 +174,7 @@ class FoldPlan:
             "folds": [fold.to_dict() for fold in self.folds],
             "include_holdout": self.include_holdout,
             "kind": self.kind.value,
+            "n_cards": self.n_cards,
             "n_folds": len(self.folds),
         }
 
@@ -405,6 +423,10 @@ def verify_fold_plan(
     """Recompute hashes from cards/contract/spec and hard-fail on mismatch."""
     resolved = _require_contract(contract)
     groups = group_cards(cards, resolved)
+    if plan.n_cards != len(groups):
+        raise SplitError(
+            f"fold plan n_cards {plan.n_cards} does not match grouped universe {len(groups)}"
+        )
     expected_data = compute_data_hash(_data_rows(groups))
     expected_config = compute_splits_config_hash(resolved)
     verify_evaluator_hashes(
@@ -448,6 +470,7 @@ def build_fold_plan(
     roles: frozenset[FoldRole],
     allow_holdout: bool = False,
     contract: EvaluationContract | None = None,
+    require_target_cards: bool = True,
 ) -> FoldPlan:
     if FoldRole.HOLDOUT in roles and not allow_holdout:
         raise HoldoutLockedError(
@@ -456,7 +479,11 @@ def build_fold_plan(
     if kind is FoldKind.INNER and roles != frozenset({FoldRole.DEVELOPMENT}):
         raise SplitError("inner prior-time folds exist only inside development")
     resolved = _require_contract(contract)
+    if require_target_cards and len(cards) != resolved.splits.target_cards:
+        raise TargetCardCountError(len(cards), resolved.splits.target_cards)
     groups = group_cards(cards, resolved)
+    if require_target_cards and len(groups) != resolved.splits.target_cards:
+        raise TargetCardCountError(len(groups), resolved.splits.target_cards)
     contract_hash = resolved.content_hash
     feature_hash = current_feature_spec_hash()
     data_hash = compute_data_hash(_data_rows(groups))
@@ -525,6 +552,7 @@ def build_fold_plan(
         config_hash=config_hash,
         include_holdout=allow_holdout and FoldRole.HOLDOUT in roles,
         kind=kind,
+        n_cards=len(groups),
     )
     verify_fold_plan(plan, cards, resolved)
     return plan
@@ -534,6 +562,7 @@ def tuning_folds(
     cards: Sequence[SplitCard],
     *,
     contract: EvaluationContract | None = None,
+    require_target_cards: bool = True,
 ) -> FoldPlan:
     """Inner prior-time folds inside development. Never includes 2024/2025."""
     return build_fold_plan(
@@ -542,6 +571,7 @@ def tuning_folds(
         roles=frozenset({FoldRole.DEVELOPMENT}),
         allow_holdout=False,
         contract=contract,
+        require_target_cards=require_target_cards,
     )
 
 
@@ -549,6 +579,7 @@ def validation_folds(
     cards: Sequence[SplitCard],
     *,
     contract: EvaluationContract | None = None,
+    require_target_cards: bool = True,
 ) -> FoldPlan:
     """2024 outer validation folds. Never includes 2025 holdout."""
     return build_fold_plan(
@@ -557,6 +588,7 @@ def validation_folds(
         roles=frozenset({FoldRole.VALIDATION}),
         allow_holdout=False,
         contract=contract,
+        require_target_cards=require_target_cards,
     )
 
 
@@ -565,6 +597,7 @@ def sealed_holdout_folds(
     *,
     allow_holdout: bool = False,
     contract: EvaluationContract | None = None,
+    require_target_cards: bool = True,
 ) -> FoldPlan:
     """Explicit 2025 holdout listing. Default off; ordinary tuning must not call this."""
     return build_fold_plan(
@@ -573,6 +606,7 @@ def sealed_holdout_folds(
         roles=frozenset({FoldRole.HOLDOUT}),
         allow_holdout=allow_holdout,
         contract=contract,
+        require_target_cards=require_target_cards,
     )
 
 
@@ -581,6 +615,7 @@ def outer_folds(
     *,
     allow_holdout: bool = False,
     contract: EvaluationContract | None = None,
+    require_target_cards: bool = True,
 ) -> FoldPlan:
     """Outer rolling-origin folds. Default omits locked 2025 holdout."""
     roles = {FoldRole.DEVELOPMENT, FoldRole.VALIDATION}
@@ -592,6 +627,7 @@ def outer_folds(
         roles=frozenset(roles),
         allow_holdout=allow_holdout,
         contract=contract,
+        require_target_cards=require_target_cards,
     )
 
 
@@ -601,17 +637,23 @@ def inspect_folds(
     include_holdout: bool = False,
     cards: Sequence[SplitCard] | None = None,
     contract: EvaluationContract | None = None,
+    require_target_cards: bool | None = None,
 ) -> FoldPlan:
-    """Build the inspect-folds outer plan (development+validation, holdout optional)."""
+    """Build the inspect-folds outer plan from the 89-card universe by default."""
     if contract is None and contract_path is not None:
         resolved = load_evaluation_contract(path=contract_path)
     else:
         resolved = _require_contract(contract)
-    resolved_cards = tuple(cards) if cards is not None else protocol_fixture_cards()
+    if cards is None:
+        resolved_cards = cards_from_manifest()
+    else:
+        resolved_cards = tuple(cards)
+    enforce = True if require_target_cards is None else require_target_cards
     return outer_folds(
         resolved_cards,
         allow_holdout=include_holdout,
         contract=resolved,
+        require_target_cards=enforce,
     )
 
 
@@ -626,6 +668,7 @@ def render_fold_plan(plan: FoldPlan, *, as_json: bool = False) -> str:
         f"feature_spec_hash: {plan.feature_spec_hash}",
         f"data_hash: {plan.data_hash}",
         f"config_hash: {plan.config_hash}",
+        f"universe_cards: {plan.n_cards}",
         (
             f"folds: {len(plan.folds)} "
             f"(development={role_counts.get('development', 0)} "

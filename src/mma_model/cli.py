@@ -763,9 +763,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional disposable SQLite URL (never implied live data/mma.db)",
     )
     p_inspect.add_argument(
-        "--from-manifest",
-        action="store_true",
-        help="Build folds from the frozen DWCS event/bout manifests",
+        "--fixture",
+        choices=("manifest", "protocol"),
+        default="manifest",
+        help="Card source when --database-url is omitted (default: frozen 89-card DWCS manifest)",
     )
     p_inspect.add_argument(
         "--include-holdout",
@@ -1930,9 +1931,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.evaluation_cmd != "inspect-folds":
             print(f"evaluation configuration error: unknown command {args.evaluation_cmd!r}")
             return EXIT_INTERNAL
-        if args.from_manifest and args.database_url:
+        if args.fixture == "protocol" and args.database_url:
             print(
-                "evaluation configuration error: pass --from-manifest or --database-url, not both"
+                "evaluation configuration error: pass --fixture protocol or --database-url, not both"
             )
             return EXIT_INTERNAL
         try:
@@ -1952,21 +1953,28 @@ def main(argv: list[str] | None = None) -> int:
                 if is_prohibited_live_url(db_url, default_url=default_url):
                     print(
                         "evaluation configuration error: refusing default live data/mma.db; "
-                        "pass an explicit disposable --database-url or omit it for the fixture"
+                        "pass an explicit disposable --database-url or omit it for the DWCS manifest"
                     )
                     return EXIT_INTERNAL
                 engine = open_readonly_sqlite_engine(db_url)
                 session_factory = readonly_session_factory(engine)
                 with session_factory() as session:
                     cards = cards_from_session(session)
-            elif args.from_manifest:
-                cards = cards_from_manifest()
-            else:
+                require_target_cards = True
+            elif args.fixture == "protocol":
                 cards = protocol_fixture_cards()
+                require_target_cards = False
+            elif args.fixture == "manifest":
+                cards = cards_from_manifest()
+                require_target_cards = True
+            else:
+                print(f"evaluation configuration error: unknown fixture {args.fixture!r}")
+                return EXIT_INTERNAL
             plan = inspect_folds(
                 contract_path=Path(args.contract),
                 include_holdout=bool(args.include_holdout),
                 cards=cards,
+                require_target_cards=require_target_cards,
             )
         except CoverageDatabaseError as exc:
             print(f"evaluation configuration error: {exc}")
