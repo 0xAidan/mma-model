@@ -77,6 +77,12 @@ from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, fetch_mma_odds
 from mma_model.features.audit import run_features_audit
 from mma_model.backtest.contract import EvaluatorHashMismatchError
+from mma_model.backtest.engine import BacktestError, execute_backtest_run
+from mma_model.backtest.gates import DatabaseMutationError, EvidenceOverwriteError
+from mma_model.backtest.metrics import (
+    DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
+    DEFAULT_BACKTEST_BOOTSTRAP_SEED,
+)
 from mma_model.evaluation.contract import EvaluationContractError, load_evaluation_contract
 from mma_model.markets.derive import UnsupportedScheduleError
 from mma_model.modeling.artifacts import (
@@ -125,7 +131,7 @@ from mma_model.modeling.splits import (
     protocol_fixture_cards,
     render_fold_plan,
 )
-from mma_model.quality.constants import EXIT_INTERNAL, EXIT_STRICT_BLOCKERS
+from mma_model.quality.constants import EXIT_INTERNAL, EXIT_OK, EXIT_STRICT_BLOCKERS
 from mma_model.quality.coverage import compute_coverage_report
 from mma_model.quality.gates import report_with_gates
 from mma_model.quality.leakage import FutureRowLeakageError
@@ -505,20 +511,82 @@ def main(argv: list[str] | None = None) -> int:
 
     p_bt = sub.add_parser(
         "backtest",
-        help="Walk-forward evaluation: retrain on past fights only, predict next (point-in-time)",
+        help=(
+            "Event-grouped walk-forward (DWCS-306). "
+            "`backtest run` is the evidence path. Legacy `backtest` without `run` "
+            "is fail-closed and is not betting evidence. --database-url is read-only."
+        ),
     )
-    p_bt.add_argument("--min-train", type=int, default=30, help="Minimum fights before first prediction")
-    p_bt.add_argument("--min-prior-fights", type=int, default=1)
+    p_bt.add_argument("--min-train", type=int, default=30, help="Legacy flag; ignored")
+    p_bt.add_argument("--min-prior-fights", type=int, default=1, help="Legacy flag; ignored")
     p_bt.add_argument(
         "--max-predictions",
         type=int,
         default=None,
-        help="Stop after this many out-of-sample predictions (faster smoke test)",
+        help="Legacy flag; ignored",
     )
     p_bt.add_argument(
         "--omit-predictions",
         action="store_true",
-        help="Omit per-fight rows from JSON (metrics only)",
+        help="Legacy flag; ignored",
+    )
+    bt_sub = p_bt.add_subparsers(dest="backtest_cmd", required=False)
+    p_run = bt_sub.add_parser(
+        "run",
+        help="Replay DWCS cards with timestamp-valid data, prices, and settlement",
+    )
+    p_run.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("config/evaluation/dwcs_v1.json"),
+        help="Frozen evaluation contract (never mutated)",
+    )
+    p_run.add_argument(
+        "--output",
+        type=Path,
+        default=Path("output/backtests"),
+        help="Directory for versioned JSON/Markdown evidence",
+    )
+    p_run.add_argument(
+        "--fixture",
+        choices=("protocol", "manifest"),
+        default=None,
+        help="protocol = small real pipeline; manifest = frozen 89/440 (default)",
+    )
+    p_run.add_argument(
+        "--from-manifest",
+        action="store_true",
+        help="Attempt all 89 cards / 440 bouts; missing sources become explicit exclusions",
+    )
+    p_run.add_argument(
+        "--database-url",
+        default=None,
+        help=(
+            "Optional read-only SQLite URL. Mutations are rejected. "
+            "Never implied live data/mma.db. Omit for frozen-manifest exclusions."
+        ),
+    )
+    p_run.add_argument(
+        "--sealed-holdout",
+        action="store_true",
+        help="Explicitly score locked 2025 after freeze; 2025 still never enters training",
+    )
+    p_run.add_argument(
+        "--bootstrap-replicates",
+        type=int,
+        default=DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
+        help="Event-block bootstrap replicates (default 200)",
+    )
+    p_run.add_argument(
+        "--bootstrap-seed",
+        type=int,
+        default=DEFAULT_BACKTEST_BOOTSTRAP_SEED,
+        help="Pinned event-block bootstrap seed",
+    )
+    p_run.add_argument(
+        "--generated-at",
+        default=None,
+        help="Optional explicit UTC timestamp stored but excluded from content hash",
     )
 
     p_source = sub.add_parser("source", help="Source adapter utilities")
@@ -1555,18 +1623,76 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "backtest":
-        init_db()
-        with session_scope() as session:
-            out = walk_forward_backtest(
-                session,
-                min_train_fights=args.min_train,
-                min_prior_fights=args.min_prior_fights,
-                max_predictions=args.max_predictions,
-            )
-        if args.omit_predictions:
-            out = {k: v for k, v in out.items() if k != "predictions"}
-        print(json.dumps(out, indent=2))
-        return 0
+        if getattr(args, "backtest_cmd", None) == "run":
+            if args.fixture == "protocol" and args.from_manifest:
+                print(
+                    "backtest configuration error: pass --fixture protocol or "
+                    "--from-manifest, not both"
+                )
+                return EXIT_INTERNAL
+            if args.fixture == "protocol" and args.database_url:
+                print(
+                    "backtest configuration error: pass --fixture protocol or "
+                    "--database-url, not both"
+                )
+                return EXIT_INTERNAL
+            generated_at = None
+            if args.generated_at:
+                try:
+                    generated_at = datetime.fromisoformat(
+                        str(args.generated_at).replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    print("backtest configuration error: --generated-at must be ISO-8601")
+                    return EXIT_INTERNAL
+            try:
+                payload = execute_backtest_run(
+                    contract_path=Path(args.contract),
+                    output_dir=Path(args.output),
+                    fixture=args.fixture,
+                    from_manifest=bool(args.from_manifest) or args.fixture == "manifest",
+                    database_url=args.database_url,
+                    sealed_holdout=bool(args.sealed_holdout),
+                    bootstrap_replicates=int(args.bootstrap_replicates),
+                    bootstrap_seed=int(args.bootstrap_seed),
+                    generated_at=generated_at,
+                    default_database_url=get_settings().mma_database_url,
+                )
+            except EvaluationContractError as exc:
+                print(f"evaluation contract error: {exc}")
+                return EXIT_INTERNAL
+            except DatabaseMutationError as exc:
+                print(f"backtest database error: {exc}")
+                return EXIT_INTERNAL
+            except EvidenceOverwriteError as exc:
+                print(f"backtest evidence error: {exc}")
+                return EXIT_STRICT_BLOCKERS
+            except EvaluatorHashMismatchError as exc:
+                print(f"evaluation hash mismatch: {exc}")
+                return EXIT_INTERNAL
+            except BacktestError as exc:
+                print(f"backtest error: {exc}")
+                return EXIT_INTERNAL
+            except (HoldoutLockedError, ValueError) as exc:
+                print(f"backtest error: {exc}")
+                return EXIT_INTERNAL
+            summary = {
+                "content_hash": payload.get("content_hash"),
+                "evidence": True,
+                "holdout": payload.get("holdout"),
+                "output": payload.get("output"),
+                "universe": payload.get("universe"),
+            }
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return EXIT_OK
+        out = walk_forward_backtest(
+            None,
+            min_train_fights=args.min_train,
+            min_prior_fights=args.min_prior_fights,
+            max_predictions=args.max_predictions,
+        )
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return EXIT_STRICT_BLOCKERS
 
     if args.cmd == "source" and args.source_cmd == "audit":
         if args.audit_source != "ufcstats-public":

@@ -87,3 +87,6 @@ select = ["E4", "E7", "E9", "F"]
 #              tests/modeling/test_joint.py \
 #              tests/modeling/test_calibration.py \
 #              --select E,F,I,UP,B,SIM
+# Focused stricter lint for DWCS-306 walk-forward backtest:
+#   ruff check src/mma_model/backtest src/mma_model/predict/backtest.py tests/backtest \
+#              --select E,F,I,UP,B,SIM
