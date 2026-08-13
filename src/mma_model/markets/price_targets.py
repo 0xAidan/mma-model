@@ -19,10 +19,19 @@ from mma_model.evaluation.contract import (
     fair_decimal_odds,
     strong_value_decimal_price,
 )
+from mma_model.value import thresholds as _value_thresholds
+from mma_model.value.odds import (
+    american_to_decimal,
+)
+from mma_model.value.odds import (
+    decimal_to_american as _value_decimal_to_american,
+)
 
-STANDARD_ACTIONABLE_EV_TARGET = 0.05
-STANDARD_STRONG_VALUE_EV_TARGET = 0.10
-EXACT_ROUND_ACTIONABLE_EV_TARGET = 0.10
+STANDARD_ACTIONABLE_EV_TARGET = _value_thresholds.STANDARD_ACTIONABLE_EV_TARGET
+STANDARD_STRONG_VALUE_EV_TARGET = _value_thresholds.STANDARD_STRONG_VALUE_EV_TARGET
+EXACT_ROUND_ACTIONABLE_EV_TARGET = _value_thresholds.EXACT_ROUND_ACTIONABLE_EV_TARGET
+actionable_ev_target_for_family = _value_thresholds.actionable_ev_target_for_family
+
 CONFIRMED_VALUE_MIN_PROB_EV_POSITIVE = 0.70
 EXACT_ROUND_MIN_PROB_EV_POSITIVE = 0.75
 
@@ -54,12 +63,6 @@ class RecommendationClassification:
     reason: str
     thresholds: PriceThresholds | None
     offered_decimal: float | None = None
-
-
-def actionable_ev_target_for_family(family: MarketFamily) -> float:
-    if family is MarketFamily.EXACT_ROUND:
-        return EXACT_ROUND_ACTIONABLE_EV_TARGET
-    return STANDARD_ACTIONABLE_EV_TARGET
 
 
 def confirmed_value_min_prob_ev_positive(family: MarketFamily) -> float:
@@ -100,12 +103,8 @@ def compute_price_thresholds(
 
 
 def decimal_to_american(decimal_odds: float) -> float:
-    """Convert decimal odds to American odds."""
-    if decimal_odds <= 1.0:
-        raise ValueError("decimal odds must be > 1")
-    if decimal_odds >= 2.0:
-        return (decimal_odds - 1.0) * 100.0
-    return -100.0 / (decimal_odds - 1.0)
+    """Convert decimal odds to American odds via DWCS-204 validated math."""
+    return _value_decimal_to_american(decimal_odds)
 
 
 def american_or_better_meets_threshold(
@@ -114,18 +113,9 @@ def american_or_better_meets_threshold(
     threshold_american: float,
 ) -> bool:
     """Higher decimal is better; American 'or better' respects sign."""
-    # Convert both to decimal for a uniform comparison.
-    offered_decimal = _american_to_decimal(offered_american)
-    threshold_decimal = _american_to_decimal(threshold_american)
+    offered_decimal = american_to_decimal(offered_american)
+    threshold_decimal = american_to_decimal(threshold_american)
     return offered_decimal >= threshold_decimal
-
-
-def _american_to_decimal(american: float) -> float:
-    if american == 0:
-        raise ValueError("american odds cannot be 0")
-    if american > 0:
-        return 1.0 + american / 100.0
-    return 1.0 + 100.0 / abs(american)
 
 
 def offered_meets_actionable(

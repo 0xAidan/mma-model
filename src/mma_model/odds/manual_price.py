@@ -27,6 +27,8 @@ from mma_model.odds.bookmaker_keys import is_bet365_bookmaker_key
 from mma_model.odds.normalize import ensure_utc, parse_utc_datetime
 from mma_model.odds.provider_decision import licensed_bookmaker_adapter_authorized
 from mma_model.odds.types import PROVIDER_THE_ODDS_API
+from mma_model.value.errors import InvalidOddsError, InvalidProbabilityError
+from mma_model.value.ev import compute_exact_ev as value_compute_exact_ev
 
 MANUAL_SOURCE_LABEL: Final[str] = "user_observed"
 
@@ -373,12 +375,12 @@ def compute_exact_ev(model_prob: float, offered_decimal: float) -> float:
     """Exact EV per 1 unit staked from model prob and decimal offer.
 
     ``EV = model_prob * offered_decimal - 1``. Requires a real offered price.
+    Delegates to the DWCS-204 value math implementation.
     """
-    if not 0.0 < model_prob < 1.0:
-        raise ValueError("model_prob must be in (0, 1)")
-    if offered_decimal <= 1.0:
-        raise ValueError("offered_decimal must be > 1")
-    return model_prob * offered_decimal - 1.0
+    try:
+        return value_compute_exact_ev(model_prob, offered_decimal)
+    except (InvalidOddsError, InvalidProbabilityError) as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:

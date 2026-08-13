@@ -292,6 +292,22 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 
 Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exact bookmaker lines remain optional enrichment; sportsbook-agnostic actionable price guidance remains the mandatory fallback. Snapshot/reference rows stay `provider_unmatched` until proven by this matcher.
 
+## Value math, EV, CLV, and staking (DWCS-204)
+
+| Field | Value |
+|-------|--------|
+| **Package** | `mma_model.value` (`odds`, `devig`, `thresholds`, `ev`, `kelly`, `portfolio`, `priced`) |
+| **Method / version** | `VALUE_MATH_METHOD=dwcs_value_math` / `VALUE_MATH_VERSION=1.0.0`; de-vig `proportional_complete_set` `1.0.0` |
+| **Odds interface** | Validated decimal (`> 1`) and American (`<= -100` or `>= +100`); reject `0` American and impossible probabilities |
+| **De-vig** | Complete-set proportional only; incomplete sets return `IncompleteMarketSet` / raise; fair probs sum to 1 |
+| **Thresholds** | Fair `1/p50`, p25 break-even, actionable `max(1/p25,(1+target)/p50)`, strong-value at 10% (exact-round actionable 10%) — pinned to DWCS-001 formulas |
+| **Priced metrics** | EV, same-line probability CLV, closing EV, flat 1-unit profit, quarter-Kelly capped at 1% bankroll |
+| **Eligibility** | Provider quotes require DWCS-203 quote-level eligibility (match gate alone insufficient); user-observed uses DWCS-202 product eligibility |
+| **Unpriced** | Price-target rows never receive EV / ROI / CLV / realized profit / stake |
+| **Push / void** | Realized flat-unit profit is exactly `0` |
+| **Rounding** | Full precision internally; display helpers only at boundaries |
+| **Out of scope** | Bet ranking, portfolio selection beyond per-bet cap, model fitting, dashboard, sportsbook scraping |
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core

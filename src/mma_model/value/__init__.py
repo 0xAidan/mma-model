@@ -1,1 +1,118 @@
-"""MMA model package."""
+"""DWCS-204 centralized odds math, EV, CLV, de-vig, and staking."""
+
+from __future__ import annotations
+
+from mma_model.value.devig import (
+    DEVIG_METHOD,
+    DEVIG_VERSION,
+    DevigResult,
+    IncompleteMarketSet,
+    proportional_devig,
+    try_proportional_devig,
+)
+from mma_model.value.errors import (
+    IncompleteMarketSetError,
+    IneligiblePriceError,
+    InvalidOddsError,
+    InvalidProbabilityError,
+    OddsMathError,
+    UnpricedMetricsError,
+)
+from mma_model.value.ev import (
+    closing_ev,
+    compute_exact_ev,
+    ev_vs_fair,
+    expected_value,
+    flat_unit_profit,
+    same_line_probability_clv,
+)
+from mma_model.value.kelly import (
+    DEFAULT_BANKROLL_CAP_FRACTION,
+    QUARTER_KELLY_FRACTION,
+    fractional_kelly,
+    kelly_fraction,
+    quarter_kelly_fraction,
+)
+from mma_model.value.odds import (
+    VALUE_MATH_METHOD,
+    VALUE_MATH_VERSION,
+    american_to_decimal,
+    american_to_implied_prob,
+    decimal_to_american,
+    decimal_to_implied_prob,
+    probability_to_decimal,
+    round_american_for_display,
+    round_decimal_for_display,
+    round_probability_for_display,
+    validate_american_odds,
+    validate_decimal_odds,
+    validate_probability,
+)
+from mma_model.value.portfolio import capped_stake_fraction, stake_amount
+from mma_model.value.priced import (
+    PRICED_METRICS_METHOD,
+    PRICED_METRICS_VERSION,
+    MetricsUnavailableReason,
+    PricedValueMetrics,
+    PricedValueRequest,
+    PriceSourceKind,
+    compute_priced_value_metrics,
+)
+from mma_model.value.thresholds import (
+    ValuePriceThresholds,
+    actionable_ev_target_for_family,
+    compute_value_price_thresholds,
+    conservative_break_even_decimal,
+)
+
+__all__ = [
+    "DEFAULT_BANKROLL_CAP_FRACTION",
+    "DEVIG_METHOD",
+    "DEVIG_VERSION",
+    "PRICED_METRICS_METHOD",
+    "PRICED_METRICS_VERSION",
+    "QUARTER_KELLY_FRACTION",
+    "VALUE_MATH_METHOD",
+    "VALUE_MATH_VERSION",
+    "DevigResult",
+    "IncompleteMarketSet",
+    "IncompleteMarketSetError",
+    "IneligiblePriceError",
+    "InvalidOddsError",
+    "InvalidProbabilityError",
+    "MetricsUnavailableReason",
+    "OddsMathError",
+    "PriceSourceKind",
+    "PricedValueMetrics",
+    "PricedValueRequest",
+    "UnpricedMetricsError",
+    "ValuePriceThresholds",
+    "actionable_ev_target_for_family",
+    "american_to_decimal",
+    "american_to_implied_prob",
+    "capped_stake_fraction",
+    "closing_ev",
+    "compute_exact_ev",
+    "compute_priced_value_metrics",
+    "compute_value_price_thresholds",
+    "conservative_break_even_decimal",
+    "decimal_to_american",
+    "decimal_to_implied_prob",
+    "ev_vs_fair",
+    "expected_value",
+    "flat_unit_profit",
+    "fractional_kelly",
+    "kelly_fraction",
+    "probability_to_decimal",
+    "proportional_devig",
+    "quarter_kelly_fraction",
+    "round_american_for_display",
+    "round_decimal_for_display",
+    "round_probability_for_display",
+    "same_line_probability_clv",
+    "stake_amount",
+    "try_proportional_devig",
+    "validate_american_odds",
+    "validate_decimal_odds",
+    "validate_probability",
+]

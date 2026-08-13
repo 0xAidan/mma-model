@@ -24,6 +24,13 @@ from mma_model.odds.types import (
     QuoteAvailability,
     UnknownMarketObservation,
 )
+from mma_model.value.errors import InvalidOddsError
+from mma_model.value.odds import (
+    american_to_decimal as strict_american_to_decimal,
+)
+from mma_model.value.odds import (
+    round_decimal_for_display,
+)
 
 _OUTCOME_NAME_ALIASES: Mapping[str, OutcomeKey] = {
     "over": OutcomeKey.OVER,
@@ -80,12 +87,19 @@ def parse_utc_datetime(value: object, *, field: str = "timestamp") -> datetime |
 
 
 def american_to_decimal(price: float | int) -> float:
-    """Convert American odds to decimal; pass through values already decimal-like."""
+    """Convert American odds to decimal; pass through values already decimal-like.
+
+    Strict American conversion (``<= -100`` or ``>= +100``) is centralized in
+    ``mma_model.value.odds``. Provider payloads may also send decimal odds in the
+    same field; values in ``(1, 100)`` remain a DWCS-201 normalize pass-through
+    and are rounded only at this persistence boundary.
+    """
     american = float(price)
-    if american >= 100:
-        return round(1.0 + american / 100.0, 6)
-    if american <= -100:
-        return round(1.0 + 100.0 / abs(american), 6)
+    if american >= 100 or american <= -100:
+        try:
+            return round_decimal_for_display(strict_american_to_decimal(american))
+        except InvalidOddsError as exc:
+            raise ValueError(str(exc)) from exc
     if american > 1.0:
         return round(american, 6)
     raise ValueError(f"unrecognized odds price: {price!r}")

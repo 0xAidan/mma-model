@@ -39,5 +39,12 @@ jobs:
           src/mma_model/db/odds_guards.py
           tests/odds
           --select E,F,I,UP,B,SIM
+      - name: Ruff value (strict)
+        run: >
+          ruff check
+          src/mma_model/value
+          tests/value
+          tests/test_value.py
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q
