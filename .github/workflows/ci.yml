@@ -46,5 +46,13 @@ jobs:
           tests/value
           tests/test_value.py
           --select E,F,I,UP,B,SIM
+      - name: Ruff modeling (strict)
+        run: >
+          ruff check
+          src/mma_model/modeling/artifacts.py
+          src/mma_model/modeling/baselines.py
+          src/mma_model/modeling/__init__.py
+          tests/modeling/test_baselines.py
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q

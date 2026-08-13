@@ -1,0 +1,358 @@
+"""M0/M1 baselines, versioned artifacts, and deprecation wrappers (DWCS-303)."""
+
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+
+import joblib
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from mma_model.cli import main
+from mma_model.db.models import Event, Fight, Fighter, FightFighterStats
+from mma_model.db.session import create_all_for_tests
+from mma_model.features.builder import FeatureBuilder
+from mma_model.features.snapshot import FeatureSnapshot
+from mma_model.features.spec import FEATURE_NAMES, spec_hash, swap_values
+from mma_model.modeling.artifacts import (
+    PINNED_RIDGE_SPEC_HASH,
+    ArtifactChecksumMismatchError,
+    ArtifactFeatureOrderMismatchError,
+    ArtifactSpecMismatchError,
+    UntrustedArtifactError,
+    load_artifact,
+    load_ridge_spec,
+    manifest_path_for,
+)
+from mma_model.modeling.baselines import (
+    SWAP_ATOL,
+    MissingNoVig,
+    PreCutoffMoneyline,
+    coin_flip_win_prob,
+    labeled_samples_from_snapshot,
+    no_vig_win_prob,
+    predict_loaded_ridge,
+    protocol_training_universe,
+    run_protocol_train,
+    sequential_rating_win_prob,
+)
+from mma_model.modeling.splits import HoldoutLockedError
+from mma_model.predict.train import DEPRECATED_RANDOM_SPLIT_KEY, train_and_save
+from mma_model.quality.constants import EXIT_INTERNAL, EXIT_OK
+from tests.features.helpers import add_bout, add_event, add_result, cutoff_of, dt, named
+
+
+def _flatten_keys(payload: object) -> list[str]:
+    keys: list[str] = []
+    stack: list[object] = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                keys.append(str(key))
+                stack.append(value)
+            continue
+        if isinstance(current, list):
+            stack.extend(current)
+    return keys
+
+
+def _seed_legacy_fights(session) -> None:
+    session.add_all([Fighter(id=f"f{idx}", name=f"Fighter {idx}") for idx in range(4)])
+    start = date(2020, 1, 1)
+    for idx in range(12):
+        event_id = f"e{idx}"
+        fight_id = f"g{idx}"
+        a_id = f"f{idx % 4}"
+        b_id = f"f{(idx + 1) % 4}"
+        session.add(
+            Event(id=event_id, name=f"Event {idx}", event_date=start + timedelta(days=idx * 14))
+        )
+        winner_id = a_id if idx % 2 == 0 else b_id
+        session.add(
+            Fight(
+                id=fight_id,
+                event_id=event_id,
+                fighter_a_id=a_id,
+                fighter_b_id=b_id,
+                winner_id=winner_id,
+                method="U-DEC",
+                detail_ingested=True,
+            )
+        )
+        session.add(
+            FightFighterStats(
+                fight_id=fight_id,
+                fighter_id=a_id,
+                sig_str_landed=20 + idx,
+                sig_str_attempted=40,
+                td_landed=1,
+                td_attempted=3,
+                sub_att=1,
+                ctrl_seconds=60,
+            )
+        )
+        session.add(
+            FightFighterStats(
+                fight_id=fight_id,
+                fighter_id=b_id,
+                sig_str_landed=10 + idx,
+                sig_str_attempted=40,
+                td_landed=0,
+                td_attempted=2,
+                sub_att=0,
+                ctrl_seconds=20,
+            )
+        )
+    session.commit()
+
+
+def test_legacy_train_keys_are_deprecated_not_holdout(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-train.db'}", future=True)
+    create_all_for_tests(engine)
+    factory = sessionmaker(bind=engine, future=True)
+    with factory() as session:
+        _seed_legacy_fights(session)
+        report = train_and_save(session, tmp_path / "legacy.joblib")
+    engine.dispose()
+    keys = _flatten_keys(report)
+    assert DEPRECATED_RANDOM_SPLIT_KEY in report
+    assert "accuracy_holdout" not in keys
+    assert "log_loss_holdout" not in keys
+    assert "brier_holdout" not in keys
+    assert all("holdout" not in key.lower() for key in keys)
+    nested = report[DEPRECATED_RANDOM_SPLIT_KEY]
+    assert isinstance(nested, dict)
+    assert "accuracy" in nested
+    assert "not betting evidence" in str(nested["note"]).lower()
+
+
+def test_ridge_trainer_report_has_no_holdout_betting_keys(tmp_path: Path) -> None:
+    report = run_protocol_train(output_path=tmp_path / "ridge.joblib")
+    payload = report.to_dict()
+    keys = _flatten_keys(payload)
+    assert all("holdout" not in key.lower() for key in keys)
+    assert DEPRECATED_RANDOM_SPLIT_KEY not in keys
+    assert "2025-a" not in report.train_sample_ids
+    assert "2017-b" not in report.train_sample_ids
+    assert payload["metrics"]["baselines"]["coin_flip"]["n"] >= 1
+
+
+def test_payload_bit_flip_is_rejected(tmp_path: Path) -> None:
+    report = run_protocol_train(output_path=tmp_path / "ridge.joblib")
+    path = report.artifact.payload_path
+    blob = bytearray(path.read_bytes())
+    blob[min(32, len(blob) - 1)] ^= 0xFF
+    path.write_bytes(bytes(blob))
+    with pytest.raises(ArtifactChecksumMismatchError, match="checksum"):
+        load_artifact(path)
+
+
+def test_contract_hash_mismatch_is_rejected(tmp_path: Path) -> None:
+    report = run_protocol_train(output_path=tmp_path / "ridge.joblib")
+    side = manifest_path_for(report.artifact.payload_path)
+    manifest = json.loads(side.read_text(encoding="utf-8"))
+    manifest["contract_hash"] = "0" * 64
+    side.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ArtifactSpecMismatchError, match="evaluation contract"):
+        load_artifact(report.artifact.payload_path)
+
+
+def test_feature_order_change_is_rejected(tmp_path: Path) -> None:
+    report = run_protocol_train(output_path=tmp_path / "ridge.joblib")
+    side = manifest_path_for(report.artifact.payload_path)
+    manifest = json.loads(side.read_text(encoding="utf-8"))
+    names = list(manifest["feature_names"])
+    names[0], names[1] = names[1], names[0]
+    manifest["feature_names"] = names
+    side.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ArtifactFeatureOrderMismatchError, match="feature order"):
+        load_artifact(report.artifact.payload_path)
+
+
+def test_bare_pickle_is_untrusted(tmp_path: Path) -> None:
+    path = tmp_path / "bare.joblib"
+    joblib.dump({"feature_names": list(FEATURE_NAMES), "pipeline": object()}, path)
+    with pytest.raises(UntrustedArtifactError, match="untrusted"):
+        load_artifact(path)
+
+
+def test_swap_predictions_complementary_within_1e8(tmp_path: Path) -> None:
+    cards, snapshot, odds = protocol_training_universe()
+    samples = labeled_samples_from_snapshot(snapshot, cards, odds_by_bout=odds)
+    sample = next(item for item in samples if item.sample_id == "br-a")
+    swapped = swap_values(sample.values)
+    assert coin_flip_win_prob(sample.values) == pytest.approx(0.5)
+    assert abs(coin_flip_win_prob(sample.values) + coin_flip_win_prob(swapped) - 1.0) <= SWAP_ATOL
+    p_rating = sequential_rating_win_prob(sample.values)
+    p_rating_swap = sequential_rating_win_prob(swapped)
+    assert abs(p_rating + p_rating_swap - 1.0) <= SWAP_ATOL
+    report = run_protocol_train(output_path=tmp_path / "ridge.joblib")
+    loaded = load_artifact(report.artifact.payload_path)
+    p_m1 = predict_loaded_ridge(loaded, sample.values)
+    p_m1_swap = predict_loaded_ridge(loaded, swapped)
+    assert abs(p_m1 + p_m1_swap - 1.0) <= SWAP_ATOL
+
+
+def test_legacy_cli_train_still_callable(tmp_path: Path, monkeypatch, capsys) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_init() -> None:
+        captured["init"] = True
+
+    @contextmanager
+    def fake_scope():
+        yield object()
+
+    def fake_train(session, path, **kwargs):
+        Path(path).write_bytes(b"legacy")
+        return {
+            "n_samples": 8,
+            DEPRECATED_RANDOM_SPLIT_KEY: {"accuracy": 0.5, "note": "not betting evidence"},
+            "deprecation": "not betting evidence",
+            "model_path": str(path),
+        }
+
+    monkeypatch.setattr("mma_model.cli.init_db", fake_init)
+    monkeypatch.setattr("mma_model.cli.session_scope", fake_scope)
+    monkeypatch.setattr("mma_model.cli.train_and_save", fake_train)
+    out_path = tmp_path / "legacy.joblib"
+    code = main(["train", "--output", str(out_path)])
+    assert code == EXIT_OK
+    err = capsys.readouterr()
+    assert "DEPRECATED" in err.err
+    assert "not betting evidence" in err.err.lower()
+    payload = json.loads(err.out)
+    assert DEPRECATED_RANDOM_SPLIT_KEY in payload
+    assert "accuracy_holdout" not in payload
+
+
+def test_ordinary_train_refuses_2025_holdout(tmp_path: Path) -> None:
+    with pytest.raises(HoldoutLockedError, match="locked"):
+        run_protocol_train(output_path=tmp_path / "nope.joblib", include_holdout=True)
+    report = run_protocol_train(output_path=tmp_path / "ridge.joblib")
+    assert "2025-a" not in report.train_sample_ids
+    keys = _flatten_keys(report.to_dict())
+    assert all("holdout" not in key.lower() for key in keys)
+
+
+def test_coin_flip_always_half() -> None:
+    zeros = tuple(0.0 for _ in FEATURE_NAMES)
+    ones = tuple(1.0 for _ in FEATURE_NAMES)
+    assert coin_flip_win_prob(zeros) == 0.5
+    assert coin_flip_win_prob(ones) == 0.5
+    assert coin_flip_win_prob(None) == 0.5
+
+
+def test_sequential_rating_uses_pre_card_same_card_freeze() -> None:
+    snapshot = FeatureSnapshot()
+    add_event(snapshot, "prior", dt(2018, 1, 1))
+    add_event(snapshot, "card", dt(2019, 6, 1))
+    prior = add_bout(snapshot, "p1", "prior", "a", "z")
+    add_result(
+        snapshot,
+        prior,
+        winner_id="a",
+        method="U-DEC",
+        ending_round=3,
+        time_str="5:00",
+        effective_at=dt(2018, 1, 1),
+    )
+    b1 = add_bout(snapshot, "t1", "card", "a", "c")
+    add_bout(snapshot, "t2", "card", "a", "b")
+    leak_at = datetime(2019, 6, 1, 0, 30, tzinfo=UTC)
+    add_result(
+        snapshot,
+        b1,
+        winner_id="a",
+        method="KO/TKO",
+        ending_round=1,
+        time_str="0:15",
+        effective_at=leak_at,
+    )
+    cutoff = cutoff_of(snapshot, "card")
+    builder = FeatureBuilder(snapshot)
+    row1 = builder.build("a", "c", cutoff, bout_id="t1")
+    row2 = builder.build("a", "b", cutoff, bout_id="t2")
+    v1 = named(row1.values, row1.names)
+    v2 = named(row2.values, row2.names)
+    assert v1["rating_a"] == v2["rating_a"]
+    assert v1["prior_fights_a"] == v2["prior_fights_a"] == 1.0
+    p1 = sequential_rating_win_prob(row1.values)
+    p2 = sequential_rating_win_prob(row2.values)
+    assert abs(p1 + sequential_rating_win_prob(swap_values(row1.values)) - 1.0) <= SWAP_ATOL
+    assert abs(p2 + sequential_rating_win_prob(swap_values(row2.values)) - 1.0) <= SWAP_ATOL
+
+
+def test_no_vig_missing_does_not_fabricate() -> None:
+    cards, snapshot, odds = protocol_training_universe()
+    samples = {
+        item.sample_id: item
+        for item in labeled_samples_from_snapshot(snapshot, cards, odds_by_bout=odds)
+    }
+    missing = no_vig_win_prob(samples["2017-a"].moneyline, cutoff=samples["2017-a"].cutoff)
+    assert isinstance(missing, MissingNoVig)
+    incomplete = no_vig_win_prob(samples["2023-a"].moneyline, cutoff=samples["2023-a"].cutoff)
+    assert isinstance(incomplete, MissingNoVig)
+    complete = no_vig_win_prob(samples["2024-a"].moneyline, cutoff=samples["2024-a"].cutoff)
+    assert not isinstance(complete, MissingNoVig)
+    assert 0.0 < float(complete) < 1.0
+    late = PreCutoffMoneyline(
+        decimal_odds={"fighter_a": 1.80, "fighter_b": 2.10},
+        observed_at=datetime(2024, 8, 13, 3, 0, tzinfo=UTC),
+    )
+    after_cutoff = no_vig_win_prob(late, cutoff=samples["2024-a"].cutoff)
+    assert isinstance(after_cutoff, MissingNoVig)
+    none_odds = no_vig_win_prob(None)
+    assert isinstance(none_odds, MissingNoVig)
+
+
+def test_model_train_cli_protocol_fixture(tmp_path: Path, capsys) -> None:
+    out_path = tmp_path / "ridge.joblib"
+    code = main(
+        [
+            "model",
+            "train",
+            "--spec",
+            "config/model_specs/ridge_v1.yaml",
+            "--fixture",
+            "protocol",
+            "--output",
+            str(out_path),
+        ]
+    )
+    assert code == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model_id"] == "M1"
+    assert all("holdout" not in key.lower() for key in _flatten_keys(payload))
+    assert "2025-a" not in payload["train_sample_ids"]
+    loaded = load_artifact(out_path)
+    assert loaded.manifest.feature_spec_hash == spec_hash()
+    assert loaded.manifest.config_hash == PINNED_RIDGE_SPEC_HASH
+
+
+def test_model_train_cli_refuses_live_db(capsys) -> None:
+    code = main(
+        [
+            "model",
+            "train",
+            "--spec",
+            "config/model_specs/ridge_v1.yaml",
+            "--database-url",
+            "sqlite:///data/mma.db",
+        ]
+    )
+    assert code == EXIT_INTERNAL
+    assert "refusing" in capsys.readouterr().out.lower()
+
+
+def test_ridge_spec_hash_is_pinned() -> None:
+    spec = load_ridge_spec()
+    assert spec.content_hash == PINNED_RIDGE_SPEC_HASH
+    assert spec.ordinary_allow_holdout is False
+    packaged = load_ridge_spec(path=Path("config/model_specs/ridge_v1.yaml"))
+    assert packaged.content_hash == PINNED_RIDGE_SPEC_HASH
