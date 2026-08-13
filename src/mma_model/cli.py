@@ -75,6 +75,17 @@ from mma_model.odds.snapshot import (
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, fetch_mma_odds
 from mma_model.features.audit import run_features_audit
+from mma_model.backtest.contract import EvaluatorHashMismatchError
+from mma_model.evaluation.contract import EvaluationContractError, load_evaluation_contract
+from mma_model.modeling.splits import (
+    HoldoutLockedError,
+    SplitError,
+    cards_from_manifest,
+    cards_from_session,
+    inspect_folds,
+    protocol_fixture_cards,
+    render_fold_plan,
+)
 from mma_model.quality.constants import EXIT_INTERNAL, EXIT_STRICT_BLOCKERS
 from mma_model.quality.coverage import compute_coverage_report
 from mma_model.quality.gates import report_with_gates
@@ -730,6 +741,38 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional disposable SQLite URL (never implied live data/mma.db)",
     )
+
+    p_eval = sub.add_parser(
+        "evaluation",
+        help="Frozen evaluation contract tools (DWCS-302)",
+    )
+    eval_sub = p_eval.add_subparsers(dest="evaluation_cmd", required=True)
+    p_inspect = eval_sub.add_parser(
+        "inspect-folds",
+        help="Inspect event-grouped rolling-origin folds",
+    )
+    p_inspect.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("config/evaluation/dwcs_v1.json"),
+        help="Evaluation contract path",
+    )
+    p_inspect.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional disposable SQLite URL (never implied live data/mma.db)",
+    )
+    p_inspect.add_argument(
+        "--from-manifest",
+        action="store_true",
+        help="Build folds from the frozen DWCS event/bout manifests",
+    )
+    p_inspect.add_argument(
+        "--include-holdout",
+        action="store_true",
+        help="List locked 2025 holdout folds (omitted by default)",
+    )
+    p_inspect.add_argument("--json", action="store_true", help="Print JSON fold plan")
 
     args = p.parse_args(argv)
 
@@ -1881,6 +1924,69 @@ def main(argv: list[str] | None = None) -> int:
             print(f"features configuration error: {exc}")
             return EXIT_INTERNAL
         print("features future-invariance ok")
+        return 0
+
+    if args.cmd == "evaluation":
+        if args.evaluation_cmd != "inspect-folds":
+            print(f"evaluation configuration error: unknown command {args.evaluation_cmd!r}")
+            return EXIT_INTERNAL
+        if args.from_manifest and args.database_url:
+            print(
+                "evaluation configuration error: pass --from-manifest or --database-url, not both"
+            )
+            return EXIT_INTERNAL
+        try:
+            load_evaluation_contract(path=Path(args.contract))
+        except EvaluationContractError as exc:
+            print(f"evaluation contract error: {exc}")
+            return EXIT_INTERNAL
+
+        engine = None
+        try:
+            if args.database_url is not None:
+                db_url = str(args.database_url).strip()
+                if not db_url:
+                    print("evaluation configuration error: empty --database-url")
+                    return EXIT_INTERNAL
+                default_url = get_settings().mma_database_url
+                if is_prohibited_live_url(db_url, default_url=default_url):
+                    print(
+                        "evaluation configuration error: refusing default live data/mma.db; "
+                        "pass an explicit disposable --database-url or omit it for the fixture"
+                    )
+                    return EXIT_INTERNAL
+                engine = open_readonly_sqlite_engine(db_url)
+                session_factory = readonly_session_factory(engine)
+                with session_factory() as session:
+                    cards = cards_from_session(session)
+            elif args.from_manifest:
+                cards = cards_from_manifest()
+            else:
+                cards = protocol_fixture_cards()
+            plan = inspect_folds(
+                contract_path=Path(args.contract),
+                include_holdout=bool(args.include_holdout),
+                cards=cards,
+            )
+        except CoverageDatabaseError as exc:
+            print(f"evaluation configuration error: {exc}")
+            return EXIT_INTERNAL
+        except HoldoutLockedError as exc:
+            print(f"evaluation holdout locked: {exc}")
+            return EXIT_INTERNAL
+        except EvaluatorHashMismatchError as exc:
+            print(f"evaluation hash mismatch: {exc}")
+            return EXIT_INTERNAL
+        except EvaluationContractError as exc:
+            print(f"evaluation contract error: {exc}")
+            return EXIT_INTERNAL
+        except (SplitError, ValueError) as exc:
+            print(f"evaluation configuration error: {exc}")
+            return EXIT_INTERNAL
+        finally:
+            if engine is not None:
+                engine.dispose()
+        print(render_fold_plan(plan, as_json=bool(args.json)), end="")
         return 0
 
     return 1
