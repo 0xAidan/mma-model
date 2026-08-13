@@ -74,9 +74,11 @@ from mma_model.odds.snapshot import (
 )
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, fetch_mma_odds
-from mma_model.quality.constants import EXIT_INTERNAL
+from mma_model.features.audit import run_features_audit
+from mma_model.quality.constants import EXIT_INTERNAL, EXIT_STRICT_BLOCKERS
 from mma_model.quality.coverage import compute_coverage_report
 from mma_model.quality.gates import report_with_gates
+from mma_model.quality.leakage import FutureRowLeakageError
 from mma_model.quality.readonly import (
     CoverageDatabaseError,
     is_prohibited_live_url,
@@ -709,6 +711,24 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional content-addressed raw store for referenced blob verification",
+    )
+
+    p_feat = sub.add_parser("features", help="Cutoff-aware PIT feature tools")
+    feat_sub = p_feat.add_subparsers(dest="features_cmd", required=True)
+    p_feat_audit = feat_sub.add_parser(
+        "audit",
+        help="Audit PIT feature future-invariance (DWCS-301)",
+    )
+    p_feat_audit.add_argument("--series", default="dwcs", choices=["dwcs"])
+    p_feat_audit.add_argument(
+        "--future-invariance",
+        action="store_true",
+        help="Fail if appending later observations changes a past feature row",
+    )
+    p_feat_audit.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional disposable SQLite URL (never implied live data/mma.db)",
     )
 
     args = p.parse_args(argv)
@@ -1807,6 +1827,61 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         finally:
             engine.dispose()
+
+    if args.cmd == "features":
+        if args.features_cmd != "audit":
+            print(f"features configuration error: unknown command {args.features_cmd!r}")
+            return EXIT_INTERNAL
+        if not args.future_invariance:
+            print("features configuration error: audit requires --future-invariance")
+            return EXIT_INTERNAL
+        db_url = args.database_url
+        if db_url is not None:
+            db_url = str(db_url).strip()
+            if not db_url:
+                print("features configuration error: empty --database-url")
+                return EXIT_INTERNAL
+            default_url = get_settings().mma_database_url
+            if is_prohibited_live_url(db_url, default_url=default_url):
+                print(
+                    "features configuration error: refusing default live data/mma.db; "
+                    "pass an explicit disposable --database-url or omit it for the fixture"
+                )
+                return EXIT_INTERNAL
+            try:
+                engine = open_readonly_sqlite_engine(db_url)
+            except CoverageDatabaseError as exc:
+                print(f"features configuration error: {exc}")
+                return EXIT_INTERNAL
+            Session = readonly_session_factory(engine)
+            try:
+                try:
+                    with Session() as session:
+                        run_features_audit(
+                            series=str(args.series),
+                            future_invariance=True,
+                            session=session,
+                        )
+                except FutureRowLeakageError as exc:
+                    print(f"features future-invariance failed: {exc}")
+                    return EXIT_STRICT_BLOCKERS
+                except ValueError as exc:
+                    print(f"features configuration error: {exc}")
+                    return EXIT_INTERNAL
+                print("features future-invariance ok")
+                return 0
+            finally:
+                engine.dispose()
+        try:
+            run_features_audit(series=str(args.series), future_invariance=True)
+        except FutureRowLeakageError as exc:
+            print(f"features future-invariance failed: {exc}")
+            return EXIT_STRICT_BLOCKERS
+        except ValueError as exc:
+            print(f"features configuration error: {exc}")
+            return EXIT_INTERNAL
+        print("features future-invariance ok")
+        return 0
 
     return 1
 
