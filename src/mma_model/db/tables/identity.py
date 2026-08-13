@@ -77,6 +77,17 @@ class IdentityMatchEvidence(Base):
     """Immutable evidence for every link/merge/review/reversal."""
 
     __tablename__ = "identity_match_evidence"
+    __table_args__ = (
+        # One terminal approve/reject evidence row per review (defense in depth).
+        Index(
+            "uq_identity_evidence_review_decision",
+            "review_id",
+            unique=True,
+            sqlite_where=text(
+                "action IN ('approved', 'rejected') AND review_id IS NOT NULL"
+            ),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

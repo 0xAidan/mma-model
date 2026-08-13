@@ -15,6 +15,7 @@ from mma_model.db.tables.core import CanonicalFighter, FighterSourceId
 from mma_model.db.tables.identity import IdentityMatchEvidence, IdentityReviewQueue
 from mma_model.dwcs.ids import canonical_fighter_id
 from mma_model.identity.models import ReviewCandidate
+from mma_model.identity import review as review_mod
 from mma_model.identity.resolver import resolve_fighter
 from mma_model.identity.review import (
     ReviewDecisionError,
@@ -259,16 +260,17 @@ def test_actor_validation(env) -> None:
             )
 
 
-def test_concurrent_approvals_one_wins(env) -> None:
+def _run_concurrent_approvals(env, *, espn_id: str, external_id: str, name: str):
+    """Two threads approve the same pending review; return post-state."""
     Session = env["Session"]
     with Session() as session:
-        fid = _seed(session, "105", "Concurrent")
+        fid = _seed(session, espn_id, name)
         session.commit()
         queued = resolve_fighter(
             session,
             source="tapology_public",
-            external_id="conc-1",
-            display_name="Concurrent",
+            external_id=external_id,
+            display_name=name,
             actor="system",
             now=FIXED_NOW,
         )
@@ -276,11 +278,9 @@ def test_concurrent_approvals_one_wins(env) -> None:
         review_id = queued.review_id
 
     errors: list[BaseException] = []
-    successes = 0
     lock = threading.Lock()
 
     def _approve(actor: str) -> None:
-        nonlocal successes
         local = sessionmaker(
             bind=env["engine"], autoflush=False, autocommit=False, future=True
         )
@@ -295,10 +295,9 @@ def test_concurrent_approvals_one_wins(env) -> None:
                     now=FIXED_NOW,
                 )
                 session.commit()
-            with lock:
-                successes += 1
         except Exception as exc:  # noqa: BLE001 - collect race outcomes
-            errors.append(exc)
+            with lock:
+                errors.append(exc)
 
     t1 = threading.Thread(target=_approve, args=("t1",))
     t2 = threading.Thread(target=_approve, args=("t2",))
@@ -307,7 +306,6 @@ def test_concurrent_approvals_one_wins(env) -> None:
     t1.join()
     t2.join()
 
-    # At most one mutating success; the other may idempotently succeed or error.
     with Session() as session:
         review = session.get(IdentityReviewQueue, review_id)
         approved = [
@@ -318,7 +316,139 @@ def test_concurrent_approvals_one_wins(env) -> None:
         mapping = session.scalar(
             select(FighterSourceId).where(
                 FighterSourceId.source == "tapology_public",
-                FighterSourceId.external_id == "conc-1",
+                FighterSourceId.external_id == external_id,
+            )
+        )
+    return {
+        "fid": fid,
+        "review_id": review_id,
+        "review": review,
+        "approved": approved,
+        "mapping": mapping,
+        "errors": errors,
+    }
+
+
+def test_concurrent_approvals_one_wins(env) -> None:
+    result = _run_concurrent_approvals(
+        env, espn_id="105", external_id="conc-1", name="Concurrent"
+    )
+    # At most one mutating success; the other may idempotently succeed or error.
+    assert result["review"] is not None
+    assert result["review"].status == "approved"
+    assert result["mapping"] is not None
+    assert result["mapping"].fighter_id == result["fid"]
+    assert len(result["approved"]) == 1
+
+
+def test_concurrent_approvals_one_wins_under_stress(env) -> None:
+    """Repeat the two-writer race; only one approved evidence may ever persist.
+
+    Plain single-shot concurrency flakes (~25% locally). Stressing without
+    sleeps/xfail/serialization proves the missing pending/version CAS.
+    """
+    for i in range(30):
+        # Isolate each attempt on a fresh schema so prior rows cannot mask duplicates.
+        db_path = env["db_path"].parent / f"stress-{i}.db"
+        stress_engine = create_engine(f"sqlite:///{db_path}", future=True)
+        _attach_sqlite_listeners(stress_engine)
+        create_all_for_tests(stress_engine)
+        stress_env = {
+            "engine": stress_engine,
+            "Session": sessionmaker(
+                bind=stress_engine, autoflush=False, autocommit=False, future=True
+            ),
+            "db_path": db_path,
+        }
+        try:
+            result = _run_concurrent_approvals(
+                stress_env,
+                espn_id=str(2000 + i),
+                external_id=f"stress-{i}",
+                name=f"Stress {i}",
+            )
+            assert result["review"] is not None
+            assert result["review"].status == "approved"
+            assert result["mapping"] is not None
+            assert result["mapping"].fighter_id == result["fid"]
+            assert len(result["approved"]) == 1, (
+                f"attempt {i}: expected 1 approved evidence, "
+                f"got {len(result['approved'])} actors={[e.actor for e in result['approved']]}"
+            )
+        finally:
+            stress_engine.dispose()
+            if db_path.exists():
+                db_path.unlink()
+
+
+def test_concurrent_approvals_barrier_one_evidence(env, monkeypatch) -> None:
+    """Both sessions observe pending together; only one approval transition wins."""
+    Session = env["Session"]
+    with Session() as session:
+        fid = _seed(session, "110", "Barrier Conc")
+        session.commit()
+        queued = resolve_fighter(
+            session,
+            source="tapology_public",
+            external_id="barrier-conc",
+            display_name="Barrier Conc",
+            actor="system",
+            now=FIXED_NOW,
+        )
+        session.commit()
+        review_id = queued.review_id
+
+    barrier = threading.Barrier(2, timeout=10)
+    original_snapshot = review_mod._committed_review_snapshot
+
+    def _race_snapshot(session, review_id_arg: str):
+        result = original_snapshot(session, review_id_arg)
+        if result is not None and result[0] == "pending":
+            barrier.wait()
+        return result
+
+    monkeypatch.setattr(review_mod, "_committed_review_snapshot", _race_snapshot)
+
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def _approve(actor: str) -> None:
+        local = sessionmaker(
+            bind=env["engine"], autoflush=False, autocommit=False, future=True
+        )
+        try:
+            with local() as session:
+                apply_review_decision(
+                    session,
+                    review_id=review_id,
+                    decision="approve",
+                    canonical_id=fid,
+                    actor=actor,
+                    now=FIXED_NOW,
+                )
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 - collect race outcomes
+            with lock:
+                errors.append(exc)
+
+    t1 = threading.Thread(target=_approve, args=("t1",))
+    t2 = threading.Thread(target=_approve, args=("t2",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    with Session() as session:
+        review = session.get(IdentityReviewQueue, review_id)
+        approved = [
+            e
+            for e in session.scalars(select(IdentityMatchEvidence)).all()
+            if e.action == "approved" and e.review_id == review_id
+        ]
+        mapping = session.scalar(
+            select(FighterSourceId).where(
+                FighterSourceId.source == "tapology_public",
+                FighterSourceId.external_id == "barrier-conc",
             )
         )
     assert review is not None
