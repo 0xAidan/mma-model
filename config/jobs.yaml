@@ -1,0 +1,33 @@
+# DWCS-205 job definitions (host systemd + flock compatible).
+# Overlap: one writer via flock. Jobs are idempotent by durable key.
+
+schema_version: 1
+ticket: DWCS-205
+
+defaults:
+  overlap_strategy: flock_one_writer
+  lock_dir: /run
+  timezone: UTC
+
+jobs:
+  snapshot-odds:
+    description: Collect due live odds quotes within event-relative cadence windows
+    command: mma-model jobs snapshot-odds
+    lock_file: mma-snapshot-odds.lock
+    schedule_contract: config/odds/schedule_v1.yaml
+    mode: due_live
+    no_op_outside_window: true
+
+  odds-backfill:
+    description: Sparse-first The Odds API historical backfill from 2020
+    command: mma-model odds backfill
+    lock_file: mma-odds-backfill.lock
+    schedule_contract: config/odds/schedule_v1.yaml
+    mode: historical_sparse
+    from_year: 2020
+
+  odds-due:
+    description: Deterministic due-work listing (no network) for an explicit as_of
+    command: mma-model odds due
+    lock_file: null
+    read_only: true

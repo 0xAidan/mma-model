@@ -1,10 +1,11 @@
-"""Odds package exports (DWCS-201 / DWCS-202 / DWCS-203)."""
+"""Odds package exports (DWCS-201 / DWCS-202 / DWCS-203 / DWCS-205)."""
 
 from mma_model.domain.quote_eligibility import (
     QUOTE_ELIGIBILITY_DECISION_VERSION,
     RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS,
     compute_quote_eligibility_decision_identity,
 )
+from mma_model.odds.backfill import run_odds_backfill
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.bookmaker_keys import (
     BET365_BOOKMAKER_ALIASES,
@@ -89,6 +90,11 @@ from mma_model.odds.reconcile import (
     apply_replacement,
     persist_match_decision,
     run_odds_reconcile,
+)
+from mma_model.odds.schedule import (
+    DueAction,
+    compute_due_work,
+    load_schedule_contract,
 )
 from mma_model.odds.snapshot import run_odds_audit, run_odds_snapshot
 from mma_model.odds.store import OddsQuoteStore
@@ -179,7 +185,11 @@ __all__ = [
     "resolve_visible_quotes_value_eligibility",
     "reverse_bout_match_review",
     "run_bookmaker_audit",
+    "DueAction",
+    "compute_due_work",
+    "load_schedule_contract",
     "run_odds_audit",
+    "run_odds_backfill",
     "run_odds_reconcile",
     "run_odds_snapshot",
     "summarize_quote_eligibility",

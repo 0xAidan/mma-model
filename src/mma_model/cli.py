@@ -45,6 +45,24 @@ from mma_model.odds.price_guidance import (
     build_price_guidance,
 )
 from mma_model.odds.reconcile import OddsReconcileError, run_odds_reconcile
+from mma_model.odds.backfill import run_odds_backfill
+from mma_model.odds.events_for_schedule import (
+    load_dwcs_schedule_events,
+    load_upcoming_dwcs_events_from_db,
+)
+from mma_model.odds.job_ledger import slot_succeeded
+from mma_model.odds.quota_budget import (
+    QuotaBudgetState,
+    plan_request_budget,
+    validate_remaining_override,
+)
+from mma_model.odds.schedule import (
+    DueAction,
+    RequestPurpose,
+    compute_due_work,
+    compute_due_work_for_events,
+)
+from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
@@ -290,6 +308,126 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional user_observed price JSON for exact EV confirmation",
     )
     p_odds_guide.add_argument("--prob-ev-positive", type=float, default=None)
+
+    p_odds_backfill = odds_sub.add_parser(
+        "backfill",
+        help="Sparse-first historical odds backfill from 2020 (DWCS-205)",
+    )
+    p_odds_backfill.add_argument("--series", default="dwcs")
+    p_odds_backfill.add_argument(
+        "--from",
+        dest="from_year",
+        type=int,
+        default=2020,
+        help="Earliest calendar year to include (default 2020)",
+    )
+    p_odds_backfill.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("config/evaluation/dwcs_v1.json"),
+        help="Evaluation contract path (accepted; evaluation itself out of scope)",
+    )
+    p_odds_backfill.add_argument("--markets", default="h2h")
+    p_odds_backfill.add_argument("--regions", default="us")
+    p_odds_backfill.add_argument(
+        "--as-of",
+        default=None,
+        help="Explicit UTC as_of for quota reads (required for deterministic runs)",
+    )
+    p_odds_backfill.add_argument("--offline-fixtures", action="store_true")
+    p_odds_backfill.add_argument("--fixture-dir", type=Path, default=None)
+    p_odds_backfill.add_argument("--database-url", default=None)
+    p_odds_backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute coverage/due work without calling the provider",
+    )
+    p_odds_backfill.add_argument(
+        "--limit-events",
+        type=int,
+        default=None,
+        help="Optional cap on events for smoke/offline runs",
+    )
+    p_odds_backfill.add_argument(
+        "--remaining-override",
+        type=int,
+        default=None,
+        help="Explicit override 0..monthly_limit (prefer --quota-bootstrap)",
+    )
+    p_odds_backfill.add_argument(
+        "--quota-bootstrap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow zero-cost events bootstrap when remaining provenance is missing/stale "
+        "(use --no-quota-bootstrap to fail closed without network bootstrap)",
+    )
+
+    p_odds_due = odds_sub.add_parser(
+        "due",
+        help="Deterministic due-work listing for an explicit UTC as_of (DWCS-205)",
+    )
+    p_odds_due.add_argument("--series", default="dwcs")
+    p_odds_due.add_argument("--as-of", required=True, help="Explicit timezone-aware UTC")
+    p_odds_due.add_argument("--markets", default="h2h")
+    p_odds_due.add_argument("--regions", default="us")
+    p_odds_due.add_argument(
+        "--event-id",
+        action="append",
+        default=None,
+        help="Optional event id filter (repeatable)",
+    )
+    p_odds_due.add_argument(
+        "--event-start",
+        default=None,
+        help="Optional single event start ISO when --event-id is synthetic",
+    )
+    p_odds_due.add_argument(
+        "--database-url",
+        default=None,
+        help="Target DB for canonical upcoming DWCS events (required unless synthetic --event-id/--event-start)",
+    )
+    p_odds_due.add_argument(
+        "--remaining-override",
+        type=int,
+        default=None,
+        help="Explicit override 0..monthly_limit (prefer --quota-bootstrap)",
+    )
+    p_odds_due.add_argument(
+        "--quota-bootstrap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow zero-cost events bootstrap (default on; --no-quota-bootstrap fails closed)",
+    )
+
+    p_jobs = sub.add_parser("jobs", help="Host-scheduled job entrypoints (DWCS-205)")
+    jobs_sub = p_jobs.add_subparsers(dest="jobs_cmd", required=True)
+    p_jobs_snap = jobs_sub.add_parser(
+        "snapshot-odds",
+        help="Due live odds snapshot job under flock + idempotency",
+    )
+    p_jobs_snap.add_argument("--as-of", required=True, help="Explicit timezone-aware UTC")
+    p_jobs_snap.add_argument("--series", default="dwcs")
+    p_jobs_snap.add_argument("--markets", default="h2h")
+    p_jobs_snap.add_argument("--regions", default="us")
+    p_jobs_snap.add_argument("--database-url", default=None)
+    p_jobs_snap.add_argument("--offline-fixtures", action="store_true")
+    p_jobs_snap.add_argument("--fixture-dir", type=Path, default=None)
+    p_jobs_snap.add_argument("--lock-path", type=Path, default=None)
+    p_jobs_snap.add_argument("--dry-run", action="store_true")
+    p_jobs_snap.add_argument("--limit-events", type=int, default=None)
+    p_jobs_snap.add_argument(
+        "--remaining-override",
+        type=int,
+        default=None,
+        help="Explicit override 0..monthly_limit (prefer --quota-bootstrap)",
+    )
+    p_jobs_snap.add_argument(
+        "--quota-bootstrap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow zero-cost events bootstrap when remaining is missing/stale "
+        "(use --no-quota-bootstrap to fail closed)",
+    )
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
     p_train.add_argument(
@@ -612,6 +750,208 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(report, indent=2))
             return 0 if not report.get("scraper_paths_present") else 2
 
+        if odds_cmd == "due":
+            as_of_raw = str(args.as_of).strip()
+            if as_of_raw.endswith("Z"):
+                as_of_raw = as_of_raw[:-1] + "+00:00"
+            as_of_dt = datetime.fromisoformat(as_of_raw)
+            if as_of_dt.tzinfo is None:
+                print("--as-of must be timezone-aware UTC")
+                return 2
+            event_ids = getattr(args, "event_id", None) or []
+            event_start = getattr(args, "event_start", None)
+            database_url = getattr(args, "database_url", None)
+            remaining_override = getattr(args, "remaining_override", None)
+            engine = None
+            SessionLocal = None
+            if event_ids and event_start:
+                # Synthetic single-event path for offline/unit checks only.
+                events = [
+                    {
+                        "event_id": event_ids[0],
+                        "event_start": event_start,
+                    }
+                ]
+            else:
+                if not database_url:
+                    print(
+                        "odds due requires --database-url for canonical upcoming "
+                        "DWCS events (or synthetic --event-id with --event-start)"
+                    )
+                    return 2
+                db_url = str(database_url).strip()
+                engine = create_engine(db_url, future=True)
+                _attach_sqlite_listeners(engine)
+                SessionLocal = sessionmaker(bind=engine, future=True)
+                with SessionLocal() as session:
+                    events = load_upcoming_dwcs_events_from_db(
+                        session, as_of=as_of_dt, series=args.series
+                    )
+                if event_ids:
+                    wanted = set(event_ids)
+                    events = [e for e in events if e["event_id"] in wanted]
+
+            # Per-event success + purpose-aware quota (DB-backed live path).
+            succeeded: dict[str, bool] = {}
+            items_list = []
+            if SessionLocal is not None:
+                with SessionLocal() as session:
+                    for event in events:
+                        event_id = str(event["event_id"])
+                        event_start = event["event_start"]
+                        provisional = compute_due_work(
+                            as_of=as_of_dt,
+                            event_id=event_id,
+                            event_start=event_start,
+                            slot_already_succeeded=False,
+                            provider="the_odds_api",
+                            markets=args.markets,
+                            region=parse_single_region(args.regions),
+                        )
+                        key = provisional.idempotency_key or ""
+                        already = bool(
+                            key and slot_succeeded(session, idempotency_key=key)
+                        )
+                        if key:
+                            succeeded[key] = already
+                        purpose = provisional.purpose or RequestPurpose.LIVE_ORDINARY
+                        budget = plan_request_budget(
+                            session,
+                            endpoint="current_odds",
+                            markets=args.markets,
+                            regions=parse_single_region(args.regions),
+                            provider="the_odds_api",
+                            as_of=as_of_dt,
+                            purpose=purpose,
+                            remaining_override=remaining_override,
+                        )
+                        quota_state = None
+                        if budget.state == QuotaBudgetState.EXHAUSTED:
+                            quota_state = "exhausted"
+                        elif budget.state == QuotaBudgetState.DEFERRED:
+                            quota_state = "deferred"
+                        items_list.append(
+                            compute_due_work(
+                                as_of=as_of_dt,
+                                event_id=event_id,
+                                event_start=event_start,
+                                slot_already_succeeded=already,
+                                provider="the_odds_api",
+                                markets=args.markets,
+                                region=parse_single_region(args.regions),
+                                quota_state=quota_state,
+                            )
+                        )
+                items = tuple(items_list)
+            else:
+                items = compute_due_work_for_events(
+                    as_of=as_of_dt,
+                    events=events,
+                    slot_succeeded_keys=succeeded,
+                    provider="the_odds_api",
+                    markets=args.markets,
+                    region=parse_single_region(args.regions),
+                    quota_state=None,
+                )
+            if engine is not None:
+                engine.dispose()
+            payload = {
+                "as_of": as_of_dt.isoformat().replace("+00:00", "Z"),
+                "series": args.series,
+                "upcoming_event_count": len(events),
+                "due": [
+                    {
+                        "event_id": item.event_id,
+                        "action": item.action.value,
+                        "reason": item.reason,
+                        "window_name": item.window_name,
+                        "idempotency_key": item.idempotency_key,
+                        "estimated_cost": item.estimated_cost,
+                        "purpose": None if item.purpose is None else item.purpose.value,
+                    }
+                    for item in items
+                    if item.action == DueAction.DUE
+                ],
+                "no_op": sum(1 for item in items if item.action == DueAction.NO_OP),
+                "deferred_quota": sum(
+                    1 for item in items if item.action == DueAction.DEFERRED_QUOTA
+                ),
+                "exhausted_quota": sum(
+                    1 for item in items if item.action == DueAction.EXHAUSTED_QUOTA
+                ),
+                "total": len(items),
+            }
+            if not events:
+                payload["reason"] = "canonical_db_returned_zero_upcoming_dwcs_events"
+            print(json.dumps(payload, indent=2, default=str))
+            return 0
+
+        if odds_cmd == "backfill":
+            as_of_raw = getattr(args, "as_of", None)
+            if not as_of_raw:
+                print("--as-of is required for deterministic backfill")
+                return 2
+            text_as_of = str(as_of_raw).strip()
+            if text_as_of.endswith("Z"):
+                text_as_of = text_as_of[:-1] + "+00:00"
+            as_of_dt = datetime.fromisoformat(text_as_of)
+            if as_of_dt.tzinfo is None:
+                print("--as-of must be timezone-aware UTC")
+                return 2
+            offline = bool(getattr(args, "offline_fixtures", False))
+            fixture_dir = getattr(args, "fixture_dir", None)
+            database_url = getattr(args, "database_url", None)
+            events = load_dwcs_schedule_events(from_year=int(args.from_year))
+            limit = getattr(args, "limit_events", None)
+            if limit is not None:
+                events = events[: int(limit)]
+            if offline:
+                db_url = require_disposable_database_url(database_url)
+            elif database_url:
+                db_url = str(database_url).strip()
+            else:
+                print("backfill requires --database-url (use disposable URL offline)")
+                return 2
+            resolve_odds_client(
+                provider="the-odds-api",
+                fixture_dir=fixture_dir,
+                offline_fixtures=offline,
+            )
+            engine = create_engine(db_url, future=True)
+            _attach_sqlite_listeners(engine)
+            root = get_settings().project_root
+            cfg = Config(str(root / "alembic.ini"))
+            cfg.set_main_option("script_location", str(root / "migrations"))
+            cfg.set_main_option("sqlalchemy.url", db_url)
+            command.upgrade(cfg, "head")
+            SessionLocal = sessionmaker(bind=engine, future=True)
+            with SessionLocal() as session:
+                result = run_odds_backfill(
+                    session,
+                    series=args.series,
+                    from_year=int(args.from_year),
+                    events=events,
+                    as_of=as_of_dt,
+                    finished_at=as_of_dt,
+                    markets=args.markets,
+                    region=parse_single_region(args.regions),
+                    offline_fixtures=offline,
+                    fixture_dir=fixture_dir,
+                    evaluation_contract_path=Path(args.contract),
+                    execute=not bool(getattr(args, "dry_run", False)),
+                    remaining_override=(
+                        None
+                        if getattr(args, "remaining_override", None) is None
+                        else validate_remaining_override(args.remaining_override)[0]
+                    ),
+                    allow_bootstrap=bool(getattr(args, "quota_bootstrap", True)),
+                )
+                session.commit()
+            engine.dispose()
+            print(json.dumps(result.as_dict(), indent=2, default=str))
+            return 0 if result.failed == 0 else 2
+
+
         if odds_cmd == "reconcile":
             provider_arg = str(getattr(args, "provider", "the-odds-api")).strip()
             if provider_arg in {"the-odds-api", "the_odds_api"}:
@@ -894,6 +1234,67 @@ def main(argv: list[str] | None = None) -> int:
         except (OddsConfigurationError, OddsOfflineModeError, OddsApiError, ValueError) as exc:
             print(str(exc))
             return 2
+
+
+    if args.cmd == "jobs":
+        if args.jobs_cmd == "snapshot-odds":
+            as_of_raw = str(args.as_of).strip()
+            if as_of_raw.endswith("Z"):
+                as_of_raw = as_of_raw[:-1] + "+00:00"
+            as_of_dt = datetime.fromisoformat(as_of_raw)
+            if as_of_dt.tzinfo is None:
+                print("--as-of must be timezone-aware UTC")
+                return 2
+            offline = bool(getattr(args, "offline_fixtures", False))
+            fixture_dir = getattr(args, "fixture_dir", None)
+            database_url = getattr(args, "database_url", None)
+            if offline:
+                db_url = require_disposable_database_url(database_url)
+            elif database_url:
+                db_url = str(database_url).strip()
+            else:
+                print("jobs snapshot-odds requires --database-url")
+                return 2
+            engine = create_engine(db_url, future=True)
+            _attach_sqlite_listeners(engine)
+            root = get_settings().project_root
+            cfg = Config(str(root / "alembic.ini"))
+            cfg.set_main_option("script_location", str(root / "migrations"))
+            cfg.set_main_option("sqlalchemy.url", db_url)
+            command.upgrade(cfg, "head")
+            SessionLocal = sessionmaker(bind=engine, future=True)
+            with SessionLocal() as session:
+                events = load_upcoming_dwcs_events_from_db(
+                    session, as_of=as_of_dt, series=args.series
+                )
+                limit = getattr(args, "limit_events", None)
+                if limit is not None:
+                    events = events[: int(limit)]
+                result = run_snapshot_odds_job(
+                    session,
+                    as_of=as_of_dt,
+                    finished_at=as_of_dt,
+                    events=events,
+                    markets=args.markets,
+                    region=parse_single_region(args.regions),
+                    lock_path=getattr(args, "lock_path", None),
+                    offline_fixtures=offline,
+                    fixture_dir=fixture_dir,
+                    execute=not bool(getattr(args, "dry_run", False)),
+                    remaining_override=(
+                        None
+                        if getattr(args, "remaining_override", None) is None
+                        else validate_remaining_override(args.remaining_override)[0]
+                    ),
+                    allow_bootstrap=bool(getattr(args, "quota_bootstrap", True)),
+                )
+                session.commit()
+            engine.dispose()
+            print(json.dumps(result.as_dict(), indent=2))
+            # Zero upcoming is an explicit report, not a silent success with frozen history.
+            return 0 if result.failures == 0 else 2
+        print(f"unsupported jobs command: {args.jobs_cmd}")
+        return 1
 
     if args.cmd == "train":
         init_db()

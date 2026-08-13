@@ -1,0 +1,126 @@
+# DWCS-205 odds snapshot schedule contract (versioned, deterministic).
+# Authoritative packaged bytes: mma_model/odds/schedule_v1.yaml
+# Plan-visible path: config/odds/schedule_v1.yaml (symlink or copy).
+#
+# Cadence (plan § Refresh cadence / DWCS-205):
+#   T−72h → T−24h every 30m
+#   T−24h → T−6h  every 10m
+#   T−6h  → T−1h  every 5m
+#   final hour     every 2m when quota permits
+# Windows are half-open [start, end) relative to event start (UTC).
+# Outside [T−72h, T) is a deterministic no-op.
+
+contract_id: dwcs_odds_schedule
+contract_version: "1.1.2"
+schema_version: 1
+ticket: DWCS-205
+
+provider: the_odds_api
+default_markets: "h2h"
+default_region: "us"
+series: dwcs
+
+# The Odds API featured historical odds begin mid-2020 (2020-06-06).
+historical_available_from: "2020-06-06T00:00:00Z"
+backfill_from_year: 2020
+
+cadence_windows:
+  - name: far
+    offset_before_event_start_sec: 259200   # 72h
+    offset_before_event_end_sec: 86400      # 24h (exclusive)
+    interval_sec: 1800                      # 30m
+    requires_quota_headroom: false
+  - name: mid
+    offset_before_event_start_sec: 86400    # 24h
+    offset_before_event_end_sec: 21600      # 6h
+    interval_sec: 600                       # 10m
+    requires_quota_headroom: false
+  - name: near
+    offset_before_event_start_sec: 21600    # 6h
+    offset_before_event_end_sec: 3600       # 1h
+    interval_sec: 300                       # 5m
+    requires_quota_headroom: false
+  - name: final
+    offset_before_event_start_sec: 3600     # 1h
+    offset_before_event_end_sec: 0          # event start (exclusive)
+    interval_sec: 120                       # 2m
+    requires_quota_headroom: true
+
+# Sparse-first historical reconstruction before denser polling.
+sparse_backfill_checkpoints:
+  - name: t_minus_24h
+    offset_before_event_sec: 86400
+  - name: t_minus_6h
+    offset_before_event_sec: 21600
+  - name: t_minus_1h
+    offset_before_event_sec: 3600
+  - name: close_proxy
+    offset_before_event_sec: 0
+
+quota:
+  monthly_limit: 20000
+  # Credits reserved so live final-hour polls are not starved by backfill.
+  # Backfill / ordinary live must preserve this reserve. Final-hour live may
+  # spend the reserved pool but still never exceed actual remaining.
+  run_reserve: 200
+  preserve_reserve_for:
+    - backfill
+    - live_ordinary
+  may_spend_reserve_for:
+    - live_final
+  # Paid requests fail closed when remaining provenance is unknown unless an
+  # explicit bounded operator override (<= monthly_limit) is supplied.
+  missing_remaining_policy: defer_fail_closed
+  # Freshness: remaining is account-wide. Concurrent use of the same API key
+  # elsewhere can invalidate local spend plans. Observations older than max age
+  # (must be <= bootstrap min_interval) or outside the UTC calendar month of
+  # as_of are unknown (fail closed → bootstrap/defer).
+  remaining_max_age_sec: 300
+  billing_cycle: calendar_month_utc
+  # Operational assumption required for freshness-window spend planning.
+  # true  => worker exclusively owns the API key for remaining_max_age_sec.
+  # false => no absolute never-exceed claim; force zero-cost bootstrap (or
+  #          fail closed when bootstrap is unavailable).
+  exclusive_api_key_for_worker: true
+  # Zero-cost bootstrap via provider events endpoint when remaining unknown.
+  # min_interval_sec bounds bootstrap spam; remaining_max_age_sec <= this.
+  bootstrap:
+    enabled: true
+    endpoint: events
+    min_interval_sec: 300
+  # Provider contract (The Odds API v4):
+  #   current_odds: 1 × markets × regions
+  #   historical_odds: 10 × markets × regions
+  #   events: 0
+  cost_per_region_market:
+    current_odds: 1
+    historical_odds: 10
+  cost_fixed:
+    events: 0
+    sports: 0
+
+overlap:
+  strategy: flock_one_writer
+  lock_name: mma-snapshot-odds.lock
+
+idempotency:
+  key_version: 1
+  # Logical snapshot identity — retries with the same key must not duplicate work.
+
+coverage_statuses:
+  - absent
+  - failed
+  - deferred_quota
+  - unmatched
+  - observed
+
+bestfightodds_archive:
+  enabled: true
+  role: public_historical_odds_reconciliation
+  never_stats_or_pit_evidence: true
+  never_sportsbook_page_scrape: true
+  require_polite_http: true
+
+licensed_bookmaker_history:
+  # Bound by DWCS-202 odds decision contract.
+  require_licensed_adapter_authorized: true
