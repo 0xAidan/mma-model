@@ -71,6 +71,7 @@ from mma_model.markets.derive import (
 )
 from mma_model.markets.settlement import SUPPORTED_SCHEDULED_ROUNDS
 from mma_model.modeling.artifacts import (
+    ACCEPTED_ARTIFACT_SCHEMA_VERSIONS,
     ARTIFACT_SCHEMA_VERSION,
     ArtifactChecksumMismatchError,
     ArtifactConfigMismatchError,
@@ -84,6 +85,7 @@ from mma_model.modeling.artifacts import (
     manifest_path_for,
     resolve_code_commit,
     sha256_bytes,
+    verify_optional_calibration_payload,
 )
 from mma_model.modeling.baselines import (
     FORBIDDEN_HOLDOUT_METRIC_FRAGMENTS,
@@ -462,6 +464,29 @@ def finish_atom_key_for_hazard(value: HazardClass, interval: int) -> str:
         return finish_atom_key(side="b", cause="other_stoppage", interval=interval)
     never_cls: Never = value
     raise JointError(f"unhandled hazard class: {never_cls!r}")
+
+
+def observed_fine_atom(sample: JointBoutSample) -> str:
+    """Fine terminal atom actually observed for an OOF calibration row."""
+    if sample.kind is BoutTerminalKind.FINISH:
+        if sample.hazard_class is None or sample.finish_interval is None:
+            raise JointError(
+                f"{sample.sample_id}: finish sample missing hazard class or interval"
+            )
+        return finish_atom_key_for_hazard(sample.hazard_class, sample.finish_interval)
+    if sample.kind is BoutTerminalKind.DISTANCE:
+        if sample.decision_class is DecisionClass.A_DECISION:
+            return "a_decision"
+        if sample.decision_class is DecisionClass.B_DECISION:
+            return "b_decision"
+        if sample.decision_class is DecisionClass.DRAW:
+            return "draw"
+        if sample.decision_class is None:
+            raise JointError(f"{sample.sample_id}: distance sample missing decision class")
+        never_dec: Never = sample.decision_class
+        raise JointError(f"unhandled decision class: {never_dec!r}")
+    never_kind: Never = sample.kind
+    raise JointError(f"unhandled bout terminal kind: {never_kind!r}")
 
 
 def survival_multiply(
@@ -1356,6 +1381,17 @@ class JointPredictor:
             raise ArtifactFeatureOrderMismatchError("joint predictor feature order mismatch")
         return scale_row(values, self.scaler_mean, self.scaler_scale)
 
+    def identity_hash(self) -> str:
+        return sha256_canonical(
+            {
+                "decision_theta": list(self.decision_theta),
+                "hazard_theta": list(self.hazard_theta),
+                "kind": ESTIMATOR_KIND,
+                "scaler_mean": list(self.scaler_mean),
+                "scaler_scale": list(self.scaler_scale),
+            }
+        )
+
     def raw_hazard_logits(self, values: Sequence[float], interval: int) -> np.ndarray:
         scaled = self._scaled(values)
         z_sym, z_anti = oriented_features(scaled)
@@ -1417,12 +1453,18 @@ class JointPredictor:
         return {
             "bout_id": sample.sample_id,
             "decision_logits": decision_logits,
+            "estimator_hash": self.identity_hash(),
+            "estimator_kind": ESTIMATOR_KIND,
             "event_id": sample.event_id,
             "fine_probabilities": fine,
             "fold_id": fold.fold_id,
             "fold_kind": kind,
             "frozen_probabilities": frozen,
             "hazard_logits": hazard_logits,
+            "model_id": EXPECTED_JOINT_MODEL_ID,
+            "observed_fine_atom": observed_fine_atom(sample),
+            "observed_frozen_atom": sample.terminal_atom.value,
+            "observed_label": sample.terminal_atom.value,
             "scheduled_rounds": sample.scheduled_rounds,
             "test_cutoff": sample.cutoff.isoformat(),
             "train_event_ids": train_event_ids,
@@ -1667,6 +1709,7 @@ class LoadedJointArtifact:
     manifest_path: Path
     oof_predictions: tuple[dict[str, Any], ...]
     oof_exclusions: tuple[dict[str, Any], ...]
+    calibrated: bool = False
 
 
 def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
@@ -1703,7 +1746,7 @@ def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
         raise UntrustedArtifactError(
             f"payload_kind must be {PAYLOAD_KIND!r}, got {loaded.get('payload_kind')!r}"
         )
-    if loaded.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+    if loaded.get("schema_version") not in ACCEPTED_ARTIFACT_SCHEMA_VERSIONS:
         raise UntrustedArtifactError("joint artifact schema_version mismatch")
     if tuple(loaded.get("feature_names") or ()) != FEATURE_NAMES:
         raise ArtifactFeatureOrderMismatchError("joint artifact feature order mismatch")
@@ -1739,6 +1782,14 @@ def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
     exclusions = loaded.get("oof_exclusions", [])
     if not isinstance(exclusions, list):
         raise UntrustedArtifactError("oof_exclusions must be a list")
+    verify_optional_calibration_payload(loaded)
+    verify_optional_calibration_payload(
+        {
+            "bootstrap": manifest.bootstrap,
+            "calibrated": manifest.calibrated,
+            "calibration": manifest.calibration,
+        }
+    )
     return LoadedJointArtifact(
         payload=loaded,
         predictor=predictor,
@@ -1749,6 +1800,7 @@ def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
         oof_exclusions=tuple(
             dict(item) for item in exclusions if isinstance(item, dict)
         ),
+        calibrated=loaded.get("calibrated", False) is True,
     )
 
 
