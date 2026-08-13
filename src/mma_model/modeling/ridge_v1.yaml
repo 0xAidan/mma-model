@@ -1,0 +1,22 @@
+schema_version: 1
+contract_id: dwcs_model_spec
+spec_id: ridge_v1
+spec_version: "1.0.0"
+model_id: M1
+model_family: ridge_logistic
+feature_spec_version: dwcs_pit_v1.1
+estimator:
+  penalty: l2
+  C: 1.0
+  max_iter: 1000
+  solver: lbfgs
+standardize: true
+swap_augment: true
+folds:
+  ordinary_allow_holdout: false
+  final_refit: development_and_validation
+cutoff_policy: scheduled_minus_60m
+baselines:
+  coin_flip: true
+  sequential_rating: true
+  no_vig_market: true

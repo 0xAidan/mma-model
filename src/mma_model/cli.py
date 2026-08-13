@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +78,20 @@ from mma_model.odds.the_odds_api import OddsApiError, fetch_mma_odds
 from mma_model.features.audit import run_features_audit
 from mma_model.backtest.contract import EvaluatorHashMismatchError
 from mma_model.evaluation.contract import EvaluationContractError, load_evaluation_contract
+from mma_model.modeling.artifacts import (
+    ArtifactError,
+    RidgeSpecError,
+    load_artifact,
+    load_feature_vector,
+    load_ridge_spec,
+)
+from mma_model.modeling.baselines import (
+    TrainError,
+    predict_loaded_ridge,
+    protocol_feature_vector,
+    run_protocol_train,
+    train_from_session,
+)
 from mma_model.modeling.splits import (
     HoldoutLockedError,
     SplitError,
@@ -100,7 +115,11 @@ from mma_model.quality.report import dumps_report, human_report, write_coverage_
 from mma_model.quality.schema import CoverageSchemaError
 from mma_model.sources.policy import load_source_policy
 from mma_model.predict.backtest import walk_forward_backtest
-from mma_model.predict.train import predict_fight_a_win_prob, train_and_save
+from mma_model.predict.train import (
+    DEPRECATED_RANDOM_SPLIT_NOTE,
+    predict_fight_a_win_prob,
+    train_and_save,
+)
 from mma_model.sources.combat_registry.client import CombatRegistryPublicClient
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.sherdog_public.client import SherdogPublicClient
@@ -775,6 +794,72 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_inspect.add_argument("--json", action="store_true", help="Print JSON fold plan")
 
+    p_model = sub.add_parser(
+        "model",
+        help="Versioned M1 train through event-grouped folds (DWCS-303)",
+    )
+    model_sub = p_model.add_subparsers(dest="model_cmd", required=True)
+    p_mtrain = model_sub.add_parser(
+        "train",
+        help="Train ridge logistic (M1) through DWCS-302 folds; never 2025 holdout",
+    )
+    p_mtrain.add_argument(
+        "--spec",
+        type=Path,
+        default=Path("config/model_specs/ridge_v1.yaml"),
+        help="Ridge model spec (packaged ridge_v1.yaml)",
+    )
+    p_mtrain.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/artifacts/ridge_v1.json"),
+        help="Versioned JSON artifact path (sidecar manifest written next to it)",
+    )
+    p_mtrain.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional disposable SQLite URL (never live data/mma.db)",
+    )
+    p_mtrain.add_argument(
+        "--fixture",
+        choices=("protocol", "manifest"),
+        default="protocol",
+        help="Card source when --database-url is omitted (default: protocol fixture)",
+    )
+    p_mtrain.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("config/evaluation/dwcs_v1.json"),
+        help="Evaluation contract path (hash-verified and used for folds)",
+    )
+    p_mpred = model_sub.add_parser(
+        "predict",
+        help="Score a matchup from a versioned JSON artifact (DWCS-303)",
+    )
+    p_mpred.add_argument(
+        "--artifact",
+        type=Path,
+        required=True,
+        help="Versioned JSON artifact from mma-model model train",
+    )
+    p_mpred.add_argument(
+        "--features-json",
+        type=Path,
+        default=None,
+        help="JSON object with names (FEATURE_NAMES order) and values",
+    )
+    p_mpred.add_argument(
+        "--fixture",
+        choices=("protocol",),
+        default=None,
+        help="Optional protocol fixture instead of --features-json",
+    )
+    p_mpred.add_argument(
+        "--bout-id",
+        default=None,
+        help="Protocol bout id when --fixture protocol is set",
+    )
+
     args = p.parse_args(argv)
 
     if args.cmd == "init-db":
@@ -1361,6 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.cmd == "train":
+        print(f"DEPRECATED: {DEPRECATED_RANDOM_SPLIT_NOTE}", file=sys.stderr)
         init_db()
         with session_scope() as session:
             out = train_and_save(session, args.output, min_prior_fights=args.min_prior_fights)
@@ -1368,10 +1454,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "predict-fight":
+        print(
+            "DEPRECATED: predict-fight loads the legacy unversioned joblib only; "
+            "it cannot load DWCS-303 JSON artifacts. "
+            "Random-split metrics are not betting evidence. "
+            "Use mma-model model predict --artifact <json> for versioned models.",
+            file=sys.stderr,
+        )
         init_db()
         with session_scope() as session:
             prob = predict_fight_a_win_prob(session, args.fight_id, args.model)
-        print(json.dumps({"fight_id": args.fight_id, "p_fighter_a": prob}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "deprecation": DEPRECATED_RANDOM_SPLIT_NOTE,
+                    "fight_id": args.fight_id,
+                    "p_fighter_a": prob,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if args.cmd == "backtest":
@@ -1995,6 +2097,129 @@ def main(argv: list[str] | None = None) -> int:
             if engine is not None:
                 engine.dispose()
         print(render_fold_plan(plan, as_json=bool(args.json)), end="")
+        return 0
+
+    if args.cmd == "model":
+        if args.model_cmd == "predict":
+            try:
+                loaded = load_artifact(Path(args.artifact))
+                if args.features_json is not None and args.fixture is not None:
+                    print(
+                        "model configuration error: pass --features-json or "
+                        "--fixture protocol, not both"
+                    )
+                    return EXIT_INTERNAL
+                if args.features_json is not None:
+                    raw_features = json.loads(
+                        Path(args.features_json).read_text(encoding="utf-8")
+                    )
+                    if not isinstance(raw_features, dict):
+                        print("model configuration error: features-json root must be an object")
+                        return EXIT_INTERNAL
+                    values = load_feature_vector(raw_features)
+                    names = loaded.predictor.feature_names
+                    bout_id = None
+                elif args.fixture == "protocol":
+                    bout_id = str(args.bout_id or "").strip()
+                    if not bout_id:
+                        print("model configuration error: --fixture protocol requires --bout-id")
+                        return EXIT_INTERNAL
+                    names, values = protocol_feature_vector(bout_id)
+                else:
+                    print(
+                        "model configuration error: pass --features-json or "
+                        "--fixture protocol --bout-id"
+                    )
+                    return EXIT_INTERNAL
+                probability = predict_loaded_ridge(loaded, values)
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            except ArtifactError as exc:
+                print(f"model artifact error: {exc}")
+                return EXIT_INTERNAL
+            except (TrainError, HoldoutLockedError, SplitError, ValueError) as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            print(
+                json.dumps(
+                    {
+                        "artifact_path": str(Path(args.artifact).resolve()),
+                        "bout_id": bout_id,
+                        "feature_names": list(names),
+                        "model_id": loaded.manifest.model_id,
+                        "p_fighter_a": probability,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if args.model_cmd != "train":
+            print(f"model configuration error: unknown command {args.model_cmd!r}")
+            return EXIT_INTERNAL
+        try:
+            contract = load_evaluation_contract(path=Path(args.contract))
+            spec = load_ridge_spec(path=Path(args.spec))
+        except (EvaluationContractError, RidgeSpecError) as exc:
+            print(f"model configuration error: {exc}")
+            return EXIT_INTERNAL
+
+        engine = None
+        try:
+            if args.database_url is not None:
+                db_url = str(args.database_url).strip()
+                if not db_url:
+                    print("model configuration error: empty --database-url")
+                    return EXIT_INTERNAL
+                default_url = get_settings().mma_database_url
+                if is_prohibited_live_url(db_url, default_url=default_url):
+                    print(
+                        "model configuration error: refusing live data/mma.db; "
+                        "pass an explicit disposable --database-url or --fixture protocol"
+                    )
+                    return EXIT_INTERNAL
+                engine = open_readonly_sqlite_engine(db_url)
+                session_factory = readonly_session_factory(engine)
+                with session_factory() as session:
+                    report = train_from_session(
+                        session,
+                        spec=spec,
+                        output_path=Path(args.output),
+                        include_holdout=False,
+                        contract=contract,
+                    )
+            elif args.fixture == "protocol":
+                report = run_protocol_train(
+                    spec=spec,
+                    output_path=Path(args.output),
+                    include_holdout=False,
+                    contract=contract,
+                )
+            elif args.fixture == "manifest":
+                print(
+                    "model configuration error: manifest fixture has no labeled PIT rows; "
+                    "pass --fixture protocol or a disposable --database-url"
+                )
+                return EXIT_INTERNAL
+            else:
+                print(f"model configuration error: unknown fixture {args.fixture!r}")
+                return EXIT_INTERNAL
+        except CoverageDatabaseError as exc:
+            print(f"model configuration error: {exc}")
+            return EXIT_INTERNAL
+        except HoldoutLockedError as exc:
+            print(f"model holdout locked: {exc}")
+            return EXIT_INTERNAL
+        except EvaluatorHashMismatchError as exc:
+            print(f"model hash mismatch: {exc}")
+            return EXIT_INTERNAL
+        except (TrainError, SplitError, RidgeSpecError, ValueError) as exc:
+            print(f"model configuration error: {exc}")
+            return EXIT_INTERNAL
+        finally:
+            if engine is not None:
+                engine.dispose()
+        print(json.dumps(report.to_dict(), indent=2))
         return 0
 
     return 1

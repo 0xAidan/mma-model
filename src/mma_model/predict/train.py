@@ -1,4 +1,11 @@
-"""Train logistic regression on matchup features; save with joblib."""
+"""Train logistic regression on matchup features; save with joblib.
+
+The random ``train_test_split`` path is a compatibility wrapper. Metrics are
+labeled ``deprecated_random_split_not_betting_evidence`` and must not be read
+as holdout betting evidence. Use ``mma-model model train`` (DWCS-303).
+Legacy ``predict-fight`` cannot load versioned JSON artifacts; use
+``mma-model model predict``.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +18,18 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 from sklearn.model_selection import train_test_split
 
+from mma_model.composites.rolling import rolling_profile_before_fight
+from mma_model.db.models import Fight
+from mma_model.features.matchup import matchup_features
 from mma_model.predict.dataset import FEATURE_NAMES, build_training_arrays
+
+DEPRECATED_RANDOM_SPLIT_KEY = "deprecated_random_split_not_betting_evidence"
+DEPRECATED_RANDOM_SPLIT_NOTE = (
+    "sklearn train_test_split is not betting evidence; "
+    "use event-grouped folds via mma-model model train (DWCS-303). "
+    "Legacy predict-fight cannot load versioned JSON artifacts; "
+    "use mma-model model predict"
+)
 
 
 def train_and_save(
@@ -22,7 +40,7 @@ def train_and_save(
     last_n: int = 5,
     test_size: float = 0.25,
     random_state: int = 42,
-) -> dict[str, float | int | str]:
+) -> dict[str, float | int | str | dict[str, float | str]]:
     X, y, fight_ids = build_training_arrays(
         session, min_prior_fights=min_prior_fights, last_n=last_n
     )
@@ -49,15 +67,20 @@ def train_and_save(
         "feature_names": list(FEATURE_NAMES),
         "n_samples": n,
         "fight_ids": fight_ids,
+        "deprecation": DEPRECATED_RANDOM_SPLIT_NOTE,
     }
     joblib.dump(payload, model_path)
 
     return {
         "n_samples": n,
-        "accuracy_holdout": acc,
-        "log_loss_holdout": ll,
-        "brier_holdout": br,
+        DEPRECATED_RANDOM_SPLIT_KEY: {
+            "accuracy": acc,
+            "brier": br,
+            "log_loss": ll,
+            "note": DEPRECATED_RANDOM_SPLIT_NOTE,
+        },
         "model_path": str(model_path.resolve()),
+        "deprecation": DEPRECATED_RANDOM_SPLIT_NOTE,
     }
 
 
@@ -66,11 +89,13 @@ def load_model(model_path: Path):
     return payload["model"], list(payload["feature_names"])
 
 
-def predict_fight_a_win_prob(session: Any, fight_id: str, model_path: Path, *, last_n: int = 5) -> float:
-    from mma_model.db.models import Fight
-    from mma_model.composites.rolling import rolling_profile_before_fight
-    from mma_model.features.matchup import matchup_features
-
+def predict_fight_a_win_prob(
+    session: Any,
+    fight_id: str,
+    model_path: Path,
+    *,
+    last_n: int = 5,
+) -> float:
     model, _names = load_model(model_path)
     fight = session.get(Fight, fight_id)
     if fight is None:
