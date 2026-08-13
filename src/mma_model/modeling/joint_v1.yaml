@@ -1,0 +1,41 @@
+schema_version: 1
+contract_id: dwcs_model_spec
+spec_id: joint_v1
+spec_version: "1.0.0"
+model_id: M2
+model_family: competing_risks
+feature_spec_version: dwcs_pit_v1.1
+estimator:
+  penalty: l2
+  C: 0.1
+  max_iter: 400
+  solver: lbfgs
+standardize: true
+swap_augment: true
+tied_ab_parameters: true
+folds:
+  ordinary_allow_holdout: false
+  final_refit: development_and_validation
+cutoff_policy: scheduled_minus_60m
+missing_classes: fail
+early_technical: fail
+class_pooling: {}
+supported_scheduled_rounds: [3, 5]
+probability_clip_tolerance: 1.0e-12
+atom_sum_tolerance: 1.0e-10
+notes:
+  missing_classes: >
+    Default fail raises MissingJointClassError listing absent required
+    hazard and decision classes. Do not rely on sklearn omitting classes.
+    Set missing_classes=pool and class_pooling to remap labels; pooled-away
+    classes receive probability 0.
+  early_technical: >
+    Technical decision pools into the decision terminal atom only after
+    surviving the scheduled distance (DWCS-300). Early technical
+    decision/draw default to fail. pool_other_stoppage treats an early
+    technical decision as other_stoppage at the observed interval.
+    pool_as_distance is explicit documented pooling into the decision head
+    (not a silent full-distance pretence).
+  totals_boundary: >
+    Right-closed half-round bins; exact 1.5/2.5 rounds count as UNDER to
+    match settlement exact_half_result=under.

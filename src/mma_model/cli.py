@@ -78,6 +78,7 @@ from mma_model.odds.the_odds_api import OddsApiError, fetch_mma_odds
 from mma_model.features.audit import run_features_audit
 from mma_model.backtest.contract import EvaluatorHashMismatchError
 from mma_model.evaluation.contract import EvaluationContractError, load_evaluation_contract
+from mma_model.markets.derive import UnsupportedScheduleError
 from mma_model.modeling.artifacts import (
     ArtifactError,
     RidgeSpecError,
@@ -91,6 +92,16 @@ from mma_model.modeling.baselines import (
     protocol_feature_vector,
     run_protocol_train,
     train_from_session,
+)
+from mma_model.modeling.joint import (
+    EarlyTechnicalOutcomeError,
+    JointError,
+    JointSpecError,
+    MissingJointClassError,
+    identify_model_family,
+    load_joint_spec,
+    run_protocol_joint_train,
+    train_joint_from_session,
 )
 from mma_model.modeling.splits import (
     HoldoutLockedError,
@@ -796,18 +807,24 @@ def main(argv: list[str] | None = None) -> int:
 
     p_model = sub.add_parser(
         "model",
-        help="Versioned M1 train through event-grouped folds (DWCS-303)",
+        help="Versioned M1/M2 train through event-grouped folds (DWCS-303/304)",
     )
     model_sub = p_model.add_subparsers(dest="model_cmd", required=True)
     p_mtrain = model_sub.add_parser(
         "train",
-        help="Train ridge logistic (M1) through DWCS-302 folds; never 2025 holdout",
+        help="Train ridge (M1) or joint competing-risks (M2); never 2025 holdout",
     )
     p_mtrain.add_argument(
         "--spec",
         type=Path,
         default=Path("config/model_specs/ridge_v1.yaml"),
-        help="Ridge model spec (packaged ridge_v1.yaml)",
+        help="Model spec (ridge_v1.yaml or joint_v1.yaml)",
+    )
+    p_mtrain.add_argument(
+        "--model",
+        choices=("auto", "ridge", "joint"),
+        default="auto",
+        help="Estimator family; auto dispatches from --spec (ridge vs joint)",
     )
     p_mtrain.add_argument(
         "--output",
@@ -2159,8 +2176,24 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_INTERNAL
         try:
             contract = load_evaluation_contract(path=Path(args.contract))
-            spec = load_ridge_spec(path=Path(args.spec))
-        except (EvaluationContractError, RidgeSpecError) as exc:
+            requested = str(getattr(args, "model", "auto"))
+            family = identify_model_family(Path(args.spec)) if requested == "auto" else requested
+            if requested == "joint" and identify_model_family(Path(args.spec)) != "joint":
+                print("model configuration error: --model joint requires a joint spec")
+                return EXIT_INTERNAL
+            if requested == "ridge" and identify_model_family(Path(args.spec)) != "ridge":
+                print("model configuration error: --model ridge requires a ridge spec")
+                return EXIT_INTERNAL
+            ridge_spec = None
+            joint_spec = None
+            if family == "joint":
+                joint_spec = load_joint_spec(path=Path(args.spec))
+            elif family == "ridge":
+                ridge_spec = load_ridge_spec(path=Path(args.spec))
+            else:
+                print(f"model configuration error: unknown model family {family!r}")
+                return EXIT_INTERNAL
+        except (EvaluationContractError, RidgeSpecError, JointSpecError) as exc:
             print(f"model configuration error: {exc}")
             return EXIT_INTERNAL
 
@@ -2181,20 +2214,37 @@ def main(argv: list[str] | None = None) -> int:
                 engine = open_readonly_sqlite_engine(db_url)
                 session_factory = readonly_session_factory(engine)
                 with session_factory() as session:
-                    report = train_from_session(
-                        session,
-                        spec=spec,
+                    if joint_spec is not None:
+                        report = train_joint_from_session(
+                            session,
+                            spec=joint_spec,
+                            output_path=Path(args.output),
+                            include_holdout=False,
+                            contract=contract,
+                        )
+                    else:
+                        report = train_from_session(
+                            session,
+                            spec=ridge_spec,
+                            output_path=Path(args.output),
+                            include_holdout=False,
+                            contract=contract,
+                        )
+            elif args.fixture == "protocol":
+                if joint_spec is not None:
+                    report = run_protocol_joint_train(
+                        spec=joint_spec,
                         output_path=Path(args.output),
                         include_holdout=False,
                         contract=contract,
                     )
-            elif args.fixture == "protocol":
-                report = run_protocol_train(
-                    spec=spec,
-                    output_path=Path(args.output),
-                    include_holdout=False,
-                    contract=contract,
-                )
+                else:
+                    report = run_protocol_train(
+                        spec=ridge_spec,
+                        output_path=Path(args.output),
+                        include_holdout=False,
+                        contract=contract,
+                    )
             elif args.fixture == "manifest":
                 print(
                     "model configuration error: manifest fixture has no labeled PIT rows; "
@@ -2213,7 +2263,17 @@ def main(argv: list[str] | None = None) -> int:
         except EvaluatorHashMismatchError as exc:
             print(f"model hash mismatch: {exc}")
             return EXIT_INTERNAL
-        except (TrainError, SplitError, RidgeSpecError, ValueError) as exc:
+        except (
+            TrainError,
+            SplitError,
+            RidgeSpecError,
+            JointSpecError,
+            JointError,
+            MissingJointClassError,
+            EarlyTechnicalOutcomeError,
+            UnsupportedScheduleError,
+            ValueError,
+        ) as exc:
             print(f"model configuration error: {exc}")
             return EXIT_INTERNAL
         finally:
