@@ -1,0 +1,26 @@
+# Frozen DWCS-402 champion/challenger model registry.
+# Authoritative packaged bytes: mma_model/modeling/model_registry.yaml
+# Plan-visible path: config/model_registry.yaml (symlink).
+#
+# Identity fields (schema/registry id/version/ticket/champion spec+config+lane)
+# are pinned. Mutable artifact digests and challenger lists may change without
+# bumping the identity digest.
+
+schema_version: 1
+registry_id: dwcs_model_registry
+registry_version: "1.0.0"
+ticket: DWCS-402
+description: >
+  Champion/challenger registry for fixed-spec retraining. New configs stay
+  shadow until frozen evaluator and promotion gates pass.
+
+champion:
+  spec_id: ridge_v1
+  artifact_digest: null
+  config_hash: cf4a679519e5fccda46176e40be253525afe4951cfbaa7d91cbd92b0e724d61a
+  lane: champion
+  artifact_relpath: data/artifacts/champion.json
+
+prior_champion: null
+
+challengers: []

@@ -39,7 +39,7 @@ where = ["src"]
 "mma_model.evaluation" = ["dwcs_v1.json"]
 "mma_model.identity.data" = ["adjudicated_cases_v1.json"]
 "mma_model.markets" = ["settlement_v1.yaml"]
-"mma_model.modeling" = ["ridge_v1.yaml", "joint_v1.yaml"]
+"mma_model.modeling" = ["ridge_v1.yaml", "joint_v1.yaml", "model_registry.yaml"]
 "mma_model.odds" = ["odds_decision_v1.yaml", "matching_v1.yaml", "schedule_v1.yaml"]
 "mma_model.recommend" = ["recommendation_policy.yaml"]
 

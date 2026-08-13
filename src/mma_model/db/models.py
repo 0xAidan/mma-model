@@ -40,6 +40,7 @@ from mma_model.db.tables.identity import (
     IdentityReviewQueue,
     IdentityScoringBlock,
 )
+from mma_model.db.tables.model_registry import ModelRegistryDecision
 from mma_model.db.tables.provenance import (
     IngestRun,
     RawObservation,
@@ -216,6 +217,7 @@ __all__ = [
     "IdentityScoringBlock",
     "IngestCursor",
     "IngestRun",
+    "ModelRegistryDecision",
     "ModelRun",
     "ObservedPrice",
     "OddsAvailabilityObservation",

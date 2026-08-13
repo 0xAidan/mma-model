@@ -86,6 +86,7 @@ def init_db() -> None:
     import mma_model.db.tables.core  # noqa: F401
     import mma_model.db.tables.history  # noqa: F401
     import mma_model.db.tables.identity  # noqa: F401
+    import mma_model.db.tables.model_registry  # noqa: F401
     import mma_model.db.tables.odds  # noqa: F401
     import mma_model.db.tables.odds_jobs  # noqa: F401
     import mma_model.db.tables.pipeline_jobs  # noqa: F401

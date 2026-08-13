@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from sqlalchemy import func, select
@@ -32,6 +33,7 @@ from mma_model.jobs.types import (
     JobStatus,
     JobType,
 )
+from mma_model.modeling.registry import retrain_fixed_spec
 from mma_model.recommend.policy import RenderedThresholds
 
 Handler = Callable[..., HandlerResult]
@@ -583,15 +585,113 @@ def handle_retrain(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
-    """Fixed-spec retrain seam. Does not promote a new champion (DWCS-402)."""
-    _ = (session, job, as_of, events)
-    registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
-    prior = registry.artifact.digest if registry is not None else "incumbent-artifact-v1"
+    """Fixed-spec retrain via champion registry. Never auto-promotes a new spec."""
+    _ = events
+    handler_registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
+    prior = (
+        handler_registry.artifact.digest
+        if handler_registry is not None
+        else "incumbent-artifact-v1"
+    )
+
+    injected = context.get("retrain_runner")
+    if callable(injected):
+        result = injected(
+            session,
+            job=job,
+            as_of=as_of,
+            events=events,
+            context=context,
+        )
+        if isinstance(result, HandlerResult):
+            if (
+                result.status == JobStatus.SUCCESS
+                and result.artifact_digest
+                and handler_registry is not None
+            ):
+                # Job may refresh same-spec digest; never invent a new spec_id.
+                handler_registry.artifact.digest = result.artifact_digest
+            return result
+
+    registry_path = context.get("model_registry_path")
+    if registry_path is None:
+        return HandlerResult(
+            status=JobStatus.SUCCESS,
+            artifact_digest=prior,
+            counts={"promoted": False, "champion_unchanged": True},
+            detail="retrain seam: no architecture search; champion unchanged",
+        )
+
+    artifacts_dir = Path(
+        str(context.get("artifacts_dir") or Path(str(registry_path)).parent / "artifacts")
+    )
+    try:
+        outcome = retrain_fixed_spec(
+            session,
+            registry_path=Path(str(registry_path)),
+            artifacts_dir=artifacts_dir,
+            actor="jobs.retrain",
+            train_runner=context.get("train_runner"),  # type: ignore[arg-type]
+            health_ok=context.get("health_ok"),  # type: ignore[arg-type]
+            health_gate=context.get("health_gate"),  # type: ignore[arg-type]
+            backtest_ok=context.get("backtest_ok"),  # type: ignore[arg-type]
+            calibration_ok=context.get("calibration_ok"),  # type: ignore[arg-type]
+            include_holdout=bool(context.get("include_holdout", False)),
+            at=as_of,
+        )
+    except Exception as exc:  # noqa: BLE001 — job seam must not raise past orchestrator
+        return HandlerResult(
+            status=JobStatus.FAILED,
+            error_class=JobErrorClass.INTERNAL,
+            detail=f"retrain failed; champion unchanged: {exc}",
+            artifact_digest=prior,
+            counts={"promoted": False, "champion_unchanged": True},
+            blocks_downstream=False,
+        )
+
+    if outcome.status == "failed" or not outcome.activated:
+        error_class = (
+            JobErrorClass.SCHEMA
+            if "holdout" in outcome.reason.lower() or "artifact" in outcome.reason.lower()
+            else JobErrorClass.INTERNAL
+        )
+        if outcome.status == "shadow":
+            # Different spec registered shadow-only; job succeeds without promotion.
+            return HandlerResult(
+                status=JobStatus.SUCCESS,
+                artifact_digest=prior,
+                counts={
+                    "promoted": False,
+                    "champion_unchanged": True,
+                    "shadow": True,
+                    "spec_id": outcome.spec_id,
+                },
+                detail=outcome.reason,
+            )
+        return HandlerResult(
+            status=JobStatus.FAILED,
+            error_class=error_class,
+            detail=outcome.reason,
+            artifact_digest=prior,
+            counts={
+                "promoted": False,
+                "champion_unchanged": True,
+                "spec_id": outcome.spec_id,
+            },
+        )
+
+    if handler_registry is not None and outcome.artifact_digest:
+        handler_registry.artifact.digest = outcome.artifact_digest
     return HandlerResult(
         status=JobStatus.SUCCESS,
-        artifact_digest=prior,
-        counts={"promoted": False, "champion_unchanged": True},
-        detail="retrain seam: no architecture search; champion unchanged",
+        artifact_digest=outcome.artifact_digest or prior,
+        counts={
+            "promoted": False,  # job never promotes a *new* spec
+            "champion_unchanged": False,
+            "activated_same_spec": True,
+            "spec_id": outcome.spec_id,
+        },
+        detail=outcome.reason,
     )
 
 

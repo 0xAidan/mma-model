@@ -15,7 +15,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from mma_model.config import get_settings
-from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
+from mma_model.db.session import (
+    _attach_sqlite_listeners,
+    create_all_for_tests,
+    init_db,
+    session_scope,
+)
 from mma_model.domain.markets import MarketFamily, MarketMaturity, OutcomeKey
 from mma_model.dwcs.ingest import sync_dwcs_history
 from mma_model.history.audit import (
@@ -126,6 +131,16 @@ from mma_model.modeling.joint import (
     protocol_joint_feature_vector,
     run_protocol_joint_train,
     train_joint_from_session,
+)
+from mma_model.modeling.promotion import (
+    PromotionError,
+    PromotionEvaluateRequiredError,
+    PromotionGateError,
+)
+from mma_model.modeling.registry import (
+    promote_candidate,
+    retrain_fixed_spec,
+    rollback_champion,
 )
 from mma_model.modeling.uncertainty import (
     DEFAULT_BOOTSTRAP_REPLICATES,
@@ -1130,6 +1145,100 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Pinned bootstrap seed (default: module default)",
+    )
+    p_mretrain = model_sub.add_parser(
+        "retrain",
+        help="Fixed-spec champion retrain after +24h reconciliation (DWCS-402)",
+    )
+    p_mretrain.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("config/model_registry.yaml"),
+        help="Champion/challenger registry YAML",
+    )
+    p_mretrain.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("data/artifacts"),
+        help="Digest-addressed artifact store directory",
+    )
+    p_mretrain.add_argument(
+        "--database-url",
+        default=None,
+        help="Disposable SQLite URL for decision audit (never live data/mma.db)",
+    )
+    p_mretrain.add_argument(
+        "--health-ok",
+        action="store_true",
+        help="Explicit strict-health pass for activation gates (tests/ops)",
+    )
+    p_mpromote = model_sub.add_parser(
+        "promote",
+        help="Promote a shadow candidate after frozen evaluator gates (DWCS-402)",
+    )
+    p_mpromote.add_argument(
+        "--candidate",
+        required=True,
+        help="Candidate artifact digest (sha256)",
+    )
+    p_mpromote.add_argument(
+        "--evaluate",
+        action="store_true",
+        required=True,
+        help="Required: run frozen evaluator + health/holdout/artifact gates",
+    )
+    p_mpromote.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("config/model_registry.yaml"),
+        help="Champion/challenger registry YAML",
+    )
+    p_mpromote.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=Path("data/artifacts"),
+        help="Digest-addressed artifact store directory",
+    )
+    p_mpromote.add_argument(
+        "--database-url",
+        default=None,
+        help="Disposable SQLite URL for decision audit (never live data/mma.db)",
+    )
+    p_mpromote.add_argument(
+        "--reason",
+        default="manual promote after gates",
+        help="Promotion reason recorded in the decision ledger",
+    )
+    p_mpromote.add_argument(
+        "--health-ok",
+        action="store_true",
+        help="Explicit strict-health pass for activation gates",
+    )
+    p_mpromote.add_argument(
+        "--artifact",
+        type=Path,
+        default=None,
+        help="Optional explicit candidate artifact path",
+    )
+    p_mrollback = model_sub.add_parser(
+        "rollback",
+        help="Restore prior champion digest without DB rollback (DWCS-402)",
+    )
+    p_mrollback.add_argument(
+        "--registry",
+        type=Path,
+        default=Path("config/model_registry.yaml"),
+        help="Champion/challenger registry YAML",
+    )
+    p_mrollback.add_argument(
+        "--database-url",
+        default=None,
+        help="Disposable SQLite URL for decision audit (never live data/mma.db)",
+    )
+    p_mrollback.add_argument(
+        "--reason",
+        default="manual rollback to prior champion",
+        help="Rollback reason recorded in the decision ledger",
     )
 
     args = p.parse_args(argv)
@@ -2867,6 +2976,123 @@ def main(argv: list[str] | None = None) -> int:
                 if engine is not None:
                     engine.dispose()
             print(json.dumps(report.to_dict(), indent=2))
+            return 0
+        if args.model_cmd == "retrain":
+            db_url = str(args.database_url or "").strip()
+            if not db_url:
+                print(
+                    "model configuration error: --database-url is required for retrain "
+                    "decision audit (never live data/mma.db)"
+                )
+                return EXIT_INTERNAL
+            default_url = get_settings().mma_database_url
+            if is_prohibited_live_url(db_url, default_url=default_url):
+                print(
+                    "model configuration error: refusing live data/mma.db; "
+                    "pass an explicit disposable --database-url"
+                )
+                return EXIT_INTERNAL
+            engine = create_engine(db_url, future=True)
+            create_all_for_tests(engine)
+            factory = sessionmaker(bind=engine, future=True)
+            try:
+                with factory() as session:
+                    outcome = retrain_fixed_spec(
+                        session,
+                        registry_path=Path(args.registry),
+                        artifacts_dir=Path(args.artifacts_dir),
+                        actor="cli.retrain",
+                        health_ok=True if args.health_ok else None,
+                    )
+                    session.commit()
+            except (HoldoutLockedError, TrainError, ArtifactError, ValueError) as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            finally:
+                engine.dispose()
+            print(json.dumps(outcome.to_dict(), indent=2))
+            return 0 if outcome.status != "failed" else EXIT_INTERNAL
+        if args.model_cmd == "promote":
+            if not bool(getattr(args, "evaluate", False)):
+                print(
+                    "model configuration error: promotion requires --evaluate; "
+                    "cannot bypass holdout/health gates"
+                )
+                return EXIT_INTERNAL
+            db_url = str(args.database_url or "").strip()
+            if not db_url:
+                print(
+                    "model configuration error: --database-url is required for promote "
+                    "decision audit (never live data/mma.db)"
+                )
+                return EXIT_INTERNAL
+            default_url = get_settings().mma_database_url
+            if is_prohibited_live_url(db_url, default_url=default_url):
+                print(
+                    "model configuration error: refusing live data/mma.db; "
+                    "pass an explicit disposable --database-url"
+                )
+                return EXIT_INTERNAL
+            engine = create_engine(db_url, future=True)
+            create_all_for_tests(engine)
+            factory = sessionmaker(bind=engine, future=True)
+            try:
+                with factory() as session:
+                    payload = promote_candidate(
+                        session,
+                        registry_path=Path(args.registry),
+                        candidate_digest=str(args.candidate),
+                        evaluate=True,
+                        artifacts_dir=Path(args.artifacts_dir),
+                        reason=str(args.reason),
+                        actor="cli.promote",
+                        artifact_path=Path(args.artifact) if args.artifact else None,
+                        health_ok=True if args.health_ok else None,
+                    )
+                    session.commit()
+            except PromotionEvaluateRequiredError as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            except (PromotionGateError, PromotionError, ArtifactError, ValueError) as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            finally:
+                engine.dispose()
+            print(json.dumps(payload, indent=2))
+            return 0
+        if args.model_cmd == "rollback":
+            db_url = str(args.database_url or "").strip()
+            if not db_url:
+                print(
+                    "model configuration error: --database-url is required for rollback "
+                    "decision audit (never live data/mma.db)"
+                )
+                return EXIT_INTERNAL
+            default_url = get_settings().mma_database_url
+            if is_prohibited_live_url(db_url, default_url=default_url):
+                print(
+                    "model configuration error: refusing live data/mma.db; "
+                    "pass an explicit disposable --database-url"
+                )
+                return EXIT_INTERNAL
+            engine = create_engine(db_url, future=True)
+            create_all_for_tests(engine)
+            factory = sessionmaker(bind=engine, future=True)
+            try:
+                with factory() as session:
+                    payload = rollback_champion(
+                        session,
+                        registry_path=Path(args.registry),
+                        reason=str(args.reason),
+                        actor="cli.rollback",
+                    )
+                    session.commit()
+            except (PromotionError, ValueError) as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            finally:
+                engine.dispose()
+            print(json.dumps(payload, indent=2))
             return 0
         if args.model_cmd != "train":
             print(f"model configuration error: unknown command {args.model_cmd!r}")

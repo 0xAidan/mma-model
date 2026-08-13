@@ -55,11 +55,14 @@ jobs:
           src/mma_model/modeling/calibration.py
           src/mma_model/modeling/uncertainty.py
           src/mma_model/modeling/metrics.py
+          src/mma_model/modeling/registry.py
+          src/mma_model/modeling/promotion.py
           src/mma_model/modeling/__init__.py
           src/mma_model/markets/derive.py
           tests/modeling/test_baselines.py
           tests/modeling/test_joint.py
           tests/modeling/test_calibration.py
+          tests/modeling/test_registry.py
           --select E,F,I,UP,B,SIM
       - name: Ruff backtest (strict)
         run: >
