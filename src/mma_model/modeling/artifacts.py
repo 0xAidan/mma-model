@@ -842,6 +842,19 @@ def verify_bootstrap_metadata(
     if not isinstance(targets, dict) or not targets:
         raise UntrustedArtifactError("bootstrap targets must be a non-empty object")
     ev_keys = ("ev05", "ev25", "ev50", "ev75", "ev95")
+
+    def _validate_prob_ev_positive(target: str, summary_row: Mapping[str, Any]) -> None:
+        prob = summary_row.get("prob_ev_positive")
+        if prob is None:
+            return
+        value = _require_finite_number(
+            prob, field=f"bootstrap.{target}.prob_ev_positive"
+        )
+        if value < 0.0 or value > 1.0:
+            raise UntrustedArtifactError(
+                f"bootstrap target {target!r} prob_ev_positive must be in [0, 1]"
+            )
+
     for target_id, summary in targets.items():
         if not isinstance(target_id, str) or not target_id:
             raise UntrustedArtifactError("bootstrap target ids must be non-empty strings")
@@ -857,6 +870,7 @@ def verify_bootstrap_metadata(
                         f"bootstrap target {target_id!r} must not emit "
                         "price*p-1 EV for joint void mass"
                     )
+            _validate_prob_ev_positive(target_id, summary)
             continue
         if price is None:
             for key in ev_keys:
@@ -864,6 +878,7 @@ def verify_bootstrap_metadata(
                     raise UntrustedArtifactError(
                         f"bootstrap target {target_id!r} must not invent EV without a price"
                     )
+            _validate_prob_ev_positive(target_id, summary)
             continue
         price_value = _require_finite_number(
             price, field=f"bootstrap.{target_id}.observed_price"
@@ -874,6 +889,7 @@ def verify_bootstrap_metadata(
             )
         for key in ev_keys:
             _require_finite_number(summary.get(key), field=f"bootstrap.{target_id}.{key}")
+        _validate_prob_ev_positive(target_id, summary)
     return dict(payload)
 
 

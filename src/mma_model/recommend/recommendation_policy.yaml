@@ -1,0 +1,96 @@
+# Frozen DWCS-307 recommendation policy.
+# Authoritative packaged bytes: mma_model/recommend/recommendation_policy.yaml
+# Plan-visible path: config/recommendation_policy.yaml (symlink).
+#
+# This file mirrors the frozen evaluation contract recommendation section.
+# It does not override contract thresholds. Replay must never tune these values.
+
+schema_version: 1
+policy_id: dwcs_recommendation
+policy_version: "1.0.0"
+ticket: DWCS-307
+description: >
+  Frozen confirmed-value and price-target policy. Mirrors DWCS-001 evaluation
+  contract recommendation fields. Default moneyline is qualified; experimental
+  props remain no-bet unless this file explicitly qualifies them.
+
+mirrors_evaluation_contract:
+  max_confirmed_value_markets_per_matchup: 1
+  rank_confirmed_by: highest_p25_ev
+  emit_no_bet_when_gates_fail: true
+  fair_decimal_odds: "1 / p50"
+  actionable_ev_target: 0.05
+  strong_value_ev_target: 0.1
+  actionable_decimal_price: "max(1 / p25, 1.05 / p50)"
+  strong_value_decimal_price: "max(1 / p25, 1.10 / p50)"
+  confirmed_value_min_prob_ev_positive: 0.7
+  exact_round_actionable_ev_target: 0.1
+  exact_round_min_prob_ev_positive: 0.75
+  classifications:
+    - confirmed_value
+    - price_target
+    - no_bet
+  unpriced_target_is_not_best_available_market: true
+  american_odds_renderer_expresses_or_better: true
+  production_bootstrap_refits: 200
+
+# Lower index = higher priority. Used after p25 EV for confirmed ranking and
+# as the frozen market-priority key for the unpriced watchlist.
+market_priority:
+  - moneyline
+  - totals
+  - goes_distance
+  - method
+  - fighter_by_method
+  - exact_round
+
+market_maturity:
+  moneyline: qualified
+  totals: experimental
+  goes_distance: experimental
+  method: experimental
+  fighter_by_method: experimental
+  exact_round: experimental
+
+# Experimental families stay no-bet unless listed here with maturity qualified.
+qualified_families:
+  - moneyline
+
+gate_order:
+  - identity
+  - data_quality
+  - model
+  - uncertainty
+  - market_maturity
+
+no_bet_reason_precedence:
+  - malformed_candidate
+  - unsupported_selection
+  - identity_unresolved
+  - canonical_mismatch
+  - ambiguous_selection
+  - replacement
+  - data_quality
+  - incomplete_data
+  - model_unqualified
+  - uncalibrated
+  - hash_mismatch
+  - nonproduction_uncertainty
+  - missing_bootstrap
+  - missing_p25
+  - invalid_percentiles
+  - market_blocked
+  - market_experimental
+  - stale_line
+  - post_cutoff
+  - suspended_line
+  - locked_line
+  - replaced_line
+  - ineligible_quote
+  - missing_eligibility_decision
+  - below_actionable
+  - missing_prob_ev_positive
+  - prob_ev_positive_low
+  - p25_ev_nonpositive
+  - lower_ranked_eligible_selection
+  - secondary_price_target

@@ -41,6 +41,7 @@ where = ["src"]
 "mma_model.markets" = ["settlement_v1.yaml"]
 "mma_model.modeling" = ["ridge_v1.yaml", "joint_v1.yaml"]
 "mma_model.odds" = ["odds_decision_v1.yaml", "matching_v1.yaml", "schedule_v1.yaml"]
+"mma_model.recommend" = ["recommendation_policy.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -89,4 +90,7 @@ select = ["E4", "E7", "E9", "F"]
 #              --select E,F,I,UP,B,SIM
 # Focused stricter lint for DWCS-306 walk-forward backtest:
 #   ruff check src/mma_model/backtest src/mma_model/predict/backtest.py tests/backtest \
+#              --select E,F,I,UP,B,SIM
+# Focused stricter lint for DWCS-307 recommendation policy:
+#   ruff check src/mma_model/recommend tests/recommend \
 #              --select E,F,I,UP,B,SIM
