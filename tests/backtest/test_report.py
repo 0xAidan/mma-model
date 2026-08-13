@@ -68,7 +68,7 @@ def test_same_inputs_reproduce_bytes(tmp_path: Path) -> None:
     assert first["content_hash"] in md_text
 
 
-def test_generated_at_excluded_from_content_hash() -> None:
+def test_generated_at_is_hashed_for_reproducibility() -> None:
     a = _payload()
     b = run_walk_forward(
         contract=CONTRACT,
@@ -89,8 +89,10 @@ def test_generated_at_excluded_from_content_hash() -> None:
         bootstrap_replicates=8,
         generated_at=datetime(2020, 1, 1, tzinfo=UTC),
     )
-    assert a["content_hash"] == b["content_hash"]
+    assert a["content_hash"] != b["content_hash"]
     assert a["generated_at"] != b["generated_at"]
+    same = _payload()
+    assert a["content_hash"] == same["content_hash"]
 
 
 def test_tamper_fails_hash_check(tmp_path: Path) -> None:

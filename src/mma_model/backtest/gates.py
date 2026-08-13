@@ -110,18 +110,32 @@ def assert_holdout_not_in_train(
     train_event_ids: Sequence[str],
     *,
     train_seasons: Sequence[int] | None = None,
+    event_seasons: Mapping[str, int] | None = None,
+    holdout_event_ids: Sequence[str] | None = None,
+    holdout_seasons: Sequence[int] | None = None,
 ) -> None:
-    """2025 must never enter any refit, including sealed holdout scoring."""
+    """Holdout-season cards must never enter any refit, including sealed scoring.
+
+    Season / FoldRole metadata is authoritative. An event named ``ufc-310`` in
+    2025 is blocked even though the id string does not contain ``2025``.
+    """
+    locked_seasons = {int(year) for year in (holdout_seasons or (HOLDOUT_YEAR,))}
+    locked_ids = {str(event_id) for event_id in (holdout_event_ids or ())}
+    seasons = dict(event_seasons or {})
     for event_id in train_event_ids:
-        lowered = str(event_id).lower()
-        if "2025" in lowered or "holdout" in lowered or lowered.startswith("hold-"):
+        if str(event_id) in locked_ids:
             raise HoldoutTrainError(
-                f"locked 2025 holdout event {event_id!r} cannot enter training"
+                f"locked holdout event {event_id!r} cannot enter training"
+            )
+        season = seasons.get(str(event_id))
+        if season is not None and int(season) in locked_seasons:
+            raise HoldoutTrainError(
+                f"locked holdout-season event {event_id!r} ({season}) cannot enter training"
             )
     if train_seasons is None:
         return
-    if HOLDOUT_YEAR in {int(year) for year in train_seasons}:
-        raise HoldoutTrainError("locked 2025 labels cannot enter training")
+    if locked_seasons.intersection(int(year) for year in train_seasons):
+        raise HoldoutTrainError("locked holdout-season labels cannot enter training")
 
 
 def assert_holdout_access(
@@ -149,7 +163,7 @@ def assert_evaluator_hashes(
     feature_spec_hash: str,
     data_hash: str,
     config_hash: str,
-    expected_data_hash: str,
+    expected_data_hash: str | None,
     expected_config_hash: str,
     expected_contract_hash: str = PINNED_CONTRACT_HASH,
     expected_feature_spec_hash: str | None = None,

@@ -17,6 +17,7 @@ from mma_model.value.odds import (
     american_to_implied_prob,
     decimal_to_implied_prob,
     validate_decimal_odds,
+    validate_nonnegative_fraction,
     validate_probability,
 )
 
@@ -24,10 +25,65 @@ CLV_UNIT = "probability_points"
 
 
 def expected_value(model_prob: float, offered_decimal: float) -> float:
-    """Exact EV per 1 unit staked: ``model_prob * offered_decimal - 1``."""
+    """Exact EV per 1 unit staked with no void mass: ``model_prob * offered_decimal - 1``."""
     model_prob = validate_probability(model_prob, field="model_prob")
     offered_decimal = validate_decimal_odds(offered_decimal, field="offered_decimal")
     return model_prob * offered_decimal - 1.0
+
+
+def _validate_void_mass(p_void: float) -> float:
+    mass = validate_nonnegative_fraction(p_void, field="p_void", maximum=1.0)
+    if mass >= 1.0:
+        raise InvalidProbabilityError("p_void must be < 1")
+    return mass
+
+
+def conditional_win_probability(p_win: float, p_void: float) -> float:
+    """Win probability among non-void outcomes: ``p_win / (1 - p_void)``."""
+    p_win = validate_probability(p_win, field="p_win")
+    p_void = _validate_void_mass(p_void)
+    remaining = 1.0 - p_void
+    p_loss = 1.0 - p_win - p_void
+    if p_loss < -1e-12:
+        raise InvalidProbabilityError("p_win + p_void cannot exceed 1")
+    return validate_probability(p_win / remaining, field="conditional_win_prob")
+
+
+def expected_value_with_void(
+    *,
+    p_win: float,
+    p_void: float,
+    offered_decimal: float,
+) -> float:
+    """Exact EV per 1 unit when void/push returns the stake.
+
+    ``p_win * (odds - 1) - p_loss`` with ``p_loss = 1 - p_win - p_void``.
+    Equivalent to ``p_win * odds - 1 + p_void``. Unconditional ``p_win`` and
+    ``p_void`` are preserved; this does not substitute the conditional probability.
+    """
+    p_win = validate_probability(p_win, field="p_win")
+    p_void = _validate_void_mass(p_void)
+    offered_decimal = validate_decimal_odds(offered_decimal, field="offered_decimal")
+    if p_void == 0.0:
+        return expected_value(p_win, offered_decimal)
+    p_loss = 1.0 - p_win - p_void
+    if p_loss < -1e-12:
+        raise InvalidProbabilityError("p_win + p_void cannot exceed 1")
+    if p_loss < 0.0:
+        p_loss = 0.0
+    return p_win * (offered_decimal - 1.0) - p_loss
+
+
+def closing_ev_with_void(
+    *,
+    p_win: float,
+    p_void: float,
+    closing_decimal: float,
+) -> float:
+    """Closing EV with the same void-aware profit identity as opening EV."""
+    return expected_value_with_void(
+        p_win=p_win, p_void=p_void, offered_decimal=closing_decimal
+    )
 
 
 def closing_ev(model_prob: float, closing_decimal: float) -> float:
@@ -129,9 +185,12 @@ __all__ = [
     "CLV_UNIT",
     "american_to_implied_prob",
     "closing_ev",
+    "closing_ev_with_void",
     "compute_exact_ev",
+    "conditional_win_probability",
     "ev_vs_fair",
     "expected_value",
+    "expected_value_with_void",
     "flat_unit_profit",
     "same_line_probability_clv",
     "same_selection_closing_ev",

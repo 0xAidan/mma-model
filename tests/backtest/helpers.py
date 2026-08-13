@@ -102,6 +102,7 @@ def make_prediction(
             p_b=p_b,
             p_draw=0.0,
             p25=p25,
+            p75=None if p25 is None else min(0.99, float(p25) + 0.08),
             fallback_reason="m1_moneyline_fallback",
         )
     return BoutPrediction(
@@ -191,6 +192,8 @@ def make_quote(
         closing_observed_at=closing_at,
         closing_bookmaker_key=bookmaker_key,
         closing_quote_id=None if close_price is None else quote_id + 500,
+        fixture_provenance=True,
+        historical_evidence=False,
     )
 
 

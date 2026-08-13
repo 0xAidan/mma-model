@@ -19,8 +19,9 @@ from mma_model.backtest.engine import (
 )
 
 UNSAFE_FIGHT_BY_FIGHT_DISABLED = (
-    "The fight-by-fight walk_forward_backtest is disabled and is not betting "
-    "evidence. Use mma-model backtest run for event-grouped replay."
+    "The fight-by-fight walk_forward_backtest is fail-closed and does not "
+    "invoke the event-grouped engine. It is not betting evidence. Use "
+    "mma-model backtest run for event-grouped replay."
 )
 
 
@@ -34,7 +35,7 @@ def walk_forward_backtest(
     random_state: int = 42,
     allow_unsafe: bool = False,
 ) -> dict[str, Any]:
-    """Compatibility wrapper. Does not run the unsafe fight-by-fight evaluator.
+    """Compatibility wrapper. Fail-closed: does not invoke the walk-forward engine.
 
     ``allow_unsafe`` is rejected. Same-card results cannot enter later fights
     because this function never scores fight-by-fight.

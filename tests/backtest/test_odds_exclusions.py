@@ -97,6 +97,40 @@ def test_ambiguous_same_timestamp_prices_excluded() -> None:
     assert bout["priced_rows"] == []
 
 
+def test_later_post_cutoff_quote_does_not_poison_earlier_valid_quote() -> None:
+    quotes = (
+        make_quote(
+            "2017-a",
+            observed_at=CUTOFF - timedelta(minutes=10),
+            price=2.10,
+            quote_id=1,
+        ),
+        make_quote(
+            "2017-a",
+            observed_at=CUTOFF + timedelta(minutes=5),
+            price=9.99,
+            quote_id=2,
+        ),
+    )
+    payload = _run(quotes)
+    bout = _bout(payload, "2017-a")
+    priced = [row for row in bout["priced_rows"] if row["outcome_key"] == "fighter_a"]
+    assert priced
+    assert priced[0]["offered_decimal"] == 2.10
+    assert priced[0]["later_ignored"] >= 1
+
+
+def test_quote_observed_exactly_at_cutoff_is_eligible() -> None:
+    quotes = (
+        make_quote("2017-a", observed_at=CUTOFF, price=2.05, quote_id=3),
+    )
+    payload = _run(quotes)
+    bout = _bout(payload, "2017-a")
+    priced = [row for row in bout["priced_rows"] if row["outcome_key"] == "fighter_a"]
+    assert priced
+    assert priced[0]["offered_decimal"] == 2.05
+
+
 def test_threshold_only_rows_have_no_synthetic_betting_fields() -> None:
     payload = _run(())
     bout = _bout(payload, "2017-a")

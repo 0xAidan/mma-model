@@ -29,7 +29,8 @@ def test_protocol_cli_runs_real_pipeline(tmp_path: Path, capsys) -> None:
     assert code == EXIT_OK
     text = capsys.readouterr().out
     payload = json.loads(text)
-    assert payload["evidence"] is True
+    assert payload["evidence"] is False
+    assert payload["production_qualified"] is False
     assert payload["universe"]["cards"] == 5
     json_path = Path(payload["output"]["json_path"])
     saved = json.loads(json_path.read_text(encoding="utf-8"))

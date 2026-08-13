@@ -54,7 +54,7 @@ def test_universe_year_market_source_slices_reconcile() -> None:
     assert payload["universe"]["brazil_bouts"] == br_n
     sources = payload["breakdowns"]["sources"]
     assert sources
-    market_n = payload["breakdowns"]["markets"]["moneyline"]["n_priced"]["numerator"]
+    market_n = payload["breakdowns"]["markets"]["moneyline"]["betting"]["n_priced"]["numerator"]
     assert market_n == payload["metrics"]["all_dwcs"]["betting"]["n_priced"]["numerator"]
 
 
@@ -77,6 +77,10 @@ def test_assert_breakdowns_reconcile_helper() -> None:
             pre_policy_candidate=True,
             markets_available=("moneyline",),
             markets_unavailable=(),
+            n_priced_selections=1,
+            n_threshold_selections=0,
+            priced_market_families=("moneyline",),
+            threshold_market_families=(),
         ),
         AttemptRow(
             event_id="e2",
@@ -95,6 +99,10 @@ def test_assert_breakdowns_reconcile_helper() -> None:
             pre_policy_candidate=False,
             markets_available=("moneyline",),
             markets_unavailable=(),
+            n_priced_selections=0,
+            n_threshold_selections=1,
+            priced_market_families=(),
+            threshold_market_families=("moneyline",),
         ),
     )
     bets = (

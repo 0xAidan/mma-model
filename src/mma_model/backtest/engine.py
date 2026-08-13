@@ -8,34 +8,34 @@ typed exclusions, never fabricated production scores.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Never, Protocol
 
 from mma_model.backtest.contract import (
+    PINNED_FEATURE_SPEC_HASH,
+    PINNED_SPLITS_CONFIG_HASH,
     compute_data_hash,
     compute_splits_config_hash,
     current_feature_spec_hash,
 )
 from mma_model.backtest.gates import (
-    HOLDOUT_YEAR,
     PRICED_SCOPE,
     THRESHOLD_SCOPE,
     DatabaseMutationError,
     assert_contract_frozen,
-    assert_cutoff_before_results,
     assert_evaluator_hashes,
     assert_holdout_not_in_train,
     assert_readonly_database_url,
-    assert_same_card_not_in_train,
     assert_threshold_only_clean,
 )
 from mma_model.backtest.metrics import (
     DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
     DEFAULT_BACKTEST_BOOTSTRAP_SEED,
     AttemptRow,
+    MarketOutcomeRow,
     OutcomeObservation,
     PricedBet,
     UniverseKey,
@@ -50,6 +50,12 @@ from mma_model.backtest.metrics import (
     outcome_metrics,
     selection_metrics,
 )
+from mma_model.backtest.quotes import (
+    LoadedQuoteRow,
+    load_quotes_for_groups,
+    quote_inventory_hash,
+    select_closing_row,
+)
 from mma_model.backtest.report import (
     EVIDENCE_SCHEMA_VERSION,
     attach_content_hash,
@@ -60,12 +66,14 @@ from mma_model.backtest.report import (
 from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
 from mma_model.dwcs.classification import SeriesVariant
-from mma_model.evaluation.contract import EvaluationContract, load_evaluation_contract
-from mma_model.features.as_of import cutoff_for_event, implied_event_start
-from mma_model.features.builder import FeatureBuilder
+from mma_model.evaluation.contract import (
+    PINNED_CONTRACT_HASH,
+    EvaluationContract,
+    load_evaluation_contract,
+)
+from mma_model.features.as_of import ensure_utc, implied_event_start
 from mma_model.features.snapshot import (
     FeatureSnapshot,
-    SnapshotBout,
     snapshot_from_session,
     to_label_version,
 )
@@ -77,7 +85,6 @@ from mma_model.labels.outcomes import (
     WinnerSide,
     settlement_label,
     terminal_atom,
-    training_label,
 )
 from mma_model.markets.derive import derive_markets
 from mma_model.markets.settlement import (
@@ -89,36 +96,23 @@ from mma_model.markets.settlement import (
 from mma_model.modeling.artifacts import (
     PINNED_RIDGE_SPEC_HASH,
     compute_code_hash,
-    load_ridge_spec,
     resolve_code_commit,
 )
-from mma_model.modeling.baselines import (
-    LABEL_LAG,
-    LabeledSample,
-    MissingNoVig,
-    PreCutoffMoneyline,
-    TrainError,
-    coin_flip_win_prob,
-    fit_ridge,
-    no_vig_win_prob,
-    predict_ridge_raw,
-    predict_ridge_win_prob,
-    protocol_training_universe,
-    sequential_rating_win_prob,
-)
-from mma_model.modeling.calibration import SigmoidCalibrator
-from mma_model.modeling.metrics import MetricsError, fit_logistic_recalibration, stable_logit
+from mma_model.modeling.baselines import protocol_training_universe
+from mma_model.modeling.metrics import MetricsError, conditional_fighter_a_given_decisive
 from mma_model.modeling.splits import (
     EventGroup,
     FoldKind,
     FoldMetadata,
     FoldRole,
     SplitCard,
+    SplitError,
     cards_from_manifest,
     cards_from_session,
     group_cards,
     outer_folds,
     protocol_fixture_cards,
+    role_for_season,
 )
 from mma_model.quality.readonly import (
     CoverageDatabaseError,
@@ -142,10 +136,15 @@ from mma_model.value.priced import PricedValueRequest, compute_priced_value_metr
 from mma_model.value.thresholds import compute_value_price_thresholds
 
 CUTOFF_POLICY: Final = "scheduled_minus_60m"
+# SHA-256 of the frozen 89-card grouped universe (event_id, bout_ids, cutoff).
+PINNED_MANIFEST_UNIVERSE_HASH: Final = (
+    "fd5088bc642ca0c4e2a900940416ee7d5d62368e407b31fee491d198424bebb0"
+)
 LEGACY_BACKTEST_METHOD: Final = "disabled_unsafe_fight_by_fight"
 UNSAFE_EVALUATOR_NOTE: Final = (
-    "The fight-by-fight walk_forward_backtest is disabled and is not betting "
-    "evidence. Use mma-model backtest run for event-grouped replay."
+    "The fight-by-fight walk_forward_backtest is fail-closed and does not "
+    "invoke the event-grouped engine. It is not betting evidence. Use "
+    "mma-model backtest run for event-grouped replay."
 )
 M1_UNSUPPORTED_MARKETS: Final = (
     MarketFamily.TOTALS,
@@ -185,7 +184,10 @@ class ExclusionReason(StrEnum):
     THRESHOLD_ONLY = "threshold_only"
     FEATURE_QUALITY = "feature_quality"
     NO_COHERENT_DISTRIBUTION = "no_coherent_distribution"
-    HOLDOUT_IN_TRAIN = "holdout_in_train"
+    MISSING_P25 = "missing_p25"
+    UNCALIBRATED = "uncalibrated"
+    ACCOUNTING_ONLY = "accounting_only"
+    FIXTURE_PROVENANCE = "fixture_provenance"
 
 
 class BacktestError(ValueError):
@@ -223,6 +225,13 @@ class QuoteCandidate:
     closing_bookmaker_key: str | None = None
     closing_quote_id: int | None = None
     closing_lifecycle: str = "active"
+    eligibility_evidence: object | None = None
+    quote_evidence: object | None = None
+    closing_eligibility_evidence: object | None = None
+    closing_quote_evidence: object | None = None
+    fixture_provenance: bool = False
+    historical_evidence: bool = False
+    later_ignored: int = 0
 
 
 @dataclass(frozen=True)
@@ -450,8 +459,10 @@ def moneyline_markets(
     p_b: float,
     p_draw: float,
     p25: float | None,
+    p75: float | None = None,
     fallback_reason: str | None,
 ) -> tuple[MarketPrediction, ...]:
+    p25_b = None if p75 is None else (1.0 - p75)
     rows = [
         MarketPrediction(
             family=MarketFamily.MONEYLINE.value,
@@ -468,7 +479,7 @@ def moneyline_markets(
             outcome_key=OutcomeKey.FIGHTER_B.value,
             line_point=None,
             p50=p_b,
-            p25=None if p25 is None else (1.0 - p25 if p25 <= 1.0 else None),
+            p25=p25_b,
             available=True,
             availability_reason=None,
             draw_probability=p_draw,
@@ -494,19 +505,21 @@ def markets_from_joint(
     atoms: Mapping[str, float],
     *,
     scheduled_rounds: int,
-    p25: float | None,
+    p25_by_selection: Mapping[str, float] | None = None,
 ) -> tuple[MarketPrediction, ...]:
     derived = derive_markets(atoms, scheduled_rounds=scheduled_rounds)
+    p25_map = dict(p25_by_selection or {})
     rows: list[MarketPrediction] = []
     for family, mapping in derived.as_family_map().items():
         for outcome, prob in mapping.items():
+            key = _selection_id(family.value, outcome.value, None)
             rows.append(
                 MarketPrediction(
                     family=family.value,
                     outcome_key=outcome.value,
                     line_point=None,
                     p50=float(prob),
-                    p25=p25 if family is MarketFamily.MONEYLINE else None,
+                    p25=p25_map.get(key),
                     available=True,
                     availability_reason=None,
                     draw_probability=derived.draw if family is MarketFamily.MONEYLINE else None,
@@ -514,13 +527,14 @@ def markets_from_joint(
             )
     for line_point, mapping in derived.totals.items():
         for outcome, prob in mapping.items():
+            key = _selection_id(MarketFamily.TOTALS.value, outcome.value, float(line_point))
             rows.append(
                 MarketPrediction(
                     family=MarketFamily.TOTALS.value,
                     outcome_key=outcome.value,
                     line_point=float(line_point),
                     p50=float(prob),
-                    p25=None,
+                    p25=p25_map.get(key),
                     available=True,
                     availability_reason=None,
                 )
@@ -537,6 +551,7 @@ def join_quote(
     line_point: float | None,
     cutoff: datetime,
 ) -> QuoteJoinResult:
+    cutoff = ensure_utc(cutoff)
     matching = [
         item
         for item in candidates
@@ -547,18 +562,24 @@ def join_quote(
     ]
     if not matching:
         return QuoteJoinResult(None, False, ExclusionReason.THRESHOLD_ONLY, "no quote")
-    if any(item.is_ambiguous for item in matching):
+    later_ignored = sum(1 for item in matching if ensure_utc(item.observed_at) > cutoff)
+    as_of = [item for item in matching if ensure_utc(item.observed_at) <= cutoff]
+    if not as_of:
+        return QuoteJoinResult(
+            matching[0],
+            False,
+            ExclusionReason.POST_CUTOFF_ODDS,
+            f"post-cutoff ({later_ignored} later observations ignored)",
+        )
+    if any(item.is_ambiguous for item in as_of):
         return QuoteJoinResult(None, False, ExclusionReason.AMBIGUOUS_ODDS, "ambiguous")
-    prices = {(item.observed_at, item.price_decimal) for item in matching}
-    latest_time = max(item.observed_at for item in matching)
-    at_latest = [item for item in matching if item.observed_at == latest_time]
+    latest_time = max(item.observed_at for item in as_of)
+    at_latest = [item for item in as_of if item.observed_at == latest_time]
     if len({item.price_decimal for item in at_latest}) > 1:
         return QuoteJoinResult(
             None, False, ExclusionReason.AMBIGUOUS_ODDS, "conflicting same-timestamp prices"
         )
-    chosen = max(matching, key=lambda item: (item.observed_at, item.quote_id))
-    if chosen.observed_at > cutoff:
-        return QuoteJoinResult(chosen, False, ExclusionReason.POST_CUTOFF_ODDS, "post-cutoff")
+    chosen = max(as_of, key=lambda item: (item.observed_at, item.quote_id))
     if chosen.is_replacement or chosen.lifecycle == "replaced":
         return QuoteJoinResult(chosen, False, ExclusionReason.REPLACED_ODDS, "replaced")
     if chosen.lifecycle == "stale":
@@ -569,8 +590,125 @@ def join_quote(
         return QuoteJoinResult(
             chosen, False, ExclusionReason.INELIGIBLE_QUOTE, chosen.eligibility_reason
         )
-    _ = prices
-    return QuoteJoinResult(chosen, True, None, "eligible")
+    tagged = replace(chosen, later_ignored=later_ignored)
+    return QuoteJoinResult(tagged, True, None, "eligible")
+
+
+def _event_is_holdout_season(season: int, contract: EvaluationContract) -> bool:
+    if season in contract.splits.holdout.seasons:
+        return True
+    try:
+        return role_for_season(season, contract) is FoldRole.HOLDOUT
+    except SplitError:
+        return False
+
+
+def quote_candidate_from_loaded(
+    row: LoadedQuoteRow,
+    *,
+    closing: LoadedQuoteRow | None = None,
+) -> QuoteCandidate:
+    quote = row.quote
+    lifecycle = (
+        row.eligibility.lifecycle_state_at_decision
+        if row.eligibility.lifecycle_state_at_decision
+        else "active"
+    )
+    close_price = None
+    close_at = None
+    close_book = None
+    close_id = None
+    close_life = "active"
+    close_elig = None
+    close_evidence = None
+    if closing is not None and closing.eligible:
+        close_price = float(closing.quote.price_decimal)
+        close_at = ensure_utc(closing.quote.observed_at)
+        close_book = closing.quote.bookmaker_key
+        close_id = int(closing.quote.id) if closing.quote.id is not None else None
+        close_life = (
+            closing.eligibility.lifecycle_state_at_decision
+            if closing.eligibility.lifecycle_state_at_decision
+            else "active"
+        )
+        close_elig = closing.eligibility
+        close_evidence = closing.quote_evidence
+    return QuoteCandidate(
+        bout_id=row.bout_id,
+        market_family=str(quote.market_family),
+        outcome_key=str(quote.outcome_key),
+        line_point=quote.line_point,
+        price_decimal=float(quote.price_decimal),
+        observed_at=ensure_utc(quote.observed_at),
+        bookmaker_key=str(quote.bookmaker_key),
+        provider=str(quote.provider),
+        region=str(quote.region),
+        quote_id=int(quote.id) if quote.id is not None else 0,
+        availability=str(quote.availability),
+        lifecycle=str(lifecycle),
+        eligible=row.eligible,
+        eligibility_reason=row.eligibility_reason,
+        source_kind="provider_quote",
+        closing_price_decimal=close_price,
+        closing_observed_at=close_at,
+        closing_bookmaker_key=close_book,
+        closing_quote_id=close_id,
+        closing_lifecycle=str(close_life),
+        eligibility_evidence=row.eligibility,
+        quote_evidence=row.quote_evidence,
+        closing_eligibility_evidence=close_elig,
+        closing_quote_evidence=close_evidence,
+        fixture_provenance=False,
+        historical_evidence=True,
+        later_ignored=row.later_ignored,
+    )
+
+
+def _quote_content_hash_payload(quote: QuoteCandidate) -> dict[str, Any]:
+    eligibility = quote.eligibility_evidence
+    decision_identity = None
+    decision_version = None
+    evaluated_at = None
+    if isinstance(eligibility, QuoteEligibilityEvidence):
+        decision_identity = eligibility.decision_identity
+        decision_version = eligibility.decision_version
+        evaluated_at = eligibility.evaluated_at.isoformat()
+    return {
+        "availability": quote.availability,
+        "bookmaker_key": quote.bookmaker_key,
+        "bout_id": quote.bout_id,
+        "closing_observed_at": (
+            None if quote.closing_observed_at is None else quote.closing_observed_at.isoformat()
+        ),
+        "closing_price_decimal": quote.closing_price_decimal,
+        "closing_quote_id": quote.closing_quote_id,
+        "decision_identity": decision_identity,
+        "decision_version": decision_version,
+        "evaluated_at": evaluated_at,
+        "lifecycle": quote.lifecycle,
+        "line_point": quote.line_point,
+        "market_family": quote.market_family,
+        "observed_at": quote.observed_at.isoformat(),
+        "outcome_key": quote.outcome_key,
+        "price_decimal": quote.price_decimal,
+        "provider": quote.provider,
+        "quote_id": quote.quote_id,
+        "region": quote.region,
+    }
+
+
+def _settlement_hash_payload(bout_id: str, facts: BoutSettlementFacts) -> dict[str, Any]:
+    return {
+        "bout_id": bout_id,
+        "elapsed_seconds_in_round": facts.elapsed_seconds_in_round,
+        "ending_round": facts.ending_round,
+        "method": facts.method,
+        "pending": facts.pending,
+        "result_class": facts.result_class,
+        "scheduled_rounds": facts.scheduled_rounds,
+        "total_elapsed_seconds": facts.total_elapsed_seconds,
+        "winner_side": facts.winner_side,
+    }
 
 
 def _method_for_facts(method: MethodLabel | None) -> str | None:
@@ -629,9 +767,9 @@ def _is_pre_policy_candidate(
     offered: float,
     contract: EvaluationContract,
 ) -> bool:
-    conservative = p25 if p25 is not None else p50
-    if conservative > p50:
-        conservative = p50
+    if p25 is None:
+        return False
+    conservative = p25 if p25 <= p50 else p50
     thresholds = compute_value_price_thresholds(p50, conservative, family=family)
     return offered + 1e-12 >= thresholds.actionable_decimal
 
@@ -681,6 +819,7 @@ def _priced_metrics_for_quote(
     cutoff: datetime,
     settlement: SettlementResult | None,
     event_start: datetime,
+    p_void: float | None = None,
 ) -> dict[str, Any]:
     selection_identity = _selection_id(family.value, outcome.value, line_point)
     context = ValueSelectionContext(
@@ -690,13 +829,22 @@ def _priced_metrics_for_quote(
         line_point=line_point,
     )
     closing = None
-    if (
+    if isinstance(quote.closing_eligibility_evidence, QuoteEligibilityEvidence) and isinstance(
+        quote.closing_quote_evidence, ProviderQuoteEvidence
+    ):
+        closing = ClosingPriceEvidence(
+            quote_evidence=quote.closing_quote_evidence,
+            eligibility_evidence=quote.closing_eligibility_evidence,
+        )
+    elif (
         quote.closing_price_decimal is not None
         and quote.closing_observed_at is not None
         and quote.closing_quote_id is not None
         and quote.closing_observed_at > quote.observed_at
         and quote.closing_observed_at <= event_start
         and not quote.is_proxy_timestamp
+        and quote.fixture_provenance
+        and not quote.historical_evidence
     ):
         close_book = quote.closing_bookmaker_key or quote.bookmaker_key
         close_quote = QuoteCandidate(
@@ -713,6 +861,8 @@ def _priced_metrics_for_quote(
             availability="available",
             lifecycle=quote.closing_lifecycle,
             source_kind=quote.source_kind,
+            fixture_provenance=True,
+            historical_evidence=False,
         )
         if quote.source_kind == "user_observed":
             close_manual = _manual_evidence(close_quote, role=PriceObservationRole.CLOSING)
@@ -733,6 +883,16 @@ def _priced_metrics_for_quote(
                 quote_evidence=close_provider,
                 eligibility_evidence=close_elig,
             )
+    opening_quote_evidence = (
+        quote.quote_evidence
+        if isinstance(quote.quote_evidence, ProviderQuoteEvidence)
+        else None
+    )
+    opening_eligibility = (
+        quote.eligibility_evidence
+        if isinstance(quote.eligibility_evidence, QuoteEligibilityEvidence)
+        else None
+    )
     if quote.source_kind == "user_observed":
         request = PricedValueRequest(
             model_prob=p50,
@@ -742,23 +902,58 @@ def _priced_metrics_for_quote(
             manual_evidence=_manual_evidence(quote, role=PriceObservationRole.OPENING),
             closing_evidence=closing,
             settlement=settlement,
+            p_void=p_void,
         )
     else:
-        request = PricedValueRequest(
-            model_prob=p50,
-            target_context=context,
-            valuation_cutoff=cutoff,
-            product_eligible=True,
-            quote_evidence=_provider_evidence(quote, role=PriceObservationRole.OPENING),
-            eligibility_evidence=_eligibility(
+        if opening_quote_evidence is None or opening_eligibility is None:
+            if not quote.fixture_provenance:
+                return {
+                    "available": False,
+                    "bookmaker_key": quote.bookmaker_key,
+                    "bout_id": quote.bout_id,
+                    "closing_ev": None,
+                    "expected_value": None,
+                    "flat_unit_profit": None,
+                    "fixture_provenance": quote.fixture_provenance,
+                    "historical_evidence": quote.historical_evidence,
+                    "line_point": line_point,
+                    "market_family": family.value,
+                    "model_prob": p50,
+                    "offered_decimal": quote.price_decimal,
+                    "outcome_key": outcome.value,
+                    "p_void": p_void,
+                    "p_win_unconditional": p50,
+                    "probability_clv": None,
+                    "provider": quote.provider,
+                    "quarter_kelly_fraction": None,
+                    "reason": ExclusionReason.INELIGIBLE_QUOTE.value,
+                    "scope": PRICED_SCOPE,
+                    "settlement": None if settlement is None else settlement.value,
+                    "source_kind": quote.source_kind,
+                    "stake_fraction": None,
+                    "is_proxy_timestamp": quote.is_proxy_timestamp,
+                    "later_ignored": quote.later_ignored,
+                }
+            opening_quote_evidence = _provider_evidence(
+                quote, role=PriceObservationRole.OPENING
+            )
+            opening_eligibility = _eligibility(
                 quote,
                 selection_identity=selection_identity,
                 evaluated_at=cutoff,
                 eligible=True,
                 reason="none",
-            ),
+            )
+        request = PricedValueRequest(
+            model_prob=p50,
+            target_context=context,
+            valuation_cutoff=cutoff,
+            product_eligible=True,
+            quote_evidence=opening_quote_evidence,
+            eligibility_evidence=opening_eligibility,
             closing_evidence=closing,
             settlement=settlement,
+            p_void=p_void,
         )
     metrics = compute_priced_value_metrics(request)
     payload = {
@@ -768,11 +963,16 @@ def _priced_metrics_for_quote(
         "closing_ev": metrics.closing_ev,
         "expected_value": metrics.expected_value,
         "flat_unit_profit": metrics.flat_unit_profit,
+        "fixture_provenance": quote.fixture_provenance,
+        "historical_evidence": quote.historical_evidence,
         "line_point": line_point,
         "market_family": family.value,
         "model_prob": p50,
         "offered_decimal": quote.price_decimal,
         "outcome_key": outcome.value,
+        "p_void": metrics.p_void,
+        "p_win_conditional": metrics.p_win_conditional,
+        "p_win_unconditional": metrics.p_win_unconditional,
         "probability_clv": metrics.probability_clv,
         "provider": quote.provider,
         "quarter_kelly_fraction": metrics.quarter_kelly_fraction,
@@ -782,6 +982,8 @@ def _priced_metrics_for_quote(
         "source_kind": quote.source_kind,
         "stake_fraction": metrics.stake_fraction,
         "is_proxy_timestamp": quote.is_proxy_timestamp,
+        "later_ignored": quote.later_ignored,
+        "void_adjusted": metrics.void_adjusted,
     }
     if quote.is_proxy_timestamp:
         payload["probability_clv"] = None
@@ -879,248 +1081,10 @@ def _threshold_row(market: MarketPrediction) -> dict[str, Any]:
     }
 
 
-@dataclass
-class SnapshotWalkForwardScorer:
-    """Fit M1 on earlier snapshot cards only; score the whole test card together."""
-
-    snapshot: FeatureSnapshot
-    eval_event_ids: frozenset[str]
-    contract: EvaluationContract
-    _prior_oof_y: list[int] = field(default_factory=list)
-    _prior_oof_logit: list[float] = field(default_factory=list)
-    last_fit_hashes: dict[str, str] = field(default_factory=dict)
-
-    def score_card(self, group: EventGroup, fold: FoldMetadata) -> CardScore:
-        assert_same_card_not_in_train(
-            test_event_id=group.event_id, train_event_ids=fold.train_event_ids
-        )
-        assert_cutoff_before_results(
-            max_train_timestamp=fold.max_train_timestamp,
-            cutoff=group.cutoff.cutoff,
-            event_id=group.event_id,
-        )
-        assert_holdout_not_in_train(fold.train_event_ids)
-        train_samples = self._train_samples(group)
-        train_events = tuple(sorted({sample.event_id for sample in train_samples}))
-        assert_holdout_not_in_train(train_events)
-        if any(sample.event_id == group.event_id for sample in train_samples):
-            raise BacktestError(f"same-card sample leaked into train for {group.event_id}")
-        if not train_samples:
-            return CardScore(
-                event_id=group.event_id,
-                estimator_hash="none",
-                train_event_ids=train_events,
-                max_train_timestamp=fold.max_train_timestamp,
-                holdout_in_train=False,
-                predictions=(),
-                unavailable=tuple(
-                    (bout_id, ExclusionReason.INSUFFICIENT_TRAIN) for bout_id in group.bout_ids
-                ),
-            )
-        try:
-            spec = load_ridge_spec()
-            model = fit_ridge(train_samples, spec)
-        except TrainError:
-            return CardScore(
-                event_id=group.event_id,
-                estimator_hash="none",
-                train_event_ids=train_events,
-                max_train_timestamp=fold.max_train_timestamp,
-                holdout_in_train=False,
-                predictions=(),
-                unavailable=tuple(
-                    (bout_id, ExclusionReason.INSUFFICIENT_TRAIN) for bout_id in group.bout_ids
-                ),
-            )
-        calibrator = self._calibrator()
-        estimator_hash = model.predictor.identity_hash()
-        calibrator_hash = (
-            None
-            if calibrator is None
-            else sha256_canonical({"a": calibrator.a, "b": calibrator.b})
-        )
-        self.last_fit_hashes[group.event_id] = estimator_hash
-        predictions: list[BoutPrediction] = []
-        unavailable: list[tuple[str, ExclusionReason]] = []
-        builder = FeatureBuilder(self.snapshot)
-        for bout_id in group.bout_ids:
-            bout = self.snapshot.bout_by_id(bout_id)
-            if bout is None:
-                unavailable.append((bout_id, ExclusionReason.MISSING_FEATURES))
-                continue
-            row = builder.build(
-                bout.fighter_a_id,
-                bout.fighter_b_id,
-                group.cutoff,
-                bout_id=bout_id,
-            )
-            raw_p = predict_ridge_raw(model, row.values)
-            if calibrator is not None:
-                p_a = calibrator.apply_probability(raw_p)
-            else:
-                p_a = predict_ridge_win_prob(model, row.values)
-            p_a = min(max(float(p_a), 1e-15), 1.0 - 1e-15)
-            p_b = 1.0 - p_a
-            rating = sequential_rating_win_prob(row.values)
-            moneyline = self._quote_moneyline(bout_id, group.cutoff.cutoff)
-            no_vig = no_vig_win_prob(moneyline, cutoff=group.cutoff.cutoff)
-            no_vig_p = None if isinstance(no_vig, MissingNoVig) else float(no_vig)
-            prediction = BoutPrediction(
-                bout_id=bout_id,
-                event_id=group.event_id,
-                model_id="M1",
-                p_fighter_a=p_a,
-                p_fighter_b=p_b,
-                p_draw=0.0,
-                p50=p_a,
-                p25=None,
-                joint_atoms=None,
-                markets=moneyline_markets(
-                    p_a=p_a,
-                    p_b=p_b,
-                    p_draw=0.0,
-                    p25=None,
-                    fallback_reason=ExclusionReason.M1_MONEYLINE_FALLBACK.value,
-                ),
-                estimator_hash=estimator_hash,
-                calibrator_hash=calibrator_hash,
-                train_event_ids=train_events,
-                max_train_timestamp=fold.max_train_timestamp,
-                baseline_fifty=coin_flip_win_prob(row.values),
-                baseline_rating=rating,
-                baseline_no_vig=no_vig_p,
-                baseline_m1=raw_p,
-                p25_unavailable_reason="walk_forward_p25_requires_dwcs_305_bootstrap",
-            )
-            predictions.append(prediction)
-            y = self._binary_y(bout)
-            if y is not None:
-                self._prior_oof_y.append(y)
-                self._prior_oof_logit.append(float(stable_logit(raw_p)))
-        return CardScore(
-            event_id=group.event_id,
-            estimator_hash=estimator_hash,
-            train_event_ids=train_events,
-            max_train_timestamp=fold.max_train_timestamp,
-            holdout_in_train=False,
-            predictions=tuple(predictions),
-            unavailable=tuple(unavailable),
-        )
-
-    def _calibrator(self) -> SigmoidCalibrator | None:
-        if len(self._prior_oof_y) < 8:
-            return None
-        if len(set(self._prior_oof_y)) < 2:
-            return None
-        try:
-            slope, intercept = fit_logistic_recalibration(
-                self._prior_oof_logit, self._prior_oof_y
-            )
-        except MetricsError:
-            return None
-        return SigmoidCalibrator(a=slope, b=intercept)
-
-    def _binary_y(self, bout: SnapshotBout) -> int | None:
-        versions = [
-            to_label_version(row)
-            for row in self.snapshot.result_versions
-            if row.bout_id == bout.bout_id
-        ]
-        if not versions:
-            return None
-        # Labels for calibration OOF are the event-night outcome of already
-        # scored *prior* cards. The current card is appended after predict.
-        night = [row for row in versions if row.version_kind is VersionKind.EVENT_NIGHT]
-        if not night:
-            return None
-        label = settlement_label(max(night, key=lambda item: item.revision))
-        if label.binary_winner is WinnerSide.A:
-            return 1
-        if label.binary_winner is WinnerSide.B:
-            return 0
-        return None
-
-    def _quote_moneyline(self, bout_id: str, cutoff: datetime) -> PreCutoffMoneyline | None:
-        return None
-
-    def _train_samples(self, group: EventGroup) -> tuple[LabeledSample, ...]:
-        builder = FeatureBuilder(self.snapshot)
-        samples: list[LabeledSample] = []
-        bouts_by_event: dict[str, list[SnapshotBout]] = {}
-        events = {event.event_id: event for event in self.snapshot.events}
-        for bout in self.snapshot.bouts:
-            bouts_by_event.setdefault(bout.event_id, []).append(bout)
-        for event_id, bouts in bouts_by_event.items():
-            event = events.get(event_id)
-            if event is None or event.scheduled_start_at is None:
-                continue
-            start = event.scheduled_start_at
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=UTC)
-            if start.year == HOLDOUT_YEAR:
-                continue
-            if event_id == group.event_id:
-                continue
-            if start >= group.cutoff.cutoff:
-                continue
-            card = SplitCard(
-                event_id=event_id,
-                scheduled_start_at=start,
-                event_date=event.event_date,
-                series_variant=SeriesVariant.STANDARD,
-                bout_ids=tuple(item.bout_id for item in bouts),
-            )
-            cutoff = cutoff_for_event(card)
-            label_at = implied_event_start(cutoff) + LABEL_LAG
-            for bout in bouts:
-                versions = [
-                    to_label_version(row)
-                    for row in self.snapshot.result_versions
-                    if row.bout_id == bout.bout_id
-                ]
-                label = training_label(versions, label_at)
-                if label.binary_winner is None:
-                    continue
-                row = builder.build(
-                    bout.fighter_a_id,
-                    bout.fighter_b_id,
-                    cutoff,
-                    bout_id=bout.bout_id,
-                )
-                samples.append(
-                    LabeledSample(
-                        sample_id=bout.bout_id,
-                        event_id=event_id,
-                        fighter_a_id=bout.fighter_a_id,
-                        fighter_b_id=bout.fighter_b_id,
-                        cutoff=cutoff.cutoff,
-                        values=row.values,
-                        names=row.names,
-                        binary_winner=label.binary_winner,
-                    )
-                )
-        return tuple(samples)
-
-
-class ProtocolWalkForwardScorer(SnapshotWalkForwardScorer):
-    """Protocol fixture: real FeatureBuilder + M1 fit/calibration callbacks."""
-
-    def __init__(self, contract: EvaluationContract) -> None:
-        cards, snapshot, odds = protocol_training_universe()
-        super().__init__(
-            snapshot=snapshot,
-            eval_event_ids=frozenset(card.event_id for card in cards),
-            contract=contract,
-        )
-        self._odds = odds
-
-    def _quote_moneyline(self, bout_id: str, cutoff: datetime) -> PreCutoffMoneyline | None:
-        quote = self._odds.get(bout_id)
-        if quote is None:
-            return None
-        if quote.observed_at > cutoff:
-            return None
-        return quote
+from mma_model.backtest.walk_forward_scorer import (  # noqa: E402
+    ProtocolWalkForwardScorer,
+    SnapshotWalkForwardScorer,
+)
 
 
 def protocol_quotes_from_universe() -> tuple[QuoteCandidate, ...]:
@@ -1150,6 +1114,8 @@ def protocol_quotes_from_universe() -> tuple[QuoteCandidate, ...]:
                     ),
                     closing_bookmaker_key="protocol_book",
                     closing_quote_id=quote_id + 1000,
+                    fixture_provenance=True,
+                    historical_evidence=False,
                 )
             )
             quote_id += 1
@@ -1283,6 +1249,7 @@ def _grade_bout(
             threshold_rows.append(row)
             continue
         settlement = _settle_market(facts, family, outcome, market.line_point)
+        p_void = market.draw_probability if family is MarketFamily.MONEYLINE else None
         priced = _priced_metrics_for_quote(
             quote=joined.quote,
             p50=market.p50,
@@ -1292,6 +1259,7 @@ def _grade_bout(
             cutoff=group.cutoff.cutoff,
             settlement=settlement,
             event_start=event_start,
+            p_void=p_void,
         )
         is_candidate = _is_pre_policy_candidate(
             family=family,
@@ -1301,7 +1269,12 @@ def _grade_bout(
             contract=contract,
         )
         priced["pre_policy_candidate"] = is_candidate
-        priced["label"] = "pre_policy_candidate" if is_candidate else "priced_observation"
+        priced["p25"] = market.p25
+        if market.p25 is None:
+            priced["candidate_exclusion"] = ExclusionReason.MISSING_P25.value
+            priced["label"] = "priced_observation"
+        else:
+            priced["label"] = "pre_policy_candidate" if is_candidate else "priced_observation"
         priced_rows.append(priced)
         if is_candidate:
             candidates.append(
@@ -1364,10 +1337,17 @@ def _observed_atom(facts: BoutSettlementFacts | None) -> str | None:
 def _attempts_to_rows(
     attempts: Sequence[BoutAttempt],
     facts_by_bout: Mapping[str, BoutSettlementFacts],
-) -> tuple[tuple[AttemptRow, ...], tuple[OutcomeObservation, ...], tuple[PricedBet, ...], int]:
+) -> tuple[
+    tuple[AttemptRow, ...],
+    tuple[OutcomeObservation, ...],
+    tuple[PricedBet, ...],
+    tuple[MarketOutcomeRow, ...],
+    int,
+]:
     attempt_rows: list[AttemptRow] = []
     outcomes: list[OutcomeObservation] = []
     bets: list[PricedBet] = []
+    market_rows: list[MarketOutcomeRow] = []
     for attempt in attempts:
         pred = attempt.prediction
         available = tuple(
@@ -1388,6 +1368,8 @@ def _attempts_to_rows(
                 }
             )
         )
+        priced_families = tuple(str(row["market_family"]) for row in attempt.priced_rows)
+        threshold_families = tuple(str(row["family"]) for row in attempt.threshold_only_rows)
         attempt_rows.append(
             AttemptRow(
                 event_id=attempt.event_id,
@@ -1410,10 +1392,20 @@ def _attempts_to_rows(
                 pre_policy_candidate=bool(attempt.pre_policy_candidates),
                 markets_available=available,
                 markets_unavailable=unavailable,
+                n_priced_selections=len(attempt.priced_rows),
+                n_threshold_selections=len(attempt.threshold_only_rows),
+                priced_market_families=priced_families,
+                threshold_market_families=threshold_families,
             )
         )
         if pred is not None:
             facts = facts_by_bout.get(attempt.bout_id)
+            p_a = pred.p_fighter_a
+            if pred.joint_atoms:
+                try:
+                    p_a = conditional_fighter_a_given_decisive(pred.joint_atoms)
+                except MetricsError:
+                    p_a = pred.p_fighter_a
             outcomes.append(
                 OutcomeObservation(
                     event_id=attempt.event_id,
@@ -1421,7 +1413,7 @@ def _attempts_to_rows(
                     season=attempt.season,
                     series_variant=attempt.series_variant,
                     y=_y_from_facts(facts),
-                    p=pred.p_fighter_a,
+                    p=p_a,
                     joint=pred.joint_atoms,
                     observed_atom=_observed_atom(facts),
                     baseline_fifty=pred.baseline_fifty,
@@ -1430,12 +1422,34 @@ def _attempts_to_rows(
                     baseline_m1=pred.baseline_m1,
                 )
             )
+            for market in pred.markets:
+                if not market.available or not market.outcome_key:
+                    continue
+                family = MarketFamily(market.family)
+                outcome = OutcomeKey(market.outcome_key)
+                settlement = _settle_market(facts, family, outcome, market.line_point)
+                if settlement is None:
+                    settlement = SettlementResult.UNRESOLVED
+                market_rows.append(
+                    MarketOutcomeRow(
+                        event_id=attempt.event_id,
+                        bout_id=attempt.bout_id,
+                        season=attempt.season,
+                        series_variant=attempt.series_variant,
+                        market_family=market.family,
+                        outcome_key=market.outcome_key,
+                        line_point=market.line_point,
+                        p50=market.p50,
+                        settlement=settlement,
+                    )
+                )
         for row in attempt.priced_rows:
             result = row.get("settlement")
             if result is None:
                 settle_enum = SettlementResult.UNRESOLVED
             else:
                 settle_enum = SettlementResult(str(result))
+            p_void_raw = row.get("p_void")
             bets.append(
                 PricedBet(
                     event_id=attempt.event_id,
@@ -1461,10 +1475,31 @@ def _attempts_to_rows(
                         None if row.get("closing_ev") is None else float(row["closing_ev"])
                     ),
                     expected_value=float(row.get("expected_value") or 0.0),
+                    p_void=None if p_void_raw is None else float(p_void_raw),
                 )
             )
-    n_threshold_bouts = sum(1 for row in attempt_rows if row.threshold_only)
-    return tuple(attempt_rows), tuple(outcomes), tuple(bets), n_threshold_bouts
+    n_threshold_selections = sum(row.n_threshold_selections for row in attempt_rows)
+    return (
+        tuple(attempt_rows),
+        tuple(outcomes),
+        tuple(bets),
+        tuple(market_rows),
+        n_threshold_selections,
+    )
+
+
+def _market_rows_for_universe(
+    rows: Sequence[MarketOutcomeRow],
+    universe: UniverseKey,
+) -> tuple[MarketOutcomeRow, ...]:
+    if universe is UniverseKey.ALL_DWCS:
+        return tuple(rows)
+    if universe is UniverseKey.STANDARD_ONLY:
+        return tuple(row for row in rows if row.series_variant == SeriesVariant.STANDARD.value)
+    if universe is UniverseKey.BRAZIL:
+        return tuple(row for row in rows if row.series_variant == SeriesVariant.BRAZIL.value)
+    never_universe: Never = universe
+    raise BacktestError(f"unhandled universe: {never_universe!r}")
 
 
 def run_walk_forward(
@@ -1480,6 +1515,9 @@ def run_walk_forward(
     require_target_cards: bool = True,
     generated_at: datetime | None = None,
     extra_hashes: Mapping[str, str] | None = None,
+    expected_data_hash: str | None = None,
+    run_mode: str = "custom",
+    accounting_only: bool = False,
 ) -> dict[str, Any]:
     """Chronological card walk-forward. 2025 is never used to refit."""
     assert_contract_frozen(contract)
@@ -1500,12 +1538,13 @@ def run_walk_forward(
     )
     config_hash = compute_splits_config_hash(contract)
     feature_hash = current_feature_spec_hash()
+    hash_gate_verified = expected_data_hash is not None
     assert_evaluator_hashes(
         contract_hash=contract.content_hash,
         feature_spec_hash=feature_hash,
         data_hash=data_hash,
         config_hash=config_hash,
-        expected_data_hash=data_hash,
+        expected_data_hash=expected_data_hash,
         expected_config_hash=config_hash,
     )
     plan = outer_folds(
@@ -1519,6 +1558,9 @@ def run_walk_forward(
     attempts: list[BoutAttempt] = []
     holdout_accessed = False
     holdout_accessed_at: str | None = None
+    holdout_ids = tuple(item.event_id for item in groups if item.role is FoldRole.HOLDOUT)
+    event_seasons = {item.event_id: item.season for item in groups}
+    holdout_seasons = tuple(contract.splits.holdout.seasons)
     for group in groups:
         fold = folds_by_event.get(group.event_id)
         if group.role is FoldRole.HOLDOUT and not sealed_holdout:
@@ -1527,7 +1569,7 @@ def run_walk_forward(
             continue
         if group.role is FoldRole.HOLDOUT and sealed_holdout:
             holdout_accessed = True
-            holdout_accessed_at = isoformat_utc(datetime.now(UTC))
+            holdout_accessed_at = isoformat_utc(generated_at)
             if fold is None:
                 fold = FoldMetadata(
                     fold_id=f"outer:holdout:{group.event_id}",
@@ -1563,11 +1605,21 @@ def run_walk_forward(
                 )
         if fold is None:
             raise BacktestError(f"missing fold metadata for {group.event_id}")
-        assert_holdout_not_in_train(fold.train_event_ids)
+        assert_holdout_not_in_train(
+            fold.train_event_ids,
+            event_seasons=event_seasons,
+            holdout_event_ids=holdout_ids,
+            holdout_seasons=holdout_seasons,
+        )
         score = scorer.score_card(group, fold)
         if score.holdout_in_train:
-            raise BacktestError("scorer used 2025 in training")
-        assert_holdout_not_in_train(score.train_event_ids)
+            raise BacktestError("scorer used holdout-season cards in training")
+        assert_holdout_not_in_train(
+            score.train_event_ids,
+            event_seasons=event_seasons,
+            holdout_event_ids=holdout_ids,
+            holdout_seasons=holdout_seasons,
+        )
         hashes = {item.estimator_hash for item in score.predictions}
         if len(hashes) > 1:
             raise BacktestError(
@@ -1588,19 +1640,25 @@ def run_walk_forward(
     n_bouts = sum(len(group.bout_ids) for group in groups)
     if len(attempts) != n_bouts:
         raise BacktestError(f"attempt count {len(attempts)} != bout count {n_bouts}")
-    attempt_rows, outcomes, bets, n_threshold = _attempts_to_rows(attempts, facts)
-    assert_breakdowns_reconcile(attempts=attempt_rows, bets=bets)
+    attempt_rows, outcomes, bets, market_rows, n_threshold = _attempts_to_rows(
+        attempts, facts
+    )
+    assert_breakdowns_reconcile(
+        attempts=attempt_rows, bets=bets, market_rows=market_rows
+    )
     all_metrics = {
         universe.value: {
             "betting": betting_metrics(
                 filter_bets(bets, universe),
                 n_threshold_only=sum(
-                    1
+                    row.n_threshold_selections
                     for row in filter_attempts(attempt_rows, universe)
-                    if row.threshold_only
                 ),
             ).to_dict(),
-            "outcome": outcome_metrics(filter_outcomes(outcomes, universe)),
+            "outcome": outcome_metrics(
+                filter_outcomes(outcomes, universe),
+                market_rows=_market_rows_for_universe(market_rows, universe),
+            ),
             "selection": selection_metrics(filter_attempts(attempt_rows, universe)),
         }
         for universe in UniverseKey
@@ -1637,42 +1695,77 @@ def run_walk_forward(
         "odds": sha256_canonical(
             {
                 "quotes": [
-                    {
-                        "bout_id": item.bout_id,
-                        "observed_at": item.observed_at.isoformat(),
-                        "quote_id": item.quote_id,
-                    }
+                    _quote_content_hash_payload(item)
                     for item in sorted(quotes, key=lambda row: (row.bout_id, row.quote_id))
                 ]
             }
         ),
         "policy": "dwcs-306-pre-policy-candidate-not-recommendation",
         "settlement": sha256_canonical(
-            {"bout_ids": sorted(facts), "n": len(facts)}
+            {
+                "facts": [
+                    _settlement_hash_payload(bout_id, facts[bout_id])
+                    for bout_id in sorted(facts)
+                ]
+            }
         ),
         "spec": spec_hash(),
+        "expected_data": expected_data_hash,
+        "expected_contract": PINNED_CONTRACT_HASH,
+        "expected_feature_spec": PINNED_FEATURE_SPEC_HASH,
+        "expected_config": PINNED_SPLITS_CONFIG_HASH,
+        "odds_inventory": extra_hashes.get("odds_inventory") if extra_hashes else None,
     }
+    if extra_hashes:
+        for key in ("model", "calibration", "odds", "settlement"):
+            expected = extra_hashes.get(key)
+            if expected is None:
+                continue
+            got = hashes.get(key)
+            if got != expected:
+                raise BacktestError(
+                    f"independent {key} hash mismatch: got {got}, expected {expected}"
+                )
     bootstrap = bootstrap_betting_intervals(
         bets,
         seed=bootstrap_seed,
         replicates=bootstrap_replicates,
         n_threshold_only=n_threshold,
+        contract=contract,
     )
     bootstrap["outcome"] = bootstrap_outcome_intervals(
-        outcomes, seed=bootstrap_seed, replicates=bootstrap_replicates
+        outcomes,
+        seed=bootstrap_seed,
+        replicates=bootstrap_replicates,
+        contract=contract,
+        market_rows=market_rows,
     )
+    fixture_quotes = any(item.fixture_provenance for item in quotes)
+    predicted_n = sum(1 for row in attempt_rows if row.predicted)
+    production_qualified = (
+        hash_gate_verified
+        and not accounting_only
+        and not fixture_quotes
+        and predicted_n > 0
+        and bootstrap_replicates >= DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES
+    )
+    performance_evidence = production_qualified
+    accounting_evidence = accounting_only or run_mode == "manifest"
     payload: dict[str, Any] = {
+        "accounting_evidence": accounting_evidence,
         "bootstrap": bootstrap,
         "breakdowns": breakdowns(
             attempts=attempt_rows,
             outcomes=outcomes,
             bets=bets,
             n_threshold_only=n_threshold,
+            market_rows=market_rows,
         ),
         "cutoff_policy": CUTOFF_POLICY,
-        "evidence": True,
+        "evidence": production_qualified,
         "git_commit": commit,
         "git_commit_reason": commit_reason,
+        "hash_gate_verified": hash_gate_verified,
         "hashes": hashes,
         "holdout": {
             "holdout_accessed": holdout_accessed,
@@ -1683,6 +1776,10 @@ def run_walk_forward(
         "metric_definitions": metric_definitions(),
         "metrics": all_metrics,
         "n_attempts": len(attempts),
+        "non_production": not production_qualified,
+        "performance_evidence": performance_evidence,
+        "production_qualified": production_qualified,
+        "run_mode": run_mode,
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "ticket": "DWCS-306",
         "universe": {
@@ -1755,30 +1852,63 @@ def execute_backtest_run(
             with factory() as session:
                 cards = cards_from_session(session)
                 snapshot = snapshot_from_session(session)
+                groups = group_cards(cards, contract)
+                loaded = load_quotes_for_groups(session, groups)
+                converted: list[QuoteCandidate] = []
+                for row in loaded:
+                    closing = select_closing_row(
+                        session, opening=row, event_start=row.event_start
+                    )
+                    converted.append(quote_candidate_from_loaded(row, closing=closing))
             require_target = True
             active_scorer: CardScorer = scorer or SnapshotWalkForwardScorer(
                 snapshot=snapshot,
                 eval_event_ids=frozenset(card.event_id for card in cards),
                 contract=contract,
+                bootstrap_replicates=bootstrap_replicates,
+                bootstrap_seed=bootstrap_seed,
             )
-            active_quotes = quotes or ()
-            active_facts = settlement_facts or {}
+            active_quotes = quotes if quotes is not None else tuple(converted)
+            if settlement_facts is not None:
+                active_facts = dict(settlement_facts)
+            else:
+                active_facts = {}
+                for bout in snapshot.bouts:
+                    got = facts_from_snapshot(snapshot, bout.bout_id)
+                    if got is not None:
+                        active_facts[bout.bout_id] = got
+            run_mode = "database"
+            expected_data_hash = None
+            extra_hashes = {"odds_inventory": quote_inventory_hash(loaded)}
+            accounting_only = False
         elif fixture == "protocol":
             cards = protocol_fixture_cards()
             require_target = False
-            active_scorer = scorer or ProtocolWalkForwardScorer(contract)
+            active_scorer = scorer or ProtocolWalkForwardScorer(
+                contract,
+                bootstrap_replicates=bootstrap_replicates,
+                bootstrap_seed=bootstrap_seed,
+            )
             active_quotes = quotes if quotes is not None else protocol_quotes_from_universe()
             active_facts = (
                 dict(settlement_facts)
                 if settlement_facts is not None
                 else protocol_settlement_facts()
             )
+            run_mode = "protocol"
+            expected_data_hash = None
+            extra_hashes = None
+            accounting_only = False
         else:
             cards = cards_from_manifest()
             require_target = True
             active_scorer = scorer or ManifestExclusionScorer()
             active_quotes = quotes or ()
             active_facts = settlement_facts or {}
+            run_mode = "manifest"
+            expected_data_hash = PINNED_MANIFEST_UNIVERSE_HASH
+            extra_hashes = None
+            accounting_only = True
             _ = from_manifest
         payload = run_walk_forward(
             contract=contract,
@@ -1791,6 +1921,10 @@ def execute_backtest_run(
             bootstrap_replicates=bootstrap_replicates,
             require_target_cards=require_target,
             generated_at=generated_at,
+            extra_hashes=extra_hashes,
+            expected_data_hash=expected_data_hash,
+            run_mode=run_mode,
+            accounting_only=accounting_only,
         )
     except CoverageDatabaseError as exc:
         raise DatabaseMutationError(str(exc)) from exc

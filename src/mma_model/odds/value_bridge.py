@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from mma_model.db.tables.odds import OddsQuote
+from mma_model.features.as_of import ensure_utc
 from mma_model.odds.lifecycle import QuoteEligibilityDecision
 from mma_model.odds.manual_price import ObservedPrice, PriceSourceKind, canonical_selection_identity
 from mma_model.value.errors import IneligiblePriceError
@@ -71,10 +72,12 @@ def eligibility_evidence_from_decision(
         selection_identity=str(decision.selection_identity),
         resolved_bout_id=decision.resolved_bout_id,
         reason=decision.reason.value,
-        evaluated_at=decision.evaluated_at,
+        evaluated_at=ensure_utc(decision.evaluated_at),
         quote_availability_at_decision=decision.quote_availability_at_decision,
         decision_identity=decision.decision_identity,
-        quote_freshness_at=decision.freshness_at,
+        quote_freshness_at=(
+            None if decision.freshness_at is None else ensure_utc(decision.freshness_at)
+        ),
         lifecycle_state_at_decision=decision.lifecycle_state_at_decision,
         decision_version=decision.decision_version,
     )
@@ -121,7 +124,7 @@ def quote_evidence_from_row(
         selection_identity=market_id,
         price_decimal=float(quote.price_decimal),
         availability=str(quote.availability),
-        observed_at=quote.observed_at,
+        observed_at=ensure_utc(quote.observed_at),
         bout_id=bout_id,
         dedupe_key=str(quote.dedupe_key) if quote.dedupe_key is not None else None,
         external_event_id=(

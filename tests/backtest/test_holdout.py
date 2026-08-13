@@ -48,7 +48,7 @@ def test_sealed_holdout_scores_2025_but_never_trains_on_it() -> None:
             continue
         train_ids = pred["train_event_ids"]
         assert "hold-2025" not in train_ids
-        assert all("2025" not in str(item) for item in train_ids)
+        assert all(item != "hold-2025" for item in train_ids)
 
 
 def test_protocol_pipeline_never_trains_on_2025() -> None:
@@ -67,7 +67,7 @@ def test_protocol_pipeline_never_trains_on_2025() -> None:
         if pred is None:
             continue
         assert "hold-2025" not in pred["train_event_ids"]
-        assert all("2025" not in str(item) for item in pred["train_event_ids"])
+        assert all(item != "hold-2025" for item in pred["train_event_ids"])
     hold = [row for row in payload["attempts"] if row["bout_id"] == "2025-a"]
     assert len(hold) == 1
     assert hold[0]["status"] in {"predicted", "unavailable"}

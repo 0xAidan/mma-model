@@ -1,8 +1,9 @@
 """Immutable JSON/Markdown walk-forward evidence (DWCS-306).
 
-Canonical JSON + content hash. ``generated_at`` is omitted from the hashed
-payload (or supplied explicitly for byte-stable files). Writes are atomic
-(temp then replace) and refuse to overwrite a different existing file.
+Canonical JSON + content hash. ``generated_at`` is an explicit run input and is
+hashed with the payload so the same timestamp plus the same inputs are
+byte-identical. Writes are atomic (temp then replace) and refuse to overwrite
+a different existing file.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from mma_model.quality.schema import canonical_json_bytes, sha256_canonical
 EVIDENCE_SCHEMA_VERSION: Final = "dwcs_backtest_evidence_v1"
 JSON_NAME: Final = "backtest.json"
 MARKDOWN_NAME: Final = "backtest.md"
-HASHED_OMIT_KEYS: Final = frozenset({"generated_at"})
+HASHED_OMIT_KEYS: Final = frozenset()
 
 
 def canonical_dumps(payload: Mapping[str, Any]) -> str:
@@ -76,7 +77,10 @@ def markdown_from_payload(payload: Mapping[str, Any]) -> str:
         "",
         f"- schema: `{payload.get('schema_version')}`",
         f"- content_hash: `{payload.get('content_hash')}`",
-        f"- git_commit: `{payload.get('git_commit')}`",
+        f"- generated_at: `{payload.get('generated_at')}`",
+        f"- evidence: `{payload.get('evidence')}`",
+        f"- performance_evidence: `{payload.get('performance_evidence')}`",
+        f"- accounting_evidence: `{payload.get('accounting_evidence')}`",
         f"- sealed_holdout: `{holdout.get('sealed_holdout')}`",
         f"- holdout_accessed: `{holdout.get('holdout_accessed')}`",
         (
@@ -128,7 +132,7 @@ def markdown_from_payload(payload: Mapping[str, Any]) -> str:
             "- Threshold-only rows receive no synthetic EV/ROI/CLV/profit/stake.",
             "- `pre_policy_candidate` uses frozen contract thresholds; not a recommendation.",
             "- 2025 is locked unless `--sealed-holdout` and never enters training.",
-            "- Fight-by-fight walk-forward is not betting evidence.",
+            "- Fight-by-fight walk-forward is fail-closed and is not betting evidence.",
             "",
         ]
     )

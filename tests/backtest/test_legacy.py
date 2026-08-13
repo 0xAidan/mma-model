@@ -13,7 +13,7 @@ def test_legacy_walk_forward_returns_deprecation_record() -> None:
     assert out["unsafe_evaluator_ran"] is False
     assert out["same_card_leakage"] is False
     assert out["method"] == "disabled_unsafe_fight_by_fight"
-    assert "fight-by-fight" in out["note"]
+    assert "fail-closed" in out["note"] or "does not invoke" in out["note"]
 
 
 def test_legacy_cli_is_callable_and_fail_closed(capsys) -> None:

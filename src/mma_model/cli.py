@@ -1677,10 +1677,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"backtest error: {exc}")
                 return EXIT_INTERNAL
             summary = {
+                "accounting_evidence": payload.get("accounting_evidence"),
                 "content_hash": payload.get("content_hash"),
-                "evidence": True,
+                "evidence": payload.get("evidence"),
                 "holdout": payload.get("holdout"),
                 "output": payload.get("output"),
+                "performance_evidence": payload.get("performance_evidence"),
+                "production_qualified": payload.get("production_qualified"),
                 "universe": payload.get("universe"),
             }
             print(json.dumps(summary, indent=2, sort_keys=True))

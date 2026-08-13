@@ -18,20 +18,21 @@ import numpy as np
 from mma_model.backtest.gates import PricedScopeError
 from mma_model.domain.markets import MarketFamily
 from mma_model.dwcs.classification import SeriesVariant
-from mma_model.evaluation.contract import EvaluationContract
+from mma_model.evaluation.contract import REQUIRED_INTERVAL_LEVELS, EvaluationContract
 from mma_model.markets.settlement import SettlementResult
 from mma_model.modeling.metrics import (
+    binary_brier,
     binary_calibration_report,
     binary_nll,
     joint_terminal_nll,
 )
 from mma_model.value.ev import expected_value, flat_unit_profit
-from mma_model.value.kelly import quarter_kelly_fraction
+from mma_model.value.kelly import quarter_kelly_fraction, quarter_kelly_fraction_with_void
 
 DEFAULT_BACKTEST_BOOTSTRAP_SEED: Final = 306001
 DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES: Final = 200
 DEFAULT_MAX_ATTEMPT_MULTIPLIER: Final = 50
-INTERVAL_LEVELS: Final = (0.90, 0.95)
+INTERVAL_LEVELS: Final = REQUIRED_INTERVAL_LEVELS
 FLAT_STAKE_UNITS: Final = 1.0
 INITIAL_KELLY_BANKROLL: Final = 1.0
 
@@ -99,6 +100,7 @@ class PricedBet:
     probability_clv: float | None
     closing_ev: float | None
     expected_value: float
+    p_void: float | None = None
 
     @property
     def block_id(self) -> str:
@@ -139,6 +141,10 @@ class AttemptRow:
     pre_policy_candidate: bool
     markets_available: tuple[str, ...]
     markets_unavailable: tuple[str, ...]
+    n_priced_selections: int
+    n_threshold_selections: int
+    priced_market_families: tuple[str, ...]
+    threshold_market_families: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -178,15 +184,32 @@ class IntervalEstimate:
     upper: float | None
     n_replicates: int
     n_rejected: int
+    n_missing: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "level": self.level,
             "lower": self.lower,
+            "n_missing": self.n_missing,
             "n_rejected": self.n_rejected,
             "n_replicates": self.n_replicates,
             "upper": self.upper,
         }
+
+
+@dataclass(frozen=True)
+class MarketOutcomeRow:
+    """One settled market selection used for per-market log loss / Brier."""
+
+    event_id: str
+    bout_id: str
+    season: int
+    series_variant: str
+    market_family: str
+    outcome_key: str
+    line_point: float | None
+    p50: float
+    settlement: SettlementResult
 
 
 def _ratio(numerator: float, denominator: int) -> float | None:
@@ -417,7 +440,84 @@ def _skill_block(
     }
 
 
-def outcome_metrics(rows: Sequence[OutcomeObservation]) -> dict[str, Any]:
+def per_market_outcome_metrics(rows: Sequence[MarketOutcomeRow]) -> dict[str, Any]:
+    """Log loss / Brier by market on win/loss settlements only (pushes/voids counted out)."""
+    by_family: dict[str, list[MarketOutcomeRow]] = {}
+    for row in rows:
+        by_family.setdefault(row.market_family, []).append(row)
+    payload: dict[str, Any] = {}
+    families = [item.value for item in MarketFamily]
+    for family in families:
+        family_rows = by_family.get(family, [])
+        scored: list[tuple[int, float]] = []
+        n_push = 0
+        n_void = 0
+        n_unresolved = 0
+        for row in family_rows:
+            if row.settlement is SettlementResult.WIN:
+                scored.append((1, float(row.p50)))
+            elif row.settlement is SettlementResult.LOSS:
+                scored.append((0, float(row.p50)))
+            elif row.settlement is SettlementResult.PUSH:
+                n_push += 1
+            elif row.settlement is SettlementResult.VOID:
+                n_void += 1
+            elif row.settlement is SettlementResult.UNRESOLVED:
+                n_unresolved += 1
+            else:
+                never_result: Never = row.settlement
+                raise MetricsError(f"unhandled settlement: {never_result!r}")
+        n_scored = len(scored)
+        if n_scored == 0:
+            log_loss = None
+            brier = None
+            calib = None
+        else:
+            y = [item[0] for item in scored]
+            p = [item[1] for item in scored]
+            scored_ids = {
+                SettlementResult.WIN,
+                SettlementResult.LOSS,
+            }
+            events = [
+                row.event_id for row in family_rows if row.settlement in scored_ids
+            ]
+            log_loss = binary_nll(y, p)
+            brier = binary_brier(y, p)
+            calib = binary_calibration_report(y, p, event_ids=events) if n_scored >= 1 else None
+        payload[family] = {
+            "brier": _counted(
+                f"{family}_brier",
+                brier,
+                numerator=None if brier is None else brier * n_scored,
+                denominator=n_scored,
+                scope=MetricScope.ALL_PREDICTIONS,
+                unit="brier",
+                definition=f"Brier on {family} win/loss settlements; pushes/voids excluded",
+            ).to_dict(),
+            "calibration": None if calib is None else calib.to_dict(),
+            "log_loss": _counted(
+                f"{family}_log_loss",
+                log_loss,
+                numerator=None if log_loss is None else log_loss * n_scored,
+                denominator=n_scored,
+                scope=MetricScope.ALL_PREDICTIONS,
+                unit="nll",
+                definition=f"Log loss on {family} win/loss settlements; pushes/voids excluded",
+            ).to_dict(),
+            "n_push": n_push,
+            "n_scored_win_loss": n_scored,
+            "n_unresolved": n_unresolved,
+            "n_void": n_void,
+        }
+    return payload
+
+
+def outcome_metrics(
+    rows: Sequence[OutcomeObservation],
+    *,
+    market_rows: Sequence[MarketOutcomeRow] = (),
+) -> dict[str, Any]:
     y, p, events = _binary_pairs(rows)
     n_pred = len(rows)
     n_scored = len(y)
@@ -499,10 +599,14 @@ def outcome_metrics(rows: Sequence[OutcomeObservation]) -> dict[str, Any]:
             denominator=n_scored,
             scope=MetricScope.ALL_PREDICTIONS,
             unit="nll",
-            definition="Binary moneyline log loss on decisive predicted bouts",
+            definition=(
+                "Binary moneyline log loss on decisive predicted bouts using "
+                "pA/(pA+pB) when a joint distribution is present"
+            ),
         ).to_dict(),
         "n_predicted": n_pred,
         "n_scored_decisive": n_scored,
+        "per_market": per_market_outcome_metrics(market_rows),
         "skill_vs_baselines": skill,
     }
 
@@ -521,10 +625,16 @@ def _qualifying(bets: Sequence[PricedBet]) -> tuple[PricedBet, ...]:
 
 
 def longest_losing_run(bets: Sequence[PricedBet]) -> int:
-    """Consecutive losses. Push/void/unresolved do not extend the run."""
+    """Consecutive losses on the qualifying path.
+
+    UNRESOLVED rows are omitted (neither extend nor reset). PUSH and VOID
+    reset the run. WIN resets. Only LOSS extends the streak.
+    """
     run = 0
     longest = 0
     for bet in bets:
+        if bet.settlement is SettlementResult.UNRESOLVED:
+            continue
         if bet.settlement is SettlementResult.LOSS:
             run += 1
             if run > longest:
@@ -555,34 +665,58 @@ def flat_equity_path(bets: Sequence[PricedBet]) -> tuple[tuple[float, ...], floa
     return tuple(path), max_dd
 
 
+def _kelly_fraction_for_bet(bet: PricedBet) -> float:
+    if bet.p_void is None or bet.p_void == 0.0:
+        return quarter_kelly_fraction(bet.model_prob, bet.offered_decimal)
+    return quarter_kelly_fraction_with_void(
+        bet.model_prob, bet.offered_decimal, p_void=bet.p_void
+    )
+
+
 def kelly_bankroll_path(bets: Sequence[PricedBet]) -> tuple[tuple[float, ...], float]:
-    """Capped quarter-Kelly bankroll starting at 1. Drawdown is peak-to-trough fraction."""
+    """Capped quarter-Kelly starting at 1.0.
+
+    All bets on one card are staked from that card's starting bankroll, then
+    the aggregate card P&L is applied. Fight 2 does not compound fight 1 on
+    the same card. Drawdown is recorded at event boundaries. UNRESOLVED rows
+    post no stake. PUSH/VOID return the stake (P&L 0) and still turn over.
+    """
     bankroll = INITIAL_KELLY_BANKROLL
     peak = INITIAL_KELLY_BANKROLL
     max_dd = 0.0
     path: list[float] = [bankroll]
+    by_event: dict[str, list[PricedBet]] = {}
+    order: list[str] = []
     for bet in bets:
-        if bet.settlement is SettlementResult.UNRESOLVED:
-            path.append(bankroll)
-            continue
-        fraction = quarter_kelly_fraction(bet.model_prob, bet.offered_decimal)
-        stake = fraction * bankroll
-        if bet.settlement is SettlementResult.WIN:
-            bankroll += stake * (bet.offered_decimal - 1.0)
-        elif bet.settlement is SettlementResult.LOSS:
-            bankroll -= stake
-        elif bet.settlement is SettlementResult.PUSH or bet.settlement is SettlementResult.VOID:
-            pass
-        else:
-            never_result: Never = bet.settlement
-            raise MetricsError(f"unhandled settlement: {never_result!r}")
+        if bet.event_id not in by_event:
+            order.append(bet.event_id)
+            by_event[bet.event_id] = []
+        by_event[bet.event_id].append(bet)
+    for event_id in order:
+        card_start = bankroll
+        card_pnl = 0.0
+        for bet in by_event[event_id]:
+            if bet.settlement is SettlementResult.UNRESOLVED:
+                continue
+            fraction = _kelly_fraction_for_bet(bet)
+            stake = fraction * card_start
+            if bet.settlement is SettlementResult.WIN:
+                card_pnl += stake * (bet.offered_decimal - 1.0)
+            elif bet.settlement is SettlementResult.LOSS:
+                card_pnl -= stake
+            elif bet.settlement is SettlementResult.PUSH or bet.settlement is SettlementResult.VOID:
+                pass
+            else:
+                never_result: Never = bet.settlement
+                raise MetricsError(f"unhandled settlement: {never_result!r}")
+        bankroll = card_start + card_pnl
+        path.append(bankroll)
         if bankroll > peak:
             peak = bankroll
         if peak > 0.0:
             drawdown = (peak - bankroll) / peak
             if drawdown > max_dd:
                 max_dd = drawdown
-        path.append(bankroll)
     return tuple(path), max_dd
 
 
@@ -598,6 +732,12 @@ def betting_metrics(bets: Sequence[PricedBet], *, n_threshold_only: int) -> Bett
             continue
         profits.append(profit)
     n_settled = len(profits)
+    n_unresolved = sum(1 for bet in qualifying if bet.settlement is SettlementResult.UNRESOLVED)
+    n_push_void = sum(
+        1
+        for bet in qualifying
+        if bet.settlement is SettlementResult.PUSH or bet.settlement is SettlementResult.VOID
+    )
     turnover = float(n_settled) * FLAT_STAKE_UNITS
     flat_roi = _ratio(sum(profits), n_settled) if n_settled else None
     _path, flat_dd = flat_equity_path(qualifying)
@@ -616,6 +756,9 @@ def betting_metrics(bets: Sequence[PricedBet], *, n_threshold_only: int) -> Bett
     ]
     n_proxy = sum(1 for bet in qualifying if bet.is_proxy_timestamp)
     losing = longest_losing_run(qualifying)
+    n_priced_sel = len(bets)
+    n_threshold_sel = n_threshold_only
+    selection_den = n_priced_sel + n_threshold_sel
     return BettingTotals(
         qualifying_bets=_counted(
             "qualifying_bets",
@@ -633,7 +776,11 @@ def betting_metrics(bets: Sequence[PricedBet], *, n_threshold_only: int) -> Bett
             denominator=n_settled,
             scope=MetricScope.QUALIFYING_PRICED,
             unit="flat_stake_units",
-            definition="Sum of flat 1-unit stakes on settled qualifying bets",
+            definition=(
+                "Sum of flat 1-unit stakes on settled qualifying bets. PUSH/VOID "
+                f"count in turnover with profit 0 (n_push_void={n_push_void}). "
+                f"UNRESOLVED rows are excluded (n_unresolved={n_unresolved})."
+            ),
         ),
         flat_1_unit_roi=_counted(
             "flat_1_unit_roi",
@@ -642,16 +789,23 @@ def betting_metrics(bets: Sequence[PricedBet], *, n_threshold_only: int) -> Bett
             denominator=n_settled,
             scope=MetricScope.QUALIFYING_PRICED,
             unit="unit_profit_per_unit_stake",
-            definition="Mean flat_unit_profit over settled qualifying bets (push/void=0)",
+            definition=(
+                "Mean flat_unit_profit over settled qualifying bets (push/void=0). "
+                "Unresolved rows are excluded from the denominator."
+            ),
         ),
         quarter_kelly_roi=_counted(
             "quarter_kelly_roi_capped_at_1_percent_bankroll",
-            kelly_roi if n_qual else None,
-            numerator=kelly_roi if n_qual else None,
-            denominator=n_qual,
+            kelly_roi if n_settled else None,
+            numerator=kelly_roi if n_settled else None,
+            denominator=1,
             scope=MetricScope.QUALIFYING_PRICED,
-            unit="bankroll_fraction",
-            definition="Final bankroll minus 1.0 under capped quarter-Kelly starting at 1.0",
+            unit="bankroll_return",
+            definition=(
+                "Card-level capped quarter-Kelly bankroll return (final-1.0) from "
+                "starting bankroll 1.0. Same-card stakes share the card-start "
+                "bankroll. Unresolved rows post no stake and are excluded."
+            ),
         ),
         mean_probability_clv=_counted(
             "clv",
@@ -687,25 +841,31 @@ def betting_metrics(bets: Sequence[PricedBet], *, n_threshold_only: int) -> Bett
             denominator=n_qual,
             scope=MetricScope.QUALIFYING_PRICED,
             unit="consecutive_losses",
-            definition="Longest consecutive LOSS streak; push/void reset the run",
+            definition=(
+                "Longest consecutive LOSS streak. PUSH/VOID reset the run. "
+                "UNRESOLVED rows are omitted (neither extend nor reset)."
+            ),
         ),
         n_priced=_counted(
             "n_priced",
-            len(bets),
-            numerator=len(bets),
-            denominator=len(bets) + n_threshold_only,
+            n_priced_sel,
+            numerator=n_priced_sel,
+            denominator=selection_den,
             scope=MetricScope.PRICED_ONLY,
             unit="count",
-            definition="Valid priced observations (separate from threshold-only)",
+            definition=(
+                "Priced selection rows in a shared selection denominator with "
+                "threshold-only selection rows (bout-level counts stay in selection metrics)"
+            ),
         ),
         n_threshold_only=_counted(
             "n_threshold_only",
-            n_threshold_only,
-            numerator=n_threshold_only,
-            denominator=len(bets) + n_threshold_only,
+            n_threshold_sel,
+            numerator=n_threshold_sel,
+            denominator=selection_den,
             scope=MetricScope.THRESHOLD_ONLY,
             unit="count",
-            definition="Threshold-only rows; no synthetic EV/ROI/CLV/profit/stake",
+            definition="Threshold-only selection rows; no synthetic EV/ROI/CLV/profit/stake",
         ),
         n_proxy_excluded_from_exact_clv=_counted(
             "n_proxy_excluded_from_exact_clv",
@@ -755,14 +915,33 @@ def resample_event_blocks(
     return tuple(out)
 
 
+def _validated_interval_levels(contract: EvaluationContract | None) -> tuple[float, ...]:
+    levels = (
+        INTERVAL_LEVELS if contract is None else contract_interval_levels(contract)
+    )
+    normalized = tuple(float(level) for level in levels)
+    expected = tuple(float(level) for level in REQUIRED_INTERVAL_LEVELS)
+    if normalized != expected:
+        raise MetricsError(
+            f"interval_levels must be {expected}, got {normalized}"
+        )
+    return normalized
+
+
 def bootstrap_betting_intervals(
     bets: Sequence[PricedBet],
     *,
     seed: int = DEFAULT_BACKTEST_BOOTSTRAP_SEED,
     replicates: int = DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
     n_threshold_only: int = 0,
+    contract: EvaluationContract | None = None,
 ) -> dict[str, Any]:
-    """Event-block bootstrap of priced betting metrics at 90% and 95%."""
+    """Event-block bootstrap of priced betting metrics at contract interval levels.
+
+    Missing CLV / closing EV is not coerced to 0. Each metric keeps its own
+    n_replicates / n_missing. Empty-bet ROI replicates are rejected and counted.
+    """
+    levels = _validated_interval_levels(contract)
     blocks = event_blocks(bets)
     event_ids = tuple(sorted(blocks))
     n_events = len(event_ids)
@@ -770,50 +949,57 @@ def bootstrap_betting_intervals(
     max_attempts = max(int(replicates) * DEFAULT_MAX_ATTEMPT_MULTIPLIER, int(replicates))
     roi_samples: list[float] = []
     clv_samples: list[float] = []
+    close_ev_samples: list[float] = []
     dd_samples: list[float] = []
     lose_samples: list[float] = []
-    rejected = 0
+    rejected_empty = 0
+    n_clv_missing = 0
+    n_close_ev_missing = 0
     attempts = 0
-    while len(roi_samples) < int(replicates) and attempts < max_attempts:
+    while attempts < max_attempts and len(roi_samples) < int(replicates):
         attempts += 1
         drawn = resample_event_blocks(blocks, rng=rng)
         if not drawn:
-            rejected += 1
+            rejected_empty += 1
             continue
         totals = betting_metrics(drawn, n_threshold_only=n_threshold_only)
         if totals.flat_1_unit_roi.value is None:
-            rejected += 1
+            rejected_empty += 1
             continue
         roi_samples.append(float(totals.flat_1_unit_roi.value))
-        clv_samples.append(
-            float(totals.mean_probability_clv.value)
-            if totals.mean_probability_clv.value is not None
-            else 0.0
-        )
+        if totals.mean_probability_clv.value is None:
+            n_clv_missing += 1
+        else:
+            clv_samples.append(float(totals.mean_probability_clv.value))
+        if totals.mean_closing_ev.value is None:
+            n_close_ev_missing += 1
+        else:
+            close_ev_samples.append(float(totals.mean_closing_ev.value))
         dd_samples.append(
             float(totals.maximum_drawdown.value)
             if totals.maximum_drawdown.value is not None
             else 0.0
         )
         lose_samples.append(float(totals.longest_losing_run.value or 0))
-    n_kept = len(roi_samples)
     intervals: dict[str, dict[str, Any]] = {}
-    for metric_name, samples in (
-        ("flat_1_unit_roi", roi_samples),
-        ("clv", clv_samples),
-        ("maximum_drawdown", dd_samples),
-        ("longest_losing_run", lose_samples),
+    for metric_name, samples, n_missing, n_rejected in (
+        ("flat_1_unit_roi", roi_samples, 0, rejected_empty),
+        ("clv", clv_samples, n_clv_missing, 0),
+        ("closing_ev", close_ev_samples, n_close_ev_missing, 0),
+        ("maximum_drawdown", dd_samples, 0, rejected_empty),
+        ("longest_losing_run", lose_samples, 0, rejected_empty),
     ):
         metric_intervals = []
-        for level in INTERVAL_LEVELS:
+        for level in levels:
             lower, upper = _percentile_interval(samples, level)
             metric_intervals.append(
                 IntervalEstimate(
                     level=level,
                     lower=lower,
                     upper=upper,
-                    n_replicates=n_kept,
-                    n_rejected=rejected,
+                    n_replicates=len(samples),
+                    n_rejected=n_rejected,
+                    n_missing=n_missing,
                 ).to_dict()
             )
         intervals[metric_name] = metric_intervals
@@ -822,10 +1008,15 @@ def bootstrap_betting_intervals(
         "event_count": n_events,
         "event_ids": list(event_ids),
         "intervals": intervals,
-        "n_rejected": rejected,
-        "n_replicates": n_kept,
+        "n_rejected_empty_bets": rejected_empty,
+        "n_rejected": rejected_empty,
+        "n_replicates": len(roi_samples),
         "requested_replicates": int(replicates),
         "seed": int(seed),
+        "clv_n_replicates": len(clv_samples),
+        "clv_n_missing": n_clv_missing,
+        "closing_ev_n_replicates": len(close_ev_samples),
+        "closing_ev_n_missing": n_close_ev_missing,
     }
 
 
@@ -834,15 +1025,24 @@ def bootstrap_outcome_intervals(
     *,
     seed: int = DEFAULT_BACKTEST_BOOTSTRAP_SEED,
     replicates: int = DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
+    contract: EvaluationContract | None = None,
+    market_rows: Sequence[MarketOutcomeRow] = (),
 ) -> dict[str, Any]:
+    levels = _validated_interval_levels(contract)
     grouped: dict[str, list[OutcomeObservation]] = {}
     for row in rows:
         grouped.setdefault(row.event_id, []).append(row)
-    event_ids = tuple(sorted(grouped))
+    market_grouped: dict[str, list[MarketOutcomeRow]] = {}
+    for row in market_rows:
+        market_grouped.setdefault(row.event_id, []).append(row)
+    event_ids = tuple(sorted(set(grouped) | set(market_grouped)))
     rng = np.random.default_rng(int(seed))
     max_attempts = max(int(replicates) * DEFAULT_MAX_ATTEMPT_MULTIPLIER, int(replicates))
     ll_samples: list[float] = []
+    brier_samples: list[float] = []
+    joint_samples: list[float] = []
     rejected = 0
+    n_joint_missing = 0
     attempts = 0
     while len(ll_samples) < int(replicates) and attempts < max_attempts:
         attempts += 1
@@ -851,35 +1051,107 @@ def bootstrap_outcome_intervals(
             break
         drawn_ids = rng.choice(np.asarray(event_ids), size=len(event_ids), replace=True)
         drawn: list[OutcomeObservation] = []
+        drawn_markets: list[MarketOutcomeRow] = []
         for event_id in drawn_ids:
-            drawn.extend(grouped[str(event_id)])
+            drawn.extend(grouped.get(str(event_id), ()))
+            drawn_markets.extend(market_grouped.get(str(event_id), ()))
         y, p, _events = _binary_pairs(drawn)
         if not y:
             rejected += 1
             continue
         ll_samples.append(binary_nll(y, p))
+        brier_samples.append(binary_brier(y, p))
+        joint_rows = [
+            row for row in drawn if row.joint is not None and row.observed_atom is not None
+        ]
+        if joint_rows:
+            joint_samples.append(
+                joint_terminal_nll(
+                    [dict(row.joint or {}) for row in joint_rows],
+                    [str(row.observed_atom) for row in joint_rows],
+                )
+            )
+        else:
+            n_joint_missing += 1
     n_kept = len(ll_samples)
-    intervals = []
-    for level in INTERVAL_LEVELS:
-        lower, upper = _percentile_interval(ll_samples, level)
-        intervals.append(
-            IntervalEstimate(
-                level=level,
-                lower=lower,
-                upper=upper,
-                n_replicates=n_kept,
-                n_rejected=rejected,
-            ).to_dict()
-        )
+    interval_map: dict[str, list[dict[str, Any]]] = {}
+    for name, samples, n_missing in (
+        ("market_log_loss", ll_samples, 0),
+        ("brier", brier_samples, 0),
+        ("joint_log_loss", joint_samples, n_joint_missing),
+    ):
+        metric_intervals = []
+        for level in levels:
+            lower, upper = _percentile_interval(samples, level)
+            metric_intervals.append(
+                IntervalEstimate(
+                    level=level,
+                    lower=lower,
+                    upper=upper,
+                    n_replicates=len(samples),
+                    n_rejected=rejected,
+                    n_missing=n_missing,
+                ).to_dict()
+            )
+        interval_map[name] = metric_intervals
+    per_market: dict[str, Any] = {}
+    for family in (item.value for item in MarketFamily):
+        fam_samples: list[float] = []
+        fam_missing = 0
+        fam_attempts = 0
+        rng_m = np.random.default_rng(int(seed) + 17)
+        while len(fam_samples) < int(replicates) and fam_attempts < max_attempts:
+            fam_attempts += 1
+            if not event_ids:
+                break
+            drawn_ids = rng_m.choice(np.asarray(event_ids), size=len(event_ids), replace=True)
+            drawn_m: list[MarketOutcomeRow] = []
+            for event_id in drawn_ids:
+                drawn_m.extend(market_grouped.get(str(event_id), ()))
+            scored = [
+                row
+                for row in drawn_m
+                if row.market_family == family
+                and row.settlement in {SettlementResult.WIN, SettlementResult.LOSS}
+            ]
+            if not scored:
+                fam_missing += 1
+                continue
+            y_m = [1 if row.settlement is SettlementResult.WIN else 0 for row in scored]
+            p_m = [float(row.p50) for row in scored]
+            fam_samples.append(binary_nll(y_m, p_m))
+        fam_intervals = []
+        for level in levels:
+            lower, upper = _percentile_interval(fam_samples, level)
+            fam_intervals.append(
+                IntervalEstimate(
+                    level=level,
+                    lower=lower,
+                    upper=upper,
+                    n_replicates=len(fam_samples),
+                    n_rejected=0,
+                    n_missing=fam_missing,
+                ).to_dict()
+            )
+        per_market[family] = {"log_loss": fam_intervals}
     return {
         "bootstrap_unit": "event_block",
         "event_count": len(event_ids),
-        "intervals": {"market_log_loss": intervals},
+        "intervals": interval_map,
         "n_rejected": rejected,
         "n_replicates": n_kept,
+        "per_market": per_market,
         "requested_replicates": int(replicates),
         "seed": int(seed),
     }
+
+
+def _selection_threshold_count(rows: Sequence[AttemptRow]) -> int:
+    return sum(row.n_threshold_selections for row in rows)
+
+
+def _selection_priced_count(rows: Sequence[AttemptRow]) -> int:
+    return sum(row.n_priced_selections for row in rows)
 
 
 def breakdowns(
@@ -888,17 +1160,23 @@ def breakdowns(
     outcomes: Sequence[OutcomeObservation],
     bets: Sequence[PricedBet],
     n_threshold_only: int,
+    market_rows: Sequence[MarketOutcomeRow] = (),
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"universes": {}, "years": {}, "markets": {}, "sources": {}}
     for universe in UniverseKey:
         u_attempts = filter_attempts(attempts, universe)
         u_outcomes = filter_outcomes(outcomes, universe)
         u_bets = filter_bets(bets, universe)
-        u_threshold = sum(1 for row in u_attempts if row.threshold_only)
+        u_threshold = _selection_threshold_count(u_attempts)
+        u_markets = tuple(
+            row for row in market_rows if _in_universe(row.series_variant, universe)
+        )
         payload["universes"][universe.value] = {
             "betting": betting_metrics(u_bets, n_threshold_only=u_threshold).to_dict(),
             "n_attempts": len(u_attempts),
-            "outcome": outcome_metrics(u_outcomes),
+            "n_priced_selections": _selection_priced_count(u_attempts),
+            "n_threshold_selections": u_threshold,
+            "outcome": outcome_metrics(u_outcomes, market_rows=u_markets),
             "selection": selection_metrics(u_attempts),
         }
     years = sorted({row.season for row in attempts})
@@ -906,19 +1184,31 @@ def breakdowns(
         y_attempts = tuple(row for row in attempts if row.season == year)
         y_outcomes = tuple(row for row in outcomes if row.season == year)
         y_bets = tuple(bet for bet in bets if bet.season == year)
-        y_threshold = sum(1 for row in y_attempts if row.threshold_only)
+        y_threshold = _selection_threshold_count(y_attempts)
+        y_markets = tuple(row for row in market_rows if row.season == year)
         payload["years"][str(year)] = {
             "betting": betting_metrics(y_bets, n_threshold_only=y_threshold).to_dict(),
             "n_attempts": len(y_attempts),
-            "outcome": outcome_metrics(y_outcomes),
+            "n_priced_selections": _selection_priced_count(y_attempts),
+            "n_threshold_selections": y_threshold,
+            "outcome": outcome_metrics(y_outcomes, market_rows=y_markets),
             "selection": selection_metrics(y_attempts),
         }
-    markets = sorted({bet.market_family for bet in bets} | set(MarketFamily))
-    for market in markets:
+    families = sorted({item.value for item in MarketFamily} | {bet.market_family for bet in bets})
+    for market in families:
         m_bets = tuple(bet for bet in bets if bet.market_family == market)
-        payload["markets"][market] = betting_metrics(
-            m_bets, n_threshold_only=0
-        ).to_dict()
+        m_threshold = sum(
+            1
+            for row in attempts
+            for family in row.threshold_market_families
+            if family == market
+        )
+        m_outcomes = tuple(row for row in market_rows if row.market_family == market)
+        payload["markets"][market] = {
+            "betting": betting_metrics(m_bets, n_threshold_only=m_threshold).to_dict(),
+            "n_threshold_selections": m_threshold,
+            "outcome": per_market_outcome_metrics(m_outcomes).get(market, {}),
+        }
     sources = sorted(
         {
             f"{bet.source_kind}:{bet.provider or ''}:{bet.bookmaker_key or ''}"
@@ -932,10 +1222,16 @@ def breakdowns(
             if f"{bet.source_kind}:{bet.provider or ''}:{bet.bookmaker_key or ''}"
             == source
         )
-        payload["sources"][source] = betting_metrics(
-            s_bets, n_threshold_only=0
-        ).to_dict()
+        payload["sources"][source] = {
+            "betting": betting_metrics(s_bets, n_threshold_only=0).to_dict(),
+            "n_priced_selections": len(s_bets),
+        }
+    payload["sources"]["threshold_only"] = {
+        "n_threshold_selections": n_threshold_only,
+        "betting": betting_metrics((), n_threshold_only=n_threshold_only).to_dict(),
+    }
     payload["n_threshold_only_top"] = n_threshold_only
+    payload["n_priced_selections_top"] = len(bets)
     return payload
 
 
@@ -943,8 +1239,9 @@ def assert_breakdowns_reconcile(
     *,
     attempts: Sequence[AttemptRow],
     bets: Sequence[PricedBet],
+    market_rows: Sequence[MarketOutcomeRow] = (),
 ) -> None:
-    """Year / Brazil / standard slices must sum to the matching top-level counts."""
+    """Year / Brazil / standard / market / source slices must reconcile."""
     n_all = len(attempts)
     n_std = sum(1 for row in attempts if row.series_variant == SeriesVariant.STANDARD.value)
     n_br = sum(1 for row in attempts if row.series_variant == SeriesVariant.BRAZIL.value)
@@ -961,12 +1258,44 @@ def assert_breakdowns_reconcile(
     if year_sum != n_all:
         raise MetricsError(f"year slices {year_sum} != attempted {n_all}")
     n_bets = len(bets)
+    n_std_bets = sum(1 for bet in bets if bet.series_variant == SeriesVariant.STANDARD.value)
+    n_br_bets = sum(1 for bet in bets if bet.series_variant == SeriesVariant.BRAZIL.value)
+    if n_std_bets + n_br_bets != n_bets:
+        raise MetricsError(
+            f"standard bets ({n_std_bets}) + brazil bets ({n_br_bets}) != {n_bets}"
+        )
     market_sum = sum(
         len(tuple(bet for bet in bets if bet.market_family == market))
         for market in {item.market_family for item in bets}
     )
     if market_sum != n_bets:
         raise MetricsError(f"market slices {market_sum} != priced bets {n_bets}")
+    n_threshold = _selection_threshold_count(attempts)
+    threshold_market_sum = sum(
+        sum(1 for family in row.threshold_market_families if family == market)
+        for market in {item.value for item in MarketFamily}
+        for row in attempts
+    )
+    if threshold_market_sum != n_threshold:
+        raise MetricsError(
+            f"threshold market slices {threshold_market_sum} != {n_threshold}"
+        )
+    n_priced_sel = _selection_priced_count(attempts)
+    if n_priced_sel != n_bets:
+        raise MetricsError(
+            f"priced selection rows {n_priced_sel} != priced bets {n_bets}"
+        )
+    n_outcome = len(market_rows)
+    outcome_family_sum = sum(
+        1
+        for family in {item.value for item in MarketFamily}
+        for row in market_rows
+        if row.market_family == family
+    )
+    if outcome_family_sum != n_outcome:
+        raise MetricsError(
+            f"outcome market slices {outcome_family_sum} != {n_outcome}"
+        )
 
 
 def expected_value_for_row(model_prob: float, offered_decimal: float) -> float:

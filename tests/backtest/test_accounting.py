@@ -52,6 +52,9 @@ def test_manifest_run_accounts_89_cards_440_bouts(tmp_path: Path) -> None:
     assert payload["holdout"]["sealed_holdout"] is False
     assert payload["holdout"]["holdout_accessed"] is False
     assert payload["holdout"]["train_includes_2025"] is False
+    assert payload["accounting_evidence"] is True
+    assert payload["performance_evidence"] is False
+    assert payload["evidence"] is False
     assert contract.universe.all_dwcs.bouts == 440
 
 

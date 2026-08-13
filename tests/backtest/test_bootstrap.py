@@ -72,3 +72,38 @@ def test_bootstrap_is_reproducible_with_pinned_seed() -> None:
     assert "n_rejected" in first
     third = bootstrap_betting_intervals(bets, seed=306002, replicates=40)
     assert third["intervals"] != first["intervals"]
+    levels = [item["level"] for item in first["intervals"]["flat_1_unit_roi"]]
+    assert levels == [0.9, 0.95]
+
+
+def test_bootstrap_omits_missing_clv_instead_of_coercing_zero() -> None:
+    with_clv = _bet("card-a", "a1", "a")
+    missing = PricedBet(
+        event_id="card-b",
+        bout_id="b1",
+        season=2017,
+        series_variant="standard",
+        market_family="moneyline",
+        outcome_key="fighter_a",
+        source_kind="provider_quote",
+        provider="the_odds_api",
+        bookmaker_key="ref_book",
+        model_prob=0.6,
+        offered_decimal=2.1,
+        settlement=SettlementResult.WIN,
+        is_proxy_timestamp=False,
+        is_pre_policy_candidate=True,
+        probability_clv=None,
+        closing_ev=None,
+        expected_value=expected_value(0.6, 2.1),
+    )
+    payload = bootstrap_betting_intervals(
+        (with_clv, missing),
+        seed=306001,
+        replicates=30,
+    )
+    assert payload["clv_n_missing"] > 0
+    assert payload["clv_n_replicates"] <= payload["n_replicates"]
+    clv_intervals = payload["intervals"]["clv"]
+    assert clv_intervals[0]["n_missing"] == payload["clv_n_missing"]
+    assert all(band["n_replicates"] == payload["clv_n_replicates"] for band in clv_intervals)

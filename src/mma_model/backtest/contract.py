@@ -108,7 +108,7 @@ def verify_evaluator_hashes(
     feature_spec_hash: str,
     data_hash: str,
     config_hash: str,
-    expected_data_hash: str,
+    expected_data_hash: str | None,
     expected_config_hash: str,
     expected_contract_hash: str = PINNED_CONTRACT_HASH,
     expected_feature_spec_hash: str = PINNED_FEATURE_SPEC_HASH,
@@ -135,6 +135,8 @@ def verify_evaluator_hashes(
         raise EvaluatorHashMismatchError(
             HashKind.CONFIG, got=expected_config_hash, expected=PINNED_SPLITS_CONFIG_HASH
         )
+    if expected_data_hash is None:
+        return
     if data_hash != expected_data_hash:
         raise EvaluatorHashMismatchError(
             HashKind.DATA, got=data_hash, expected=expected_data_hash
