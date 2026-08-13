@@ -11,7 +11,7 @@
 # Outside [T−72h, T) is a deterministic no-op.
 
 contract_id: dwcs_odds_schedule
-contract_version: "1.1.0"
+contract_version: "1.1.1"
 schema_version: 1
 ticket: DWCS-205
 
@@ -71,11 +71,14 @@ quota:
   # Paid requests fail closed when remaining provenance is unknown unless an
   # explicit bounded operator override (<= monthly_limit) is supplied.
   missing_remaining_policy: defer_fail_closed
-  # Freshness: observations older than max age or outside the UTC calendar
-  # month of as_of are treated as unknown (fail closed → bootstrap/defer).
-  remaining_max_age_sec: 604800
+  # Freshness: remaining is account-wide. Concurrent use of the same API key
+  # elsewhere can invalidate local spend plans. Observations older than max age
+  # (must be <= bootstrap min_interval) or outside the UTC calendar month of
+  # as_of are unknown (fail closed → bootstrap/defer).
+  remaining_max_age_sec: 300
   billing_cycle: calendar_month_utc
   # Zero-cost bootstrap via provider events endpoint when remaining unknown.
+  # min_interval_sec bounds bootstrap spam; remaining_max_age_sec <= this.
   bootstrap:
     enabled: true
     endpoint: events

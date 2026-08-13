@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -17,6 +18,9 @@ from mma_model.jobs.locking import (
     hold_overlap_lock,
 )
 from mma_model.odds.job_ledger import (
+    BATCH_EVENT_ID,
+    batch_idempotency_key,
+    find_successful_batch_run,
     find_successful_run,
     record_job_run,
     slot_succeeded,
@@ -75,6 +79,15 @@ def _parse_event_start(value: Any) -> datetime:
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     return ensure_utc(datetime.fromisoformat(text), field="event_start")
+
+
+def _json_id_tuple(raw: str | None) -> tuple[int, ...]:
+    if not raw:
+        return ()
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(int(x) for x in parsed)
 
 
 def _actual_cost_fields(quota: Mapping[str, Any]) -> tuple[int | None, str]:
@@ -239,10 +252,47 @@ def run_snapshot_odds_job(
             assert item.batch_key is not None
             batches_map[item.batch_key].append(item)
 
-        due_batches: list[tuple[str, list[DueWorkItem]]] = []
+        planned_batches = 0
         for batch_key in sorted(batches_map):
             members = batches_map[batch_key]
             purpose = members[0].purpose or RequestPurpose.LIVE_ORDINARY
+
+            batch_prior = find_successful_batch_run(session, batch_key=batch_key)
+            if batch_prior is not None:
+                counts["due"] += len(members)
+                for member in members:
+                    assert member.idempotency_key is not None
+                    if find_successful_run(
+                        session, idempotency_key=member.idempotency_key
+                    ):
+                        counts["duplicates"] += 1
+                        continue
+                    record_job_run(
+                        session,
+                        idempotency_key=member.idempotency_key,
+                        job_name="snapshot-odds",
+                        status="success",
+                        provider=PROVIDER_THE_ODDS_API,
+                        region=region_v,
+                        markets=markets_v,
+                        event_id=member.event_id,
+                        mode=f"live:{member.window_name}",
+                        as_of=stamp,
+                        finished_at=completion,
+                        estimated_cost=0,
+                        window_name=member.window_name,
+                        remaining_source=batch_prior.remaining_source,
+                        snapshot_quote_ids=_json_id_tuple(
+                            batch_prior.snapshot_quote_ids
+                        ),
+                        snapshot_availability_ids=_json_id_tuple(
+                            batch_prior.snapshot_availability_ids
+                        ),
+                        detail=f"batch_reuse={batch_key}",
+                    )
+                continue
+
+            # Re-evaluate immediately before each batch against newest remaining.
             budget = ledger.evaluate(
                 estimated_cost=batch_cost_est,
                 purpose=purpose,
@@ -292,30 +342,15 @@ def run_snapshot_odds_job(
                         detail=budget.reason,
                     )
                 continue
+
             counts["due"] += len(members)
+            if not execute:
+                ledger.reserve(batch_cost_est)
+                planned_batches += 1
+                continue
+
             ledger.reserve(batch_cost_est)
-            due_batches.append((batch_key, members))
-
-        if not execute:
-            return SnapshotOddsJobResult(
-                as_of=stamp.isoformat().replace("+00:00", "Z"),
-                action="snapshot-odds",
-                processed=counts["processed"],
-                due=counts["due"],
-                no_op=counts["no_op"],
-                deferred=counts["deferred"],
-                exhausted=counts["exhausted"],
-                duplicates=counts["duplicates"],
-                failures=counts["failures"],
-                batches=len(due_batches),
-                upcoming_event_count=len(events),
-                remaining_source=ledger.remaining_source,
-                items=tuple(item_rows),
-            )
-
-        for batch_key, members in due_batches:
             counts["batches"] += 1
-            representative = members[0]
             nested = session.begin_nested()
             try:
                 result = run_odds_snapshot(
@@ -330,10 +365,34 @@ def run_snapshot_odds_job(
                     observed_at=stamp,
                 )
                 actual, source = _actual_cost_fields(result.quota)
+                quote_ids = tuple(result.quote_ids)
+                avail_ids = tuple(result.availability_observation_ids)
                 remaining_hdr = result.quota.get("x-requests-remaining")
                 if remaining_hdr is not None:
                     ledger.apply_provider_remaining(
                         int(remaining_hdr), source="provider_header_after_request"
+                    )
+                if find_successful_batch_run(session, batch_key=batch_key) is None:
+                    record_job_run(
+                        session,
+                        idempotency_key=batch_idempotency_key(batch_key),
+                        job_name="snapshot-odds",
+                        status="success",
+                        provider=PROVIDER_THE_ODDS_API,
+                        region=region_v,
+                        markets=markets_v,
+                        event_id=BATCH_EVENT_ID,
+                        mode=f"live:{members[0].window_name}",
+                        as_of=stamp,
+                        finished_at=completion,
+                        estimated_cost=batch_cost_est,
+                        actual_cost=actual,
+                        actual_cost_source=source if actual is not None else "missing",
+                        remaining_source=ledger.remaining_source,
+                        snapshot_quote_ids=quote_ids,
+                        snapshot_availability_ids=avail_ids,
+                        window_name=members[0].window_name,
+                        detail=f"batch={batch_key};members={len(members)}",
                     )
                 for member in members:
                     assert member.idempotency_key is not None
@@ -359,7 +418,6 @@ def run_snapshot_odds_job(
                             detail=f"prior_success;batch={batch_key}",
                         )
                         continue
-                    is_primary = member is representative
                     record_job_run(
                         session,
                         idempotency_key=member.idempotency_key,
@@ -372,11 +430,12 @@ def run_snapshot_odds_job(
                         mode=f"live:{member.window_name}",
                         as_of=stamp,
                         finished_at=completion,
-                        estimated_cost=batch_cost_est if is_primary else 0,
-                        actual_cost=actual if is_primary else None,
-                        actual_cost_source=source if is_primary else None,
+                        estimated_cost=0,
+                        actual_cost=None,
+                        actual_cost_source=None,
                         remaining_source=ledger.remaining_source,
-                        snapshot_quote_ids=tuple(result.quote_ids),
+                        snapshot_quote_ids=quote_ids,
+                        snapshot_availability_ids=avail_ids,
                         window_name=member.window_name,
                         detail=(
                             f"batch={batch_key};inserted={result.inserted};"
@@ -386,6 +445,7 @@ def run_snapshot_odds_job(
                 nested.commit()
             except Exception as exc:  # noqa: BLE001 — job boundary
                 nested.rollback()
+                ledger.release(batch_cost_est)
                 counts["failures"] += len(members)
                 for member in members:
                     assert member.idempotency_key is not None
@@ -407,6 +467,23 @@ def run_snapshot_odds_job(
                         error_class=type(exc).__name__,
                         detail=str(exc)[:500],
                     )
+
+        if not execute:
+            return SnapshotOddsJobResult(
+                as_of=stamp.isoformat().replace("+00:00", "Z"),
+                action="snapshot-odds",
+                processed=counts["processed"],
+                due=counts["due"],
+                no_op=counts["no_op"],
+                deferred=counts["deferred"],
+                exhausted=counts["exhausted"],
+                duplicates=counts["duplicates"],
+                failures=counts["failures"],
+                batches=planned_batches,
+                upcoming_event_count=len(events),
+                remaining_source=ledger.remaining_source,
+                items=tuple(item_rows),
+            )
 
     return SnapshotOddsJobResult(
         as_of=stamp.isoformat().replace("+00:00", "Z"),

@@ -287,14 +287,26 @@ class RunningQuotaLedger:
         return decision
 
     def reserve(self, estimated_cost: int) -> None:
+        """Reserve cost for the batch about to execute (or dry-run plan)."""
         if estimated_cost < 0:
             raise ValueError("estimated_cost must be nonnegative")
         self.reserved += int(estimated_cost)
 
+    def release(self, estimated_cost: int) -> None:
+        """Release an unexecuted reservation (failed/aborted batch)."""
+        if estimated_cost < 0:
+            raise ValueError("estimated_cost must be nonnegative")
+        self.reserved = max(0, int(self.reserved) - int(estimated_cost))
+
     def apply_provider_remaining(
         self, remaining: int | None, *, source: str
     ) -> None:
-        """Replace ledger with newest provider remaining after a paid request."""
+        """Replace absolute remaining after a paid response.
+
+        Clears only the just-executed reservation accounting. Pending batches
+        must be re-evaluated immediately before execution against this newest
+        remaining — never pre-authorized against a stale balance.
+        """
         self.remaining = remaining
         self.remaining_source = source
         self.reserved = 0

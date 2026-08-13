@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from mma_model.odds.normalize import ensure_utc
 from mma_model.odds.provider_decision import (
@@ -26,7 +26,9 @@ from mma_model.sources.http_politeness import load_http_politeness
 from mma_model.sources.policy import SourceId, load_source_policy
 
 _ALLOWED_HOSTS = frozenset({"bestfightodds.com", "www.bestfightodds.com"})
-_ALLOWED_PATH_PREFIXES = ("/",)
+# Segment-boundary prefixes only (/events must not match /eventsX).
+_ALLOWED_PATH_PREFIXES = ("/archive", "/events", "/odds", "/mma")
+_UNSAFE_QUERY_KEYS = frozenset({"redirect", "url", "next", "return", "callback"})
 
 
 class BestFightOddsPolicyError(RuntimeError):
@@ -48,9 +50,19 @@ class BestFightOddsReconcileResult:
         return asdict(self)
 
 
+def _path_matches_allowed_prefix(path: str) -> bool:
+    for prefix in _ALLOWED_PATH_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
 def validate_bestfightodds_archive_url(url: str) -> str:
     """Fail closed unless HTTPS, exact allowed host, no credentials, allowed path."""
-    parsed = urlparse(str(url).strip())
+    raw = str(url).strip()
+    if "#" in raw:
+        raise BestFightOddsPolicyError("archive URL must not include fragments")
+    parsed = urlparse(raw)
     if parsed.scheme != "https":
         raise BestFightOddsPolicyError("archive URL must use https")
     host = (parsed.hostname or "").lower()
@@ -60,10 +72,38 @@ def validate_bestfightodds_archive_url(url: str) -> str:
         raise BestFightOddsPolicyError("archive URL must not include credentials")
     if parsed.port not in {None, 443}:
         raise BestFightOddsPolicyError("archive URL must use default https port")
+    if parsed.fragment:
+        raise BestFightOddsPolicyError("archive URL must not include fragments")
+
     path = parsed.path or "/"
-    if not any(path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+    decoded = unquote(path)
+    if decoded != path:
+        path = decoded
+    lowered = path.lower()
+    if (
+        ".." in path
+        or "/." in path
+        or path.startswith("./")
+        or "//" in path
+        or "%" in path
+        or "\\" in path
+    ):
+        raise BestFightOddsPolicyError(
+            f"archive path rejects traversal/ambiguous normalization: {path!r}"
+        )
+    if not _path_matches_allowed_prefix(lowered):
         raise BestFightOddsPolicyError(f"archive path not allowed: {path!r}")
-    # Rebuild normalized URL without credentials/fragments for fetch.
+
+    if parsed.query:
+        for part in parsed.query.split("&"):
+            if not part:
+                continue
+            key = unquote(part.split("=", 1)[0]).lower()
+            if key in _UNSAFE_QUERY_KEYS:
+                raise BestFightOddsPolicyError(
+                    f"archive URL query parameter not allowed: {key!r}"
+                )
+
     query = f"?{parsed.query}" if parsed.query else ""
     return f"https://{host}{path}{query}"
 

@@ -356,8 +356,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_odds_backfill.add_argument(
         "--quota-bootstrap",
-        action="store_true",
-        help="Allow zero-cost events bootstrap when remaining provenance is missing/stale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow zero-cost events bootstrap when remaining provenance is missing/stale "
+        "(use --no-quota-bootstrap to fail closed without network bootstrap)",
     )
 
     p_odds_due = odds_sub.add_parser(
@@ -392,9 +394,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_odds_due.add_argument(
         "--quota-bootstrap",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Allow zero-cost events bootstrap (default on for due)",
+        help="Allow zero-cost events bootstrap (default on; --no-quota-bootstrap fails closed)",
     )
 
     p_jobs = sub.add_parser("jobs", help="Host-scheduled job entrypoints (DWCS-205)")
@@ -421,9 +423,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_jobs_snap.add_argument(
         "--quota-bootstrap",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Allow zero-cost events bootstrap when remaining is missing/stale",
+        help="Allow zero-cost events bootstrap when remaining is missing/stale "
+        "(use --no-quota-bootstrap to fail closed)",
     )
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")

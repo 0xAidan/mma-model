@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import select
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 from mma_model.db.tables.odds_jobs import OddsSnapshotJobRun
 from mma_model.odds.normalize import ensure_utc
 
+BATCH_EVENT_ID = "__batch__"
+
 
 class JobLedgerDuplicate(RuntimeError):
     """Logical snapshot already succeeded for this idempotency key."""
@@ -18,6 +21,18 @@ class JobLedgerDuplicate(RuntimeError):
 
 class JobLedgerTimeError(ValueError):
     """Invalid explicit job timing / cutoff ordering."""
+
+
+class JobLedgerIntegrityError(ValueError):
+    """Status-specific / ID-list integrity failure before DB write."""
+
+
+def batch_idempotency_key(batch_key: str) -> str:
+    """Durable logical identity for a sport-wide paid batch slot."""
+    value = str(batch_key).strip()
+    if not value:
+        raise ValueError("batch_key must be non-empty")
+    return f"odds_batch:{value}"
 
 
 def find_successful_run(
@@ -29,6 +44,30 @@ def find_successful_run(
             OddsSnapshotJobRun.success_token == 1,
         )
     )
+
+
+def find_successful_batch_run(
+    session: Session, *, batch_key: str
+) -> OddsSnapshotJobRun | None:
+    return find_successful_run(
+        session, idempotency_key=batch_idempotency_key(batch_key)
+    )
+
+
+def _validate_id_list(values: Sequence[int] | None, *, field: str) -> list[int] | None:
+    if values is None:
+        return None
+    out: list[int] = []
+    seen: set[int] = set()
+    for raw in values:
+        value = int(raw)
+        if value <= 0:
+            raise JobLedgerIntegrityError(f"{field} must contain positive ids")
+        if value in seen:
+            raise JobLedgerIntegrityError(f"{field} must contain unique ids")
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 def record_job_run(
@@ -49,6 +88,7 @@ def record_job_run(
     actual_cost_source: str | None = None,
     remaining_source: str | None = None,
     snapshot_quote_ids: list[int] | tuple[int, ...] | None = None,
+    snapshot_availability_ids: list[int] | tuple[int, ...] | None = None,
     requested_cutoff: datetime | None = None,
     snapshot_at: datetime | None = None,
     window_name: str | None = None,
@@ -70,6 +110,8 @@ def record_job_run(
     snap = None if snapshot_at is None else ensure_utc(snapshot_at, field="snapshot_at")
     if snap is not None and cutoff is not None and snap > cutoff:
         raise JobLedgerTimeError("snapshot_at must be <= requested_cutoff")
+    if cutoff is not None and cutoff > stamp:
+        raise JobLedgerTimeError("requested_cutoff must be <= as_of")
 
     if status == "success":
         existing = find_successful_run(session, idempotency_key=idempotency_key)
@@ -81,6 +123,13 @@ def record_job_run(
     else:
         success_token = None
 
+    if status == "failed" and not (error_class and str(error_class).strip()):
+        raise JobLedgerIntegrityError("failed status requires error_class")
+    if status in {"deferred_quota", "exhausted"} and actual_cost is not None:
+        raise JobLedgerIntegrityError(
+            f"{status} must not record actual_cost (unexecuted)"
+        )
+
     if actual_cost is not None and actual_cost < 0:
         raise ValueError("actual_cost must be nonnegative when present")
 
@@ -90,9 +139,14 @@ def record_job_run(
     if actual_cost is None and source not in {None, "missing"}:
         raise ValueError("missing actual_cost requires source None or 'missing'")
 
-    quote_ids_json = None
-    if snapshot_quote_ids is not None:
-        quote_ids_json = json.dumps([int(x) for x in snapshot_quote_ids])
+    quote_ids = _validate_id_list(snapshot_quote_ids, field="snapshot_quote_ids")
+    availability_ids = _validate_id_list(
+        snapshot_availability_ids, field="snapshot_availability_ids"
+    )
+    quote_ids_json = None if quote_ids is None else json.dumps(quote_ids)
+    availability_ids_json = (
+        None if availability_ids is None else json.dumps(availability_ids)
+    )
 
     row = OddsSnapshotJobRun(
         idempotency_key=idempotency_key,
@@ -113,6 +167,7 @@ def record_job_run(
         actual_cost_source=source,
         remaining_source=remaining_source,
         snapshot_quote_ids=quote_ids_json,
+        snapshot_availability_ids=availability_ids_json,
         error_class=error_class,
         detail=detail,
         started_at=started,
@@ -132,8 +187,12 @@ def slot_succeeded(
 
 
 __all__ = [
+    "BATCH_EVENT_ID",
     "JobLedgerDuplicate",
+    "JobLedgerIntegrityError",
     "JobLedgerTimeError",
+    "batch_idempotency_key",
+    "find_successful_batch_run",
     "find_successful_run",
     "record_job_run",
     "slot_succeeded",

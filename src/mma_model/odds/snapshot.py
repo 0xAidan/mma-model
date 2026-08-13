@@ -70,6 +70,7 @@ class SnapshotResult:
     used_fixtures: bool
     claims_bet365: bool = False
     quote_ids: tuple[int, ...] = ()
+    availability_observation_ids: tuple[int, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -327,6 +328,9 @@ def run_odds_snapshot(
         used_fixtures=used_fixtures,
         claims_bet365=False,
         quote_ids=tuple(quote_result.quote_ids),
+        availability_observation_ids=tuple(
+            unknown_result.availability_observation_ids
+        ),
     )
 
 

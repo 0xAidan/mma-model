@@ -6,7 +6,7 @@ import json
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,13 @@ from mma_model.odds.coverage_report import (
     PlannedWorkItem,
     build_odds_coverage_report,
     cells_from_snapshot_quotes,
+    encode_availability_ids_for_ledger,
     encode_quote_ids_for_ledger,
 )
 from mma_model.odds.job_ledger import (
+    BATCH_EVENT_ID,
+    batch_idempotency_key,
+    find_successful_batch_run,
     find_successful_run,
     record_job_run,
     slot_succeeded,
@@ -85,6 +89,15 @@ def _parse_event_start(value: Any) -> datetime:
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     return ensure_utc(datetime.fromisoformat(text), field="event_start")
+
+
+def _coerce_utc(value: datetime | None, *, field: str) -> datetime | None:
+    """Normalize SQLite-naive timestamps from the ledger into aware UTC."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return ensure_utc(value, field=field)
 
 
 def _actual_cost_fields(quota: Mapping[str, Any]) -> tuple[int | None, str]:
@@ -241,6 +254,11 @@ def run_odds_backfill(
                         if prior is None
                         else json_loads_ids(prior.snapshot_quote_ids)
                     )
+                    prior_avail = (
+                        []
+                        if prior is None
+                        else json_loads_ids(prior.snapshot_availability_ids)
+                    )
                     cells.extend(
                         cells_from_snapshot_quotes(
                             session,
@@ -249,9 +267,73 @@ def run_odds_backfill(
                             market=market_token,
                             provider=PROVIDER_THE_ODDS_API,
                             region=region_v,
-                            as_of=stamp,
+                            match_reconciliation_as_of=stamp,
                             quote_ids=prior_ids,
-                            snapshot_at=prior.snapshot_at if prior else None,
+                            quote_snapshot_at=_coerce_utc(
+                                prior.snapshot_at if prior else None,
+                                field="snapshot_at",
+                            ),
+                            requested_cutoff=_coerce_utc(
+                                prior.requested_cutoff if prior else cutoff,
+                                field="requested_cutoff",
+                            ),
+                            availability_observation_ids=prior_avail,
+                            include_unassigned=True,
+                        )
+                    )
+                    continue
+
+                # Late member of an already-paid batch: reuse without re-spend.
+                batch_prior = find_successful_batch_run(session, batch_key=batch_key)
+                if batch_prior is not None:
+                    duplicates += 1
+                    prior_ids = json_loads_ids(batch_prior.snapshot_quote_ids)
+                    prior_avail = json_loads_ids(batch_prior.snapshot_availability_ids)
+                    batch_snap = _coerce_utc(
+                        batch_prior.snapshot_at, field="snapshot_at"
+                    )
+                    if not slot_succeeded(session, idempotency_key=key):
+                        record_job_run(
+                            session,
+                            idempotency_key=key,
+                            job_name="odds-backfill",
+                            status="success",
+                            provider=PROVIDER_THE_ODDS_API,
+                            region=region_v,
+                            markets=markets_v,
+                            event_id=event_id,
+                            mode=mode,
+                            as_of=stamp,
+                            finished_at=completion,
+                            requested_cutoff=cutoff,
+                            snapshot_at=batch_snap,
+                            estimated_cost=0,
+                            actual_cost=None,
+                            actual_cost_source=None,
+                            remaining_source=batch_prior.remaining_source,
+                            snapshot_quote_ids=prior_ids,
+                            snapshot_availability_ids=prior_avail,
+                            detail=(
+                                f"batch_reuse={batch_key};"
+                                f"{encode_quote_ids_for_ledger(prior_ids)};"
+                                f"{encode_availability_ids_for_ledger(prior_avail)}"
+                            ),
+                        )
+                        succeeded += 1
+                    cells.extend(
+                        cells_from_snapshot_quotes(
+                            session,
+                            card_id=card_id,
+                            time_label=checkpoint.name,
+                            market=market_token,
+                            provider=PROVIDER_THE_ODDS_API,
+                            region=region_v,
+                            match_reconciliation_as_of=stamp,
+                            quote_ids=prior_ids,
+                            quote_snapshot_at=batch_snap,
+                            requested_cutoff=cutoff,
+                            availability_observation_ids=prior_avail,
+                            include_unassigned=True,
                         )
                     )
                     continue
@@ -272,6 +354,7 @@ def run_odds_backfill(
             members = pending[batch_key]
             cutoff = members[0]["cutoff"]
             mode = members[0]["mode"]
+            # Re-evaluate immediately before each batch against newest remaining.
             budget = ledger.evaluate(
                 estimated_cost=batch_cost_est,
                 purpose=RequestPurpose.BACKFILL,
@@ -388,11 +471,15 @@ def run_odds_backfill(
                 )
                 actual, source = _actual_cost_fields(result.quota)
                 quote_ids = tuple(result.quote_ids)
+                avail_ids = tuple(result.availability_observation_ids)
                 remaining_hdr = result.quota.get("x-requests-remaining")
                 if remaining_hdr is not None:
                     ledger.apply_provider_remaining(
                         int(remaining_hdr), source="provider_header_after_request"
                     )
+                else:
+                    # Keep this batch's reservation as spent when header missing.
+                    pass
                 batch_costs.append(
                     BatchCostRecord(
                         batch_key=batch_key,
@@ -404,11 +491,37 @@ def run_odds_backfill(
                         detail=f"members={len(members)}",
                     )
                 )
+                if find_successful_batch_run(session, batch_key=batch_key) is None:
+                    record_job_run(
+                        session,
+                        idempotency_key=batch_idempotency_key(batch_key),
+                        job_name="odds-backfill",
+                        status="success",
+                        provider=PROVIDER_THE_ODDS_API,
+                        region=region_v,
+                        markets=markets_v,
+                        event_id=BATCH_EVENT_ID,
+                        mode=mode,
+                        as_of=stamp,
+                        finished_at=completion,
+                        requested_cutoff=cutoff,
+                        snapshot_at=snap,
+                        estimated_cost=batch_cost_est,
+                        actual_cost=actual,
+                        actual_cost_source=source if actual is not None else "missing",
+                        remaining_source=budget.remaining_source,
+                        snapshot_quote_ids=quote_ids,
+                        snapshot_availability_ids=avail_ids,
+                        detail=(
+                            f"batch={batch_key};members={len(members)};"
+                            f"{encode_quote_ids_for_ledger(quote_ids)};"
+                            f"{encode_availability_ids_for_ledger(avail_ids)}"
+                        ),
+                    )
                 for index, member in enumerate(members):
                     if find_successful_run(session, idempotency_key=member["key"]):
                         duplicates += 1
                         continue
-                    is_primary = index == 0
                     record_job_run(
                         session,
                         idempotency_key=member["key"],
@@ -423,15 +536,17 @@ def run_odds_backfill(
                         finished_at=completion,
                         requested_cutoff=cutoff,
                         snapshot_at=snap,
-                        estimated_cost=batch_cost_est if is_primary else 0,
-                        actual_cost=actual if is_primary else None,
-                        actual_cost_source=source if is_primary else None,
+                        estimated_cost=0,
+                        actual_cost=None,
+                        actual_cost_source=None,
                         remaining_source=budget.remaining_source,
                         snapshot_quote_ids=quote_ids,
+                        snapshot_availability_ids=avail_ids,
                         detail=(
                             f"batch={batch_key};inserted={result.inserted};"
                             f"deduped={result.deduped};"
-                            f"{encode_quote_ids_for_ledger(quote_ids)}"
+                            f"{encode_quote_ids_for_ledger(quote_ids)};"
+                            f"{encode_availability_ids_for_ledger(avail_ids)}"
                         ),
                     )
                     succeeded += 1
@@ -443,14 +558,18 @@ def run_odds_backfill(
                             market=market_token,
                             provider=PROVIDER_THE_ODDS_API,
                             region=region_v,
-                            as_of=stamp,
+                            match_reconciliation_as_of=stamp,
                             quote_ids=quote_ids,
-                            snapshot_at=snap,
+                            quote_snapshot_at=snap,
+                            requested_cutoff=cutoff,
+                            availability_observation_ids=avail_ids,
+                            include_unassigned=(index == 0),
                         )
                     )
                 nested.commit()
             except SnapshotCutoffError as exc:
                 nested.rollback()
+                ledger.release(batch_cost_est)
                 failed += len(members)
                 for member in members:
                     record_job_run(
@@ -484,6 +603,7 @@ def run_odds_backfill(
                     )
             except Exception as exc:  # noqa: BLE001
                 nested.rollback()
+                ledger.release(batch_cost_est)
                 failed += len(members)
                 for member in members:
                     record_job_run(
@@ -523,6 +643,8 @@ def run_odds_backfill(
         batch_costs=batch_costs,
         planned=planned,
         contract=sched,
+        match_reconciliation_as_of=stamp,
+        match_clock_kind="retrospective_reconciliation",
     )
     return BackfillResult(
         series=series,

@@ -21,10 +21,10 @@ import yaml
 
 from mma_model.odds.normalize import ensure_utc
 
-EXPECTED_SCHEDULE_CONTRACT_VERSION = "1.1.0"
+EXPECTED_SCHEDULE_CONTRACT_VERSION = "1.1.1"
 SCHEDULE_CONTRACT_ID = "dwcs_odds_schedule"
 PINNED_SCHEDULE_CONTRACT_HASH: Final[str] = (
-    "1c12251bddaf2004bb0658b5763185a1930d0717b2aa6ed77639ba635a212a01"
+    "46a83ee81c1568200c5b3646962f394ef7dd20037dcd52927de8838b486038af"
 )
 
 # Exact plan cadence offsets/intervals (seconds).
@@ -372,6 +372,11 @@ def load_schedule_contract(
         if bootstrap_min_interval < 0:
             raise ScheduleContractError(
                 "quota.bootstrap.min_interval_sec must be nonnegative"
+            )
+        if remaining_max_age > bootstrap_min_interval:
+            raise ScheduleContractError(
+                "quota.remaining_max_age_sec must be <= bootstrap.min_interval_sec "
+                "(fail closed on stale account-wide remaining)"
             )
 
     idem = payload.get("idempotency") or {}

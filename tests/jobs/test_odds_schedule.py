@@ -137,7 +137,7 @@ def test_schedule_contract_pinned_and_deep(schedule):
         schedule.quota.cost_fixed["events"] = 9  # type: ignore[index]
     with pytest.raises(ScheduleContractError):
         load_schedule_contract(
-            raw_bytes=schedule.raw_bytes.replace(b"1.1.0", b"9.9.9", 1)
+            raw_bytes=schedule.raw_bytes.replace(b"1.1.1", b"9.9.9", 1)
         )
 
 
@@ -1360,17 +1360,19 @@ def test_coverage_scopes_quotes_to_card_and_alias_pit(session):
         line_point=None,
         price_decimal=1.8,
         availability="available",
-        observed_at=as_of + timedelta(days=3),
-        source_updated_at=as_of + timedelta(days=3),
+        observed_at=as_of,
+        source_updated_at=as_of,
         commence_time=as_of,
-        snapshot_at=as_of + timedelta(days=3),
+        snapshot_at=as_of,
         raw_ref="r2",
     )
     session.add(q1)
     session.add(q2)
     session.flush()
 
-    # Card A at historical as_of sees only q1 via superseded-but-then-effective alias v1
+    # Card A at historical reconciliation clock sees q1 via alias v1.
+    # Collection clock stays at checkpoint snapshot; match clock is separate.
+    # q2 is in-scope but maps to a different card → __unassigned__ unmatched.
     cells_a = cells_from_snapshot_quotes(
         session,
         card_id="card-a",
@@ -1378,16 +1380,22 @@ def test_coverage_scopes_quotes_to_card_and_alias_pit(session):
         market="h2h",
         provider="the_odds_api",
         region="us",
-        as_of=as_of,
+        match_reconciliation_as_of=as_of,
         quote_ids=[q1.id, q2.id],
-        snapshot_at=as_of,
+        quote_snapshot_at=as_of,
+        requested_cutoff=as_of,
+        include_unassigned=True,
     )
-    assert len(cells_a) == 1
-    assert cells_a[0].status == "observed"
-    assert cells_a[0].matched is True
-    assert q2.id not in cells_a[0].quote_ids
+    assert any(c.status == "observed" and c.card_id == "card-a" for c in cells_a)
+    observed = next(c for c in cells_a if c.card_id == "card-a" and c.status == "observed")
+    assert observed.matched is True
+    assert observed.match_clock_kind == "retrospective_reconciliation"
+    assert observed.pit_match_as_of is None
+    assert q2.id not in observed.quote_ids
+    assert any(c.card_id == "__unassigned__" for c in cells_a)
 
-    # Later as_of after replacement: alias v1 superseded, v2 maps to card-b
+    # Later reconciliation after replacement: alias maps away from card-a.
+    # Must not falsely mark card-a absent; unmatched goes to __unassigned__.
     later = as_of + timedelta(days=2)
     cells_a_later = cells_from_snapshot_quotes(
         session,
@@ -1396,8 +1404,493 @@ def test_coverage_scopes_quotes_to_card_and_alias_pit(session):
         market="h2h",
         provider="the_odds_api",
         region="us",
-        as_of=later,
+        match_reconciliation_as_of=later,
         quote_ids=[q1.id],
+        quote_snapshot_at=as_of,
+        requested_cutoff=as_of,
+        include_unassigned=True,
+    )
+    assert not any(c.card_id == "card-a" and c.status == "absent" for c in cells_a_later)
+    assert any(
+        c.card_id == "__unassigned__" and c.status == "unmatched" for c in cells_a_later
+    )
+    # Claiming PIT-at-checkpoint uses checkpoint clock, not later alias replacement.
+    cells_pit = cells_from_snapshot_quotes(
+        session,
+        card_id="card-a",
+        time_label="t_minus_24h",
+        market="h2h",
+        provider="the_odds_api",
+        region="us",
+        match_reconciliation_as_of=later,
+        pit_match_as_of=as_of,
+        quote_ids=[q1.id],
+        quote_snapshot_at=as_of,
+        requested_cutoff=as_of,
+    )
+    assert cells_pit[0].status == "observed"
+    assert cells_pit[0].match_clock_kind == "pit_at_checkpoint"
+
+
+def test_normalize_regions_rejects_ci_dupes_and_lowercases():
+    assert normalize_regions("US,eu") == "eu,us"
+    with pytest.raises(ValueError):
+        normalize_regions("US,us")
+    with pytest.raises(ValueError):
+        normalize_markets("H2H,h2h")
+
+
+def test_remaining_max_age_bounded_by_bootstrap_interval(schedule):
+    assert schedule.quota.remaining_max_age_sec == 300
+    assert schedule.quota.remaining_max_age_sec <= schedule.quota.bootstrap_min_interval_sec
+
+
+def test_stale_five_minute_remaining_fail_closed(session, schedule):
+    from mma_model.odds.quota_budget import latest_remaining_from_observations
+
+    as_of = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+    store = OddsQuoteStore(session)
+    store.record_quota(
+        provider="the_odds_api",
+        endpoint="events",
+        observed_at=as_of - timedelta(minutes=5, seconds=1),
+        quota=QuotaHeaders(
+            requests_remaining=9000,
+            requests_used=1,
+            requests_last=0,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+        ),
+        empty_response=False,
+    )
+    session.flush()
+    remaining, source = latest_remaining_from_observations(
+        session, provider="the_odds_api", as_of=as_of, contract=schedule
+    )
+    assert remaining is None
+    assert source == "stale_max_age"
+
+
+def test_provider_remaining_drop_reevaluates_pending_batches(schedule):
+    from mma_model.odds.quota_budget import RunningQuotaLedger
+
+    ledger = RunningQuotaLedger(remaining=230, remaining_source="test")
+    first = ledger.evaluate(
+        estimated_cost=10, purpose=RequestPurpose.BACKFILL, contract=schedule
+    )
+    assert first.state == QuotaBudgetState.ALLOWED
+    ledger.reserve(10)
+    # Provider reports lower remaining than local estimate (external consumption).
+    ledger.apply_provider_remaining(205, source="provider_header_after_request")
+    second = ledger.evaluate(
+        estimated_cost=10, purpose=RequestPurpose.BACKFILL, contract=schedule
+    )
+    # spendable = 205 - 200 reserve = 5 < 10 → deferred
+    assert second.state == QuotaBudgetState.DEFERRED
+
+
+def test_external_consumption_exhausts_after_refresh(schedule):
+    from mma_model.odds.quota_budget import RunningQuotaLedger
+
+    ledger = RunningQuotaLedger(remaining=220, remaining_source="test")
+    d1 = ledger.evaluate(
+        estimated_cost=10, purpose=RequestPurpose.BACKFILL, contract=schedule
+    )
+    assert d1.state == QuotaBudgetState.ALLOWED
+    ledger.reserve(10)
+    ledger.apply_provider_remaining(0, source="provider_header_after_request")
+    d2 = ledger.evaluate(
+        estimated_cost=10, purpose=RequestPurpose.BACKFILL, contract=schedule
+    )
+    assert d2.state == QuotaBudgetState.EXHAUSTED
+
+
+def test_batch_ledger_reuse_for_late_member(session, schedule, tmp_path: Path):
+    from mma_model.odds.job_ledger import (
+        BATCH_EVENT_ID,
+        batch_idempotency_key,
+        find_successful_batch_run,
+    )
+
+    as_of = datetime(2024, 6, 2, 0, 0, tzinfo=UTC)
+    event_start = datetime(2024, 6, 1, 20, 0, tzinfo=UTC)
+    seeded = 0
+    for checkpoint in schedule.sparse_backfill_checkpoints:
+        cutoff = sparse_checkpoint_cutoff(
+            event_start=event_start, checkpoint=checkpoint
+        )
+        if cutoff > as_of or cutoff < schedule.historical_available_from:
+            continue
+        mode = f"historical:{checkpoint.name}"
+        batch = compute_batch_key(
+            provider="the_odds_api",
+            region="us",
+            markets="h2h",
+            mode=mode,
+            slot_or_cutoff=cutoff,
+            key_version=schedule.idempotency_key_version,
+        )
+        record_job_run(
+            session,
+            idempotency_key=batch_idempotency_key(batch),
+            job_name="odds-backfill",
+            status="success",
+            provider="the_odds_api",
+            region="us",
+            markets="h2h",
+            event_id=BATCH_EVENT_ID,
+            mode=mode,
+            as_of=as_of,
+            finished_at=as_of,
+            requested_cutoff=cutoff,
+            snapshot_at=cutoff - timedelta(minutes=5),
+            estimated_cost=10,
+            actual_cost=10,
+            actual_cost_source="provider",
+            snapshot_quote_ids=[11, 12],
+            snapshot_availability_ids=[21],
+            detail="seeded_batch",
+        )
+        seeded += 1
+    session.flush()
+    assert seeded >= 1
+    assert find_successful_batch_run(
+        session,
+        batch_key=compute_batch_key(
+            provider="the_odds_api",
+            region="us",
+            markets="h2h",
+            mode="historical:t_minus_24h",
+            slot_or_cutoff=sparse_checkpoint_cutoff(
+                event_start=event_start,
+                checkpoint=schedule.sparse_backfill_checkpoints[0],
+            ),
+            key_version=schedule.idempotency_key_version,
+        ),
+    ) is not None
+
+    events = [
+        {
+            "event_id": "late-member-1",
+            "card_id": "card-late",
+            "event_start": event_start,
+        }
+    ]
+    with patch(
+        "mma_model.odds.backfill.run_odds_snapshot",
+        side_effect=AssertionError("must not re-pay successful batch"),
+    ):
+        result = run_odds_backfill(
+            session,
+            series="dwcs",
+            from_year=2020,
+            events=events,
+            as_of=as_of,
+            finished_at=as_of,
+            contract=schedule,
+            offline_fixtures=True,
+            fixture_dir=FIXTURE_DIR,
+            evaluation_contract_path=EVAL_CONTRACT,
+            execute=True,
+            lock_path=tmp_path / "batch-reuse.lock",
+            remaining_override=10_000,
+        )
+    assert result.batches == 0
+    assert result.succeeded >= 1
+
+
+def test_legacy_v1_dedupe_returns_quote_id_for_coverage(session):
+    from mma_model.domain.markets import MarketFamily, OutcomeKey
+    from mma_model.db.tables.odds import OddsEventRow, OddsQuote
+    from mma_model.odds.normalize import quote_dedupe_key, quote_dedupe_key_v1
+    from mma_model.odds.types import NormalizedQuote, QuoteAvailability
+
+    as_of = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    session.add(
+        OddsEventRow(
+            id="oe-legacy",
+            provider="the_odds_api",
+            external_event_id="ext-legacy",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=as_of,
+            home_team="A",
+            away_team="B",
+        )
+    )
+    legacy_key = quote_dedupe_key_v1(
+        provider="the_odds_api",
+        event_id="ext-legacy",
+        bookmaker_key="draftkings",
+        region="us",
+        market_family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        line_point=None,
+        price_decimal=1.91,
+        source_updated_at=as_of,
+        commence_time=as_of,
         snapshot_at=as_of,
     )
-    assert cells_a_later[0].status == "absent"
+    legacy = OddsQuote(
+        dedupe_key=legacy_key,
+        dedupe_version=1,
+        provider="the_odds_api",
+        bookmaker_key="draftkings",
+        bookmaker_title="DraftKings",
+        region="us",
+        event_id="oe-legacy",
+        external_event_id="ext-legacy",
+        market_family="moneyline",
+        provider_market_key="h2h",
+        outcome_key="fighter_a",
+        outcome_label="A",
+        line_point=None,
+        price_decimal=1.91,
+        availability="available",
+        observed_at=as_of,
+        source_updated_at=as_of,
+        commence_time=as_of,
+        snapshot_at=as_of,
+        raw_ref="same-raw",
+    )
+    session.add(legacy)
+    session.flush()
+    quote = NormalizedQuote(
+        provider="the_odds_api",
+        bookmaker_key="draftkings",
+        bookmaker_title="DraftKings",
+        region="us",
+        event_id="ext-legacy",
+        home_team="A",
+        away_team="B",
+        market_family=MarketFamily.MONEYLINE,
+        provider_market_key="h2h",
+        outcome_key=OutcomeKey.FIGHTER_A,
+        outcome_label="A",
+        line_point=None,
+        price_decimal=1.91,
+        availability=QuoteAvailability.AVAILABLE,
+        observed_at=as_of,
+        source_updated_at=as_of,
+        commence_time=as_of,
+        snapshot_at=as_of,
+        raw_ref="same-raw",
+        dedupe_key=quote_dedupe_key(
+            provider="the_odds_api",
+            event_id="ext-legacy",
+            bookmaker_key="draftkings",
+            region="us",
+            market_family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            line_point=None,
+            price_decimal=1.91,
+            source_updated_at=as_of,
+            commence_time=as_of,
+            snapshot_at=as_of,
+            raw_ref="same-raw",
+            home_team="A",
+            away_team="B",
+        ),
+    )
+    store = OddsQuoteStore(session)
+    result = store.append_quotes([quote])
+    assert result.deduped == 1
+    assert result.quote_ids == (int(legacy.id),)
+
+
+def test_mixed_book_availability_absent_cells(session):
+    from mma_model.db.tables.core import CanonicalBout, CanonicalFighter
+    from mma_model.db.tables.odds import (
+        OddsAvailabilityObservation,
+        OddsProviderEventAlias,
+        OddsQuote,
+    )
+    from mma_model.odds.coverage_report import cells_from_snapshot_quotes
+    from mma_model.odds.types import OddsEvent
+
+    as_of = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    session.add(CanonicalFighter(id="f1", display_name="A"))
+    session.add(CanonicalFighter(id="f2", display_name="B"))
+    session.add(CanonicalEvent(id="card-m", name="M", series="dwcs", status="completed"))
+    session.flush()
+    session.add(
+        CanonicalBout(
+            id="bout-m",
+            event_id="card-m",
+            fighter_a_id="f1",
+            fighter_b_id="f2",
+            status="completed",
+        )
+    )
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id="ext-m",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=as_of,
+            home_team="A",
+            away_team="B",
+        ),
+        provider="the_odds_api",
+    )
+    session.add(
+        OddsProviderEventAlias(
+            id="alias-m",
+            provider="the_odds_api",
+            external_event_id="ext-m",
+            bout_id="bout-m",
+            alias_version=1,
+            status="active",
+            match_rule="provider_id",
+            created_at=as_of - timedelta(days=1),
+            superseded_at=None,
+        )
+    )
+    q = OddsQuote(
+        dedupe_key="dq-m",
+        dedupe_version=2,
+        provider="the_odds_api",
+        bookmaker_key="draftkings",
+        bookmaker_title="DraftKings",
+        region="us",
+        event_id=event_row.id,
+        external_event_id="ext-m",
+        market_family="moneyline",
+        provider_market_key="h2h",
+        outcome_key="fighter_a",
+        outcome_label="A",
+        line_point=None,
+        price_decimal=1.9,
+        availability="available",
+        observed_at=as_of,
+        source_updated_at=as_of,
+        commence_time=as_of,
+        snapshot_at=as_of,
+        raw_ref="r",
+    )
+    avail = OddsAvailabilityObservation(
+        dedupe_key="av-m",
+        provider="the_odds_api",
+        region="us",
+        event_id=event_row.id,
+        external_event_id="ext-m",
+        bookmaker_key="fanduel",
+        bookmaker_title="FanDuel",
+        provider_market_key="h2h",
+        market_family="moneyline",
+        availability="unknown",
+        observed_at=as_of,
+        commence_time=as_of,
+        snapshot_at=as_of,
+    )
+    session.add(q)
+    session.add(avail)
+    session.flush()
+    cells = cells_from_snapshot_quotes(
+        session,
+        card_id="card-m",
+        time_label="t_minus_24h",
+        market="h2h",
+        provider="the_odds_api",
+        region="us",
+        match_reconciliation_as_of=as_of,
+        quote_ids=[q.id],
+        quote_snapshot_at=as_of,
+        availability_observation_ids=[avail.id],
+    )
+    by_book = {c.bookmaker_key: c for c in cells}
+    assert by_book["draftkings"].status == "observed"
+    assert by_book["fanduel"].status == "absent"
+    assert by_book["fanduel"].detail == "provider_availability_unknown"
+
+
+def test_ledger_sql_rejects_cutoff_after_as_of_and_bad_json(session):
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    as_of = datetime(2024, 1, 1, tzinfo=UTC)
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                "INSERT INTO odds_snapshot_job_runs ("
+                "id, idempotency_key, success_token, job_name, status, provider, "
+                "region, markets, event_id, mode, as_of, requested_cutoff, "
+                "estimated_cost, started_at, finished_at, created_at"
+                ") VALUES ("
+                "'x2', 'k2', 1, 'odds-backfill', 'success', 'the_odds_api', "
+                "'us', 'h2h', 'e1', 'historical:t_minus_24h', :as_of, :cutoff, "
+                "0, :as_of, :as_of, :as_of)"
+            ),
+            {"as_of": as_of, "cutoff": as_of + timedelta(days=1)},
+        )
+        session.flush()
+    session.rollback()
+
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                "INSERT INTO odds_snapshot_job_runs ("
+                "id, idempotency_key, success_token, job_name, status, provider, "
+                "region, markets, event_id, mode, as_of, estimated_cost, "
+                "snapshot_quote_ids, started_at, finished_at, created_at"
+                ") VALUES ("
+                "'x3', 'k3', 1, 'odds-backfill', 'success', 'the_odds_api', "
+                "'us', 'h2h', 'e1', 'historical:t_minus_24h', :as_of, 0, "
+                "'not-json', :as_of, :as_of, :as_of)"
+            ),
+            {"as_of": as_of},
+        )
+        session.flush()
+    session.rollback()
+
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                "INSERT INTO odds_snapshot_job_runs ("
+                "id, idempotency_key, success_token, job_name, status, provider, "
+                "region, markets, event_id, mode, as_of, estimated_cost, "
+                "actual_cost, actual_cost_source, started_at, finished_at, created_at"
+                ") VALUES ("
+                "'x4', 'k4', NULL, 'odds-backfill', 'deferred_quota', 'the_odds_api', "
+                "'us', 'h2h', 'e1', 'historical:t_minus_24h', :as_of, 0, "
+                "1, 'provider', :as_of, :as_of, :as_of)"
+            ),
+            {"as_of": as_of},
+        )
+        session.flush()
+    session.rollback()
+
+
+def test_bfo_path_segment_and_adversarial_urls():
+    ok = validate_bestfightodds_archive_url(
+        "https://www.bestfightodds.com/archive/mma"
+    )
+    assert ok.endswith("/archive/mma")
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url("https://www.bestfightodds.com/eventsX")
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url(
+            "https://www.bestfightodds.com/archive/../secret"
+        )
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url(
+            "https://www.bestfightodds.com/archive/%2e%2e/secret"
+        )
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url(
+            "https://www.bestfightodds.com/archive/mma#frag"
+        )
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url(
+            "https://www.bestfightodds.com/archive/mma?redirect=https://evil.test"
+        )
+
+
+def test_cli_no_quota_bootstrap_flag(capsys):
+    from mma_model.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["jobs", "snapshot-odds", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--quota-bootstrap" in help_text
+    assert "--no-quota-bootstrap" in help_text

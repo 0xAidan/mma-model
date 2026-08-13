@@ -82,12 +82,56 @@ class OddsSnapshotJobRun(Base):
             name="ck_odds_snapshot_job_runs_snapshot_le_cutoff",
         ),
         CheckConstraint(
+            "("
+            "requested_cutoff IS NULL OR requested_cutoff <= as_of"
+            ")",
+            name="ck_odds_snapshot_job_runs_cutoff_le_as_of",
+        ),
+        CheckConstraint(
             "finished_at IS NULL OR finished_at >= started_at",
             name="ck_odds_snapshot_job_runs_finished_ge_started",
         ),
         CheckConstraint(
             "length(trim(idempotency_key)) > 0",
             name="ck_odds_snapshot_job_runs_idem_nonempty",
+        ),
+        CheckConstraint(
+            "("
+            "status != 'success' OR finished_at IS NOT NULL"
+            ")",
+            name="ck_odds_snapshot_job_runs_success_finished",
+        ),
+        CheckConstraint(
+            "("
+            "status != 'failed' OR ("
+            "error_class IS NOT NULL AND length(trim(error_class)) > 0"
+            ")"
+            ")",
+            name="ck_odds_snapshot_job_runs_failed_error_class",
+        ),
+        CheckConstraint(
+            "("
+            "status NOT IN ('deferred_quota', 'exhausted') OR actual_cost IS NULL"
+            ")",
+            name="ck_odds_snapshot_job_runs_unexecuted_no_actual_cost",
+        ),
+        CheckConstraint(
+            "("
+            "snapshot_quote_ids IS NULL OR ("
+            "json_valid(snapshot_quote_ids) AND "
+            "json_type(snapshot_quote_ids) = 'array'"
+            ")"
+            ")",
+            name="ck_odds_snapshot_job_runs_quote_ids_json",
+        ),
+        CheckConstraint(
+            "("
+            "snapshot_availability_ids IS NULL OR ("
+            "json_valid(snapshot_availability_ids) AND "
+            "json_type(snapshot_availability_ids) = 'array'"
+            ")"
+            ")",
+            name="ck_odds_snapshot_job_runs_availability_ids_json",
         ),
     )
 
@@ -116,6 +160,7 @@ class OddsSnapshotJobRun(Base):
     actual_cost_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     remaining_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
     snapshot_quote_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot_availability_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

@@ -43,6 +43,7 @@ class QuoteStoreResult:
     manual_inserted: int = 0
     manual_deduped: int = 0
     quote_ids: tuple[int, ...] = ()
+    availability_observation_ids: tuple[int, ...] = ()
 
 
 class OddsQuoteStore:
@@ -149,15 +150,10 @@ class OddsQuoteStore:
                 event_map[quote.event_id] = event_row
                 event_upserts += 1
 
-            if self._quote_already_persisted(quote):
+            existing_id = self._resolve_existing_quote_id(quote)
+            if existing_id is not None:
                 deduped += 1
-                existing = self._session.scalar(
-                    select(OddsQuote.id).where(
-                        OddsQuote.dedupe_key == quote.dedupe_key
-                    )
-                )
-                if existing is not None:
-                    quote_ids.append(int(existing))
+                quote_ids.append(int(existing_id))
                 continue
 
             row = OddsQuote(
@@ -195,15 +191,13 @@ class OddsQuoteStore:
             quote_ids=tuple(quote_ids),
         )
 
-    def _quote_already_persisted(self, quote: NormalizedQuote) -> bool:
-        """v2 key hit, or legacy v1 key with matching raw_ref (no rewrite)."""
-        if (
-            self._session.scalar(
-                select(OddsQuote.id).where(OddsQuote.dedupe_key == quote.dedupe_key)
-            )
-            is not None
-        ):
-            return True
+    def _resolve_existing_quote_id(self, quote: NormalizedQuote) -> int | None:
+        """Return matched v2 or legacy-v1 row id for append-path coverage."""
+        existing = self._session.scalar(
+            select(OddsQuote.id).where(OddsQuote.dedupe_key == quote.dedupe_key)
+        )
+        if existing is not None:
+            return int(existing)
         legacy_key = quote_dedupe_key_v1(
             provider=quote.provider,
             event_id=quote.event_id,
@@ -225,10 +219,16 @@ class OddsQuoteStore:
             select(OddsQuote).where(OddsQuote.dedupe_key == legacy_key)
         )
         if legacy is None:
-            return False
+            return None
         # Identical re-poll of a pre-v2 row: same sanitized fragment.
         # Different raw_ref (e.g. opponent/label change) must insert under v2.
-        return (legacy.raw_ref or "") == (quote.raw_ref or "")
+        if (legacy.raw_ref or "") != (quote.raw_ref or ""):
+            return None
+        return int(legacy.id)
+
+    def _quote_already_persisted(self, quote: NormalizedQuote) -> bool:
+        """Back-compat: True when v2 or compatible legacy v1 row exists."""
+        return self._resolve_existing_quote_id(quote) is not None
 
     def append_unknown_observations(
         self,
@@ -241,6 +241,7 @@ class OddsQuoteStore:
         inserted = 0
         deduped = 0
         event_upserts = 0
+        availability_ids: list[int] = []
 
         for obs in observations:
             assert_supported_provider_market_pair(
@@ -268,25 +269,27 @@ class OddsQuoteStore:
             )
             if existing is not None:
                 deduped += 1
+                availability_ids.append(int(existing))
                 continue
 
-            self._session.add(
-                OddsAvailabilityObservation(
-                    dedupe_key=obs.dedupe_key,
-                    provider=obs.provider,
-                    region=obs.region,
-                    event_id=event_row.id,
-                    external_event_id=obs.event_id,
-                    bookmaker_key=obs.bookmaker_key,
-                    bookmaker_title=obs.bookmaker_title,
-                    provider_market_key=obs.provider_market_key,
-                    market_family=obs.market_family.value,
-                    availability=obs.availability.value,
-                    observed_at=obs.observed_at,
-                    commence_time=obs.commence_time,
-                    snapshot_at=obs.snapshot_at,
-                )
+            row = OddsAvailabilityObservation(
+                dedupe_key=obs.dedupe_key,
+                provider=obs.provider,
+                region=obs.region,
+                event_id=event_row.id,
+                external_event_id=obs.event_id,
+                bookmaker_key=obs.bookmaker_key,
+                bookmaker_title=obs.bookmaker_title,
+                provider_market_key=obs.provider_market_key,
+                market_family=obs.market_family.value,
+                availability=obs.availability.value,
+                observed_at=obs.observed_at,
+                commence_time=obs.commence_time,
+                snapshot_at=obs.snapshot_at,
             )
+            self._session.add(row)
+            self._session.flush()
+            availability_ids.append(int(row.id))
             inserted += 1
 
         self._session.flush()
@@ -296,6 +299,7 @@ class OddsQuoteStore:
             event_upserts=event_upserts,
             unknown_inserted=inserted,
             unknown_deduped=deduped,
+            availability_observation_ids=tuple(availability_ids),
         )
 
     def append_manual_prices(
