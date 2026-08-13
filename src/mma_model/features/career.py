@@ -11,20 +11,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Never
 
-from mma_model.dwcs.duration import DurationStatus, derive_elapsed_seconds
 from mma_model.features.as_of import AsOfCutoff, event_start_datetime, observation_admitted
+from mma_model.features.duration import elapsed_seconds_for_rates
 from mma_model.features.snapshot import (
     FeatureSnapshot,
     SnapshotHistoryBout,
     SnapshotResultVersion,
+    history_bout_group_key,
+    history_to_result_version,
     to_label_version,
 )
 from mma_model.labels.outcomes import (
     MethodLabel,
     OutcomeLabel,
     ResultClass,
+    ResultVersion,
     WinnerSide,
-    label_from_facts,
     training_label,
 )
 
@@ -51,23 +53,12 @@ def _elapsed_seconds(
     ending_round: int | None,
     time_str: str | None,
     scheduled_rounds: int | None,
-    stored: int | None = None,
 ) -> int | None:
-    if stored is not None and stored > 0:
-        return stored
-    if ending_round is None or time_str is None or not str(time_str).strip():
-        return None
-    schedule = scheduled_rounds
-    if schedule is None or schedule < 1:
-        schedule = 5 if ending_round > 3 else 3
-    derived = derive_elapsed_seconds(
+    return elapsed_seconds_for_rates(
         ending_round=ending_round,
         time_str=time_str,
-        scheduled_rounds=schedule,
+        scheduled_rounds=scheduled_rounds,
     )
-    if derived.status is DurationStatus.VALID:
-        return derived.elapsed_seconds
-    return None
 
 
 def _select_version(
@@ -148,33 +139,6 @@ def _canonical_views(
     return views
 
 
-def _history_label(row: SnapshotHistoryBout) -> OutcomeLabel | None:
-    if row.bout_status == "cancelled" or row.result in {"cancelled", "unknown"}:
-        return None
-    result_class: ResultClass | None
-    winner_side: WinnerSide | None
-    if row.result == "win":
-        result_class = ResultClass.DECISIVE
-        winner_side = WinnerSide.A
-    elif row.result == "loss":
-        result_class = ResultClass.DECISIVE
-        winner_side = WinnerSide.B
-    elif row.result == "draw":
-        result_class = ResultClass.DRAW
-        winner_side = None
-    elif row.result in {"nc", "no_contest"}:
-        result_class = ResultClass.NO_CONTEST
-        winner_side = None
-    else:
-        return None
-    return label_from_facts(
-        method_raw=row.method,
-        result_class=result_class,
-        winner_side=winner_side,
-        source_version_kind=None,
-    )
-
-
 def _history_views(
     snapshot: FeatureSnapshot,
     fighter_id: str,
@@ -185,7 +149,7 @@ def _history_views(
     on_card = {
         bout.fighter_a_id for bout in snapshot.bouts_for_event(cutoff.event_id)
     } | {bout.fighter_b_id for bout in snapshot.bouts_for_event(cutoff.event_id)}
-    latest: dict[str, SnapshotHistoryBout] = {}
+    grouped: dict[str, list[SnapshotHistoryBout]] = {}
     for row in snapshot.history_bouts:
         if row.fighter_id != fighter_id:
             continue
@@ -197,39 +161,43 @@ def _history_views(
             continue
         if event_date is not None and row.event_date == event_date and fighter_id in on_card:
             continue
-        key = row.external_bout_id or f"{row.effective_at.isoformat()}:{row.revision}"
-        previous = latest.get(key)
-        if previous is None or (row.effective_at, row.observed_at, row.revision) > (
-            previous.effective_at,
-            previous.observed_at,
-            previous.revision,
-        ):
-            latest[key] = row
+        grouped.setdefault(history_bout_group_key(row), []).append(row)
 
     views: list[FighterBoutView] = []
-    for row in latest.values():
-        label = _history_label(row)
-        if label is None:
+    for rows in grouped.values():
+        versions: list[ResultVersion] = []
+        row_by_clock: dict[tuple[datetime, datetime, int], SnapshotHistoryBout] = {}
+        for row in rows:
+            version = history_to_result_version(row)
+            if version is None:
+                continue
+            versions.append(version)
+            row_by_clock[(version.effective_at, version.observed_at, version.revision)] = row
+        if not versions:
             continue
+        label = training_label(versions, cutoff.cutoff)
+        if label.result_class in {ResultClass.PENDING, ResultClass.UNKNOWN}:
+            continue
+        chosen_version = max(versions, key=lambda item: (item.effective_at, item.observed_at, item.revision))
+        chosen = row_by_clock[(chosen_version.effective_at, chosen_version.observed_at, chosen_version.revision)]
         start = event_start_datetime(
-            scheduled_start_at=None, event_date=row.event_date
-        ) or row.effective_at
+            scheduled_start_at=None, event_date=chosen.event_date
+        ) or chosen.effective_at
         views.append(
             FighterBoutView(
                 fighter_id=fighter_id,
-                opponent_id=row.opponent_id,
+                opponent_id=chosen.opponent_id,
                 event_id=None,
                 start_at=start,
                 label=label,
                 elapsed_seconds=_elapsed_seconds(
-                    ending_round=row.ending_round,
-                    time_str=row.time_str,
-                    scheduled_rounds=row.scheduled_rounds,
-                    stored=row.elapsed_seconds,
+                    ending_round=chosen.ending_round,
+                    time_str=chosen.time_str,
+                    scheduled_rounds=chosen.scheduled_rounds,
                 ),
-                ending_round=row.ending_round,
+                ending_round=chosen.ending_round,
                 is_ufc_dwcs=False,
-                classification=row.classification,
+                classification=chosen.classification,
                 fighter_is_a=True,
             )
         )

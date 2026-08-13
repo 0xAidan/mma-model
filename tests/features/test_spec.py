@@ -24,4 +24,5 @@ def test_swap_negates_diffs_and_swaps_pairs() -> None:
     assert swapped_map["rating_a"] == by_name["rating_b"]
     assert swapped_map["rating_b"] == by_name["rating_a"]
     assert swapped_map["scheduled_rounds"] == by_name["scheduled_rounds"]
+    assert swapped_map["scheduled_rounds_missing"] == by_name["scheduled_rounds_missing"]
     assert swapped_map["data_completeness"] == by_name["data_completeness"]

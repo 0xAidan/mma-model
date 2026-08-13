@@ -8,7 +8,7 @@ from typing import Mapping, Never, Sequence
 
 from mma_model.quality.schema import canonical_json_bytes, sha256_canonical
 
-SPEC_VERSION = "dwcs_pit_v1"
+SPEC_VERSION = "dwcs_pit_v1.1"
 
 
 class FeatureRole(StrEnum):
@@ -76,16 +76,18 @@ FEATURE_FIELDS: tuple[FeatureField, ...] = (
     *_paired_with_missing("dec_loss_rate"),
     *_paired_with_missing("finish_elapsed_mean"),
     *_paired_with_missing("ufc_dwcs_share"),
-    *_paired("sig_str_landed_pm"),
+    *_paired_with_missing("sig_str_landed_pm"),
     _diff("sig_str_landed_pm_diff"),
     *_paired_with_missing("sig_str_acc"),
     _diff("sig_str_acc_diff"),
-    *_paired("opp_sig_str_landed_pm"),
-    *_paired("td_landed_per_15"),
+    *_paired_with_missing("opp_sig_str_landed_pm"),
+    *_paired_with_missing("td_landed_per_15"),
+    *_paired_with_missing("td_acc"),
+    *_paired_with_missing("td_att_per_15"),
     _diff("td_landed_per_15_diff"),
-    *_paired("td_absorbed_per_15"),
-    *_paired("sub_att_per_15"),
-    *_paired("ctrl_per_min"),
+    *_paired_with_missing("td_absorbed_per_15"),
+    *_paired_with_missing("sub_att_per_15"),
+    *_paired_with_missing("ctrl_per_min"),
     *_paired("perf_missing"),
     *_paired("opp_perf_missing"),
     *_paired_with_missing("age"),
@@ -100,6 +102,7 @@ FEATURE_FIELDS: tuple[FeatureField, ...] = (
     *_paired("stance_missing"),
     *_paired_with_missing("short_notice"),
     _shared("scheduled_rounds"),
+    _shared("scheduled_rounds_missing"),
     _shared("weight_class_missing"),
     _shared("is_proxy_cutoff"),
     _shared("data_completeness"),
@@ -191,6 +194,13 @@ def swap_values(values: Sequence[float]) -> tuple[float, ...]:
     return vector_from_mapping(swapped)
 
 
+def safe_diff(left: float, right: float, left_missing: float, right_missing: float) -> float:
+    """A-minus-B that is 0 when either side is missing (not a fake zero gap)."""
+    if left_missing or right_missing:
+        return 0.0
+    return left - right
+
+
 def quality_flag_for(completeness: float) -> DataQualityFlag:
     if completeness >= 0.75:
         return DataQualityFlag.HEALTHY
@@ -202,7 +212,7 @@ def quality_flag_for(completeness: float) -> DataQualityFlag:
 def missing_field_names() -> tuple[str, ...]:
     names: list[str] = []
     for name in FEATURE_NAMES:
-        if name.endswith("_missing_a") or name.endswith("_missing_b"):
+        if name.endswith("_missing") or name.endswith("_missing_a") or name.endswith("_missing_b"):
             names.append(name)
             continue
         if name in {

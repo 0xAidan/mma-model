@@ -23,6 +23,8 @@ from mma_model.features.snapshot import (
     SnapshotEvent,
     SnapshotHistoryBout,
     SnapshotResultVersion,
+    history_bout_group_key,
+    history_to_result_version,
     to_label_version,
 )
 from mma_model.labels.outcomes import (
@@ -159,6 +161,8 @@ def _add_label_games(
         games.setdefault(fighter_b_id, []).append(_Game(fighter_a_id, 0.5))
         return
     if result_class is ResultClass.DECISIVE:
+        if binary_winner is None:
+            return
         if binary_winner is WinnerSide.A:
             games.setdefault(fighter_a_id, []).append(_Game(fighter_b_id, 1.0))
             games.setdefault(fighter_b_id, []).append(_Game(fighter_a_id, 0.0))
@@ -167,7 +171,8 @@ def _add_label_games(
             games.setdefault(fighter_b_id, []).append(_Game(fighter_a_id, 1.0))
             games.setdefault(fighter_a_id, []).append(_Game(fighter_b_id, 0.0))
             return
-        return
+        never_winner: Never = binary_winner
+        raise ValueError(f"unhandled decisive winner: {never_winner!r}")
     if result_class in {
         ResultClass.NO_CONTEST,
         ResultClass.OVERTURNED,
@@ -210,53 +215,61 @@ def _history_periods(
     fighters_on_card: set[str],
     event_date,
 ) -> list[_Period]:
-    grouped: dict[tuple[str, str], list[SnapshotHistoryBout]] = {}
+    by_bout: dict[str, list[SnapshotHistoryBout]] = {}
     for row in snapshot.history_bouts:
-        if row.fighter_id is None:
-            continue
         if not _history_admitted(
             row, cutoff, fighters_on_card=fighters_on_card, event_date=event_date
         ):
             continue
-        date_key = row.event_date.isoformat() if row.event_date is not None else row.effective_at.date().isoformat()
-        name_key = row.event_name or row.external_bout_id or "unknown"
-        grouped.setdefault((date_key, name_key), []).append(row)
+        by_bout.setdefault(history_bout_group_key(row), []).append(row)
 
-    periods: list[_Period] = []
-    for (date_key, name_key), rows in grouped.items():
-        latest_by_ext: dict[str, SnapshotHistoryBout] = {}
-        for row in rows:
-            key = row.external_bout_id or f"{row.fighter_id}:{row.effective_at.isoformat()}:{row.revision}"
-            previous = latest_by_ext.get(key)
-            if previous is None or (row.effective_at, row.observed_at, row.revision) > (
-                previous.effective_at,
-                previous.observed_at,
-                previous.revision,
-            ):
-                latest_by_ext[key] = row
-        games: dict[str, list[_Game]] = {}
+    period_games: dict[tuple[str, str], dict[str, list[_Game]]] = {}
+    period_start: dict[tuple[str, str], datetime] = {}
+    for group in by_bout.values():
+        versions: list[ResultVersion] = []
+        representative = group[0]
         start_at = None
-        for row in latest_by_ext.values():
+        for row in group:
             start = event_start_datetime(
                 scheduled_start_at=None,
                 event_date=row.event_date,
             ) or row.effective_at
             start_at = start if start_at is None else min(start_at, start)
-            if row.opponent_id is None:
+            version = history_to_result_version(row)
+            if version is None:
                 continue
-            if row.result == "draw":
-                games.setdefault(row.fighter_id, []).append(_Game(row.opponent_id, 0.5))
-                games.setdefault(row.opponent_id, []).append(_Game(row.fighter_id, 0.5))
-                continue
-            if row.result == "win":
-                games.setdefault(row.fighter_id, []).append(_Game(row.opponent_id, 1.0))
-                games.setdefault(row.opponent_id, []).append(_Game(row.fighter_id, 0.0))
-                continue
-            if row.result == "loss":
-                games.setdefault(row.fighter_id, []).append(_Game(row.opponent_id, 0.0))
-                games.setdefault(row.opponent_id, []).append(_Game(row.fighter_id, 1.0))
-                continue
-            # nc / unknown / cancelled: no rating update
+            versions.append(version)
+            if row.version_kind == "event_night":
+                representative = row
+        if not versions or representative.opponent_id is None:
+            continue
+        label = training_label(versions, cutoff.cutoff)
+        bout_games: dict[str, list[_Game]] = {}
+        _add_label_games(
+            bout_games,
+            representative.fighter_id,
+            representative.opponent_id,
+            label.result_class,
+            label.binary_winner,
+        )
+        if not bout_games or start_at is None:
+            continue
+        date_key = (
+            representative.event_date.isoformat()
+            if representative.event_date is not None
+            else start_at.date().isoformat()
+        )
+        name_key = representative.event_name or representative.external_bout_id or "unknown"
+        period_id = (date_key, name_key)
+        games = period_games.setdefault(period_id, {})
+        for fighter_id, items in bout_games.items():
+            games.setdefault(fighter_id, []).extend(items)
+        previous = period_start.get(period_id)
+        period_start[period_id] = start_at if previous is None else min(previous, start_at)
+
+    periods: list[_Period] = []
+    for (date_key, name_key), games in period_games.items():
+        start_at = period_start.get((date_key, name_key))
         if start_at is None or not games:
             continue
         frozen = {fid: tuple(items) for fid, items in games.items()}
@@ -284,6 +297,7 @@ def _canonical_periods(
             event_date=event.event_date,
         )
         if start is None:
+            # Cannot order an event with no start or date; skip rather than invent.
             continue
         games = _canonical_games(snapshot, event, cutoff)
         if not games:

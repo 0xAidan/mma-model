@@ -151,6 +151,7 @@ def test_swap_symmetry_negates_diffs_and_keeps_spec_hash() -> None:
     assert w["rating_a"] == v["rating_b"]
     assert w["reach_a"] == v["reach_b"]
     assert w["scheduled_rounds"] == v["scheduled_rounds"]
+    assert w["scheduled_rounds_missing"] == v["scheduled_rounds_missing"]
 
 
 def test_reversal_invisible_before_adjudication_visible_after() -> None:
@@ -230,6 +231,77 @@ def test_builder_exposes_completeness_flag() -> None:
     assert values["ko_win_rate_missing_a"] == 1.0
     assert values["ko_win_rate_a"] == 0.5
     assert values["debut_a"] == 1.0
+    assert values["scheduled_rounds"] == 3.0
+    assert values["scheduled_rounds_missing"] == 0.0
+
+
+def test_unknown_bout_schedule_is_missing_not_three() -> None:
+    snapshot = FeatureSnapshot()
+    add_event(snapshot, "card", dt(2019, 6, 1))
+    add_bout(snapshot, "main", "card", "a", "b", scheduled_rounds=None)
+    values = named(
+        FeatureBuilder(snapshot).build("a", "b", cutoff_of(snapshot, "card"), bout_id="main").values,
+        FeatureBuilder(snapshot).build("a", "b", cutoff_of(snapshot, "card"), bout_id="main").names,
+    )
+    assert values["scheduled_rounds"] == 0.0
+    assert values["scheduled_rounds_missing"] == 1.0
+    swapped = named(
+        FeatureBuilder(snapshot).build("b", "a", cutoff_of(snapshot, "card"), bout_id="main").values,
+        FeatureBuilder(snapshot).build("b", "a", cutoff_of(snapshot, "card"), bout_id="main").names,
+    )
+    assert swapped["scheduled_rounds"] == 0.0
+    assert swapped["scheduled_rounds_missing"] == 1.0
+
+
+def test_history_reversal_uses_training_label() -> None:
+    snapshot = FeatureSnapshot()
+    add_event(snapshot, "mid", dt(2019, 7, 1))
+    add_event(snapshot, "late", dt(2019, 9, 1))
+    night = dt(2018, 6, 1, 5)
+    add_history(
+        snapshot,
+        fighter_id="a",
+        opponent_id="c",
+        at=night,
+        result="win",
+        method="KO/TKO",
+        external_bout_id="hist-rev",
+        ending_round=1,
+        time_str="1:10",
+        version_kind="event_night",
+        revision=1,
+    )
+    add_history(
+        snapshot,
+        fighter_id="a",
+        opponent_id="c",
+        at=datetime(2019, 8, 15, 12, 0, tzinfo=UTC),
+        result="nc",
+        method="NC",
+        external_bout_id="hist-rev",
+        ending_round=1,
+        time_str="1:10",
+        version_kind="current",
+        revision=1,
+        event_date=night.date(),
+    )
+    add_bout(snapshot, "mid-bout", "mid", "a", "b")
+    add_bout(snapshot, "late-bout", "late", "a", "b")
+    builder = FeatureBuilder(snapshot)
+    mid = named(
+        builder.build("a", "b", cutoff_of(snapshot, "mid"), bout_id="mid-bout").values,
+        builder.build("a", "b", cutoff_of(snapshot, "mid"), bout_id="mid-bout").names,
+    )
+    late = named(
+        builder.build("a", "b", cutoff_of(snapshot, "late"), bout_id="late-bout").values,
+        builder.build("a", "b", cutoff_of(snapshot, "late"), bout_id="late-bout").names,
+    )
+    assert mid["prior_fights_a"] == 1.0
+    assert mid["ko_win_rate_missing_a"] == 0.0
+    assert mid["rating_missing_a"] == 0.0
+    assert late["ko_win_rate_missing_a"] == 1.0
+    assert late["rating_missing_a"] == 1.0
+    assert late["prior_fights_a"] == 1.0
 
 
 def test_legacy_matchup_import_still_works() -> None:

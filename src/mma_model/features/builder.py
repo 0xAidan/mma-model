@@ -30,6 +30,7 @@ from mma_model.features.spec import (
     quality_flag_for,
     row_bytes,
     row_hash,
+    safe_diff,
     spec_hash,
     vector_from_mapping,
 )
@@ -199,9 +200,7 @@ def _physical_for_fighter(
 
 
 def _safe_diff(left: float, right: float, left_missing: float, right_missing: float) -> float:
-    if left_missing or right_missing:
-        return 0.0
-    return left - right
+    return safe_diff(left, right, left_missing, right_missing)
 
 
 def _require_cutoff_kind(kind: CutoffKind) -> float:
@@ -327,7 +326,12 @@ class FeatureBuilder:
         physical_a = _physical_for_fighter(self.snapshot, fighter_a_id, cutoff, prefix="a")
         physical_b = _physical_for_fighter(self.snapshot, fighter_b_id, cutoff, prefix="b")
         bout = self.snapshot.bout_by_id(bout_id) if bout_id is not None else None
-        scheduled = float(bout.scheduled_rounds) if bout is not None else 3.0
+        if bout is None or bout.scheduled_rounds is None:
+            scheduled = 0.0
+            scheduled_missing = 1.0
+        else:
+            scheduled = float(bout.scheduled_rounds)
+            scheduled_missing = 0.0
         weight_missing = 1.0 if bout is None or not bout.weight_class else 0.0
         values: dict[str, float] = {
             **strength,
@@ -354,6 +358,7 @@ class FeatureBuilder:
                 physical_b["height_missing_b"],
             ),
             "scheduled_rounds": scheduled,
+            "scheduled_rounds_missing": scheduled_missing,
             "weight_class_missing": weight_missing,
             "is_proxy_cutoff": _require_cutoff_kind(cutoff.cutoff_kind),
             "data_completeness": 0.0,

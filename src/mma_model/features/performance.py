@@ -1,28 +1,40 @@
 """UFC/DWCS in-cage rates using actual elapsed seconds (DWCS-301).
 
 Per-15-minute rates divide by 900 seconds of *actual* elapsed time, never an
-assumed 15-minute fight. Zero landed with positive attempts is a valid zero;
-no prior sample is missing. Bouts with invalid/missing elapsed seconds are
-excluded from rate denominators.
+assumed 15-minute fight. A bout enters a rate only when that stat key was
+observed. Zero landed with positive attempts is a valid zero; absent keys are
+missing. Invalid/missing elapsed or schedule excludes the bout from denominators.
 """
 
 from __future__ import annotations
 
-from mma_model.dwcs.duration import DurationStatus, derive_elapsed_seconds
+from dataclasses import dataclass
+
 from mma_model.features.as_of import AsOfCutoff, observation_admitted
+from mma_model.features.duration import elapsed_seconds_for_rates
 from mma_model.features.snapshot import (
     STAT_CTRL_SECONDS,
     STAT_SIG_STR_ATTEMPTED,
     STAT_SIG_STR_LANDED,
     STAT_SUB_ATT,
+    STAT_TD_ATTEMPTED,
     STAT_TD_LANDED,
     FeatureSnapshot,
     SnapshotBout,
     SnapshotStatObservation,
 )
+from mma_model.features.spec import safe_diff
 
 SECONDS_PER_MINUTE = 60.0
 SECONDS_PER_15 = 900.0
+
+
+@dataclass
+class _RateAcc:
+    numer: float = 0.0
+    elapsed: float = 0.0
+    attempts: float = 0.0
+    n: int = 0
 
 
 def _elapsed_for_bout(bout: SnapshotBout, snapshot: FeatureSnapshot, cutoff: AsOfCutoff) -> int | None:
@@ -40,16 +52,11 @@ def _elapsed_for_bout(bout: SnapshotBout, snapshot: FeatureSnapshot, cutoff: AsO
     if not eligible:
         return None
     chosen = max(eligible, key=lambda row: (row.effective_at, row.observed_at, row.revision))
-    if chosen.ending_round is None or chosen.time_str is None:
-        return None
-    derived = derive_elapsed_seconds(
+    return elapsed_seconds_for_rates(
         ending_round=chosen.ending_round,
         time_str=chosen.time_str,
         scheduled_rounds=bout.scheduled_rounds,
     )
-    if derived.status is DurationStatus.VALID:
-        return derived.elapsed_seconds
-    return None
 
 
 def _latest_stats(
@@ -84,8 +91,35 @@ def _latest_stats(
     return out
 
 
-def _stat(values: dict[str, float], key: str) -> float:
-    return float(values.get(key, 0.0))
+def _add_count(_acc: _RateAcc, *, value: float, elapsed: float) -> None:
+    _acc.numer += value
+    _acc.elapsed += elapsed
+    _acc.n += 1
+
+
+def _add_accuracy(_acc: _RateAcc, *, landed: float, attempted: float, elapsed: float) -> None:
+    _acc.numer += landed
+    _acc.attempts += attempted
+    _acc.elapsed += elapsed
+    _acc.n += 1
+
+
+def _per_min(acc: _RateAcc) -> tuple[float, float]:
+    if acc.n == 0 or acc.elapsed <= 0:
+        return 0.0, 1.0
+    return acc.numer / (acc.elapsed / SECONDS_PER_MINUTE), 0.0
+
+
+def _per_15(acc: _RateAcc) -> tuple[float, float]:
+    if acc.n == 0 or acc.elapsed <= 0:
+        return 0.0, 1.0
+    return acc.numer / (acc.elapsed / SECONDS_PER_15), 0.0
+
+
+def _accuracy(acc: _RateAcc) -> tuple[float, float]:
+    if acc.n == 0 or acc.attempts <= 0:
+        return 0.0, 1.0
+    return acc.numer / acc.attempts, 0.0
 
 
 def performance_features_for_fighter(
@@ -95,16 +129,15 @@ def performance_features_for_fighter(
     *,
     prefix: str,
 ) -> dict[str, float]:
-    elapsed_total = 0.0
-    sig_landed = 0.0
-    sig_attempted = 0.0
-    opp_sig_landed = 0.0
-    td_landed = 0.0
-    td_absorbed = 0.0
-    sub_att = 0.0
-    ctrl_seconds = 0.0
-    sample_n = 0
-    opp_sample_n = 0
+    strike_pm = _RateAcc()
+    strike_acc = _RateAcc()
+    opp_strike_pm = _RateAcc()
+    td_landed = _RateAcc()
+    td_att = _RateAcc()
+    td_acc = _RateAcc()
+    td_absorbed = _RateAcc()
+    sub_att = _RateAcc()
+    ctrl = _RateAcc()
 
     for bout in snapshot.bouts:
         if fighter_id not in {bout.fighter_a_id, bout.fighter_b_id}:
@@ -129,49 +162,78 @@ def performance_features_for_fighter(
             cutoff=cutoff,
             bout_event_id=bout.event_id,
         )
-        elapsed_total += float(elapsed)
-        sig_landed += _stat(own, STAT_SIG_STR_LANDED)
-        sig_attempted += _stat(own, STAT_SIG_STR_ATTEMPTED)
-        td_landed += _stat(own, STAT_TD_LANDED)
-        sub_att += _stat(own, STAT_SUB_ATT)
-        ctrl_seconds += _stat(own, STAT_CTRL_SECONDS)
-        sample_n += 1
-        if opp:
-            opp_sig_landed += _stat(opp, STAT_SIG_STR_LANDED)
-            td_absorbed += _stat(opp, STAT_TD_LANDED)
-            opp_sample_n += 1
+        elapsed_f = float(elapsed)
 
-    missing = 1.0 if sample_n == 0 or elapsed_total <= 0 else 0.0
-    opp_missing = 1.0 if opp_sample_n == 0 or elapsed_total <= 0 else 0.0
-    minutes = elapsed_total / SECONDS_PER_MINUTE if elapsed_total > 0 else 0.0
-    per_15 = elapsed_total / SECONDS_PER_15 if elapsed_total > 0 else 0.0
+        if STAT_SIG_STR_LANDED in own:
+            _add_count(strike_pm, value=own[STAT_SIG_STR_LANDED], elapsed=elapsed_f)
+        if STAT_SIG_STR_LANDED in own and STAT_SIG_STR_ATTEMPTED in own:
+            _add_accuracy(
+                strike_acc,
+                landed=own[STAT_SIG_STR_LANDED],
+                attempted=own[STAT_SIG_STR_ATTEMPTED],
+                elapsed=elapsed_f,
+            )
+        if STAT_TD_LANDED in own:
+            _add_count(td_landed, value=own[STAT_TD_LANDED], elapsed=elapsed_f)
+        if STAT_TD_ATTEMPTED in own:
+            _add_count(td_att, value=own[STAT_TD_ATTEMPTED], elapsed=elapsed_f)
+        if STAT_TD_LANDED in own and STAT_TD_ATTEMPTED in own:
+            _add_accuracy(
+                td_acc,
+                landed=own[STAT_TD_LANDED],
+                attempted=own[STAT_TD_ATTEMPTED],
+                elapsed=elapsed_f,
+            )
+        if STAT_SUB_ATT in own:
+            _add_count(sub_att, value=own[STAT_SUB_ATT], elapsed=elapsed_f)
+        if STAT_CTRL_SECONDS in own:
+            _add_count(ctrl, value=own[STAT_CTRL_SECONDS], elapsed=elapsed_f)
 
-    landed_pm = (sig_landed / minutes) if minutes > 0 else 0.0
-    acc_missing = 1.0 if sig_attempted <= 0 else 0.0
-    acc = (sig_landed / sig_attempted) if sig_attempted > 0 else 0.0
-    opp_pm = (opp_sig_landed / minutes) if minutes > 0 and opp_sample_n else 0.0
-    td_15 = (td_landed / per_15) if per_15 > 0 else 0.0
-    td_abs_15 = (td_absorbed / per_15) if per_15 > 0 and opp_sample_n else 0.0
-    sub_15 = (sub_att / per_15) if per_15 > 0 else 0.0
-    ctrl_pm = (ctrl_seconds / minutes) if minutes > 0 else 0.0
+        if STAT_SIG_STR_LANDED in opp:
+            _add_count(opp_strike_pm, value=opp[STAT_SIG_STR_LANDED], elapsed=elapsed_f)
+        if STAT_TD_ATTEMPTED in opp and STAT_TD_LANDED in opp:
+            _add_count(td_absorbed, value=opp[STAT_TD_LANDED], elapsed=elapsed_f)
 
-    if missing == 1.0:
-        landed_pm = acc = td_15 = sub_15 = ctrl_pm = 0.0
-        acc_missing = 1.0
-    if opp_missing == 1.0:
-        opp_pm = td_abs_15 = 0.0
+    landed_pm, landed_m = _per_min(strike_pm)
+    acc, acc_m = _accuracy(strike_acc)
+    opp_pm, opp_m = _per_min(opp_strike_pm)
+    td_15, td_m = _per_15(td_landed)
+    td_att_15, td_att_m = _per_15(td_att)
+    td_accuracy, td_acc_m = _accuracy(td_acc)
+    td_abs_15, td_abs_m = _per_15(td_absorbed)
+    sub_15, sub_m = _per_15(sub_att)
+    ctrl_pm, ctrl_m = _per_min(ctrl)
 
+    any_own = (
+        strike_pm.n
+        + strike_acc.n
+        + td_landed.n
+        + td_att.n
+        + sub_att.n
+        + ctrl.n
+    )
+    any_opp = opp_strike_pm.n + td_absorbed.n
     return {
         f"sig_str_landed_pm_{prefix}": landed_pm,
+        f"sig_str_landed_pm_missing_{prefix}": landed_m,
         f"sig_str_acc_{prefix}": acc,
-        f"sig_str_acc_missing_{prefix}": acc_missing,
+        f"sig_str_acc_missing_{prefix}": acc_m,
         f"opp_sig_str_landed_pm_{prefix}": opp_pm,
+        f"opp_sig_str_landed_pm_missing_{prefix}": opp_m,
         f"td_landed_per_15_{prefix}": td_15,
+        f"td_landed_per_15_missing_{prefix}": td_m,
+        f"td_acc_{prefix}": td_accuracy,
+        f"td_acc_missing_{prefix}": td_acc_m,
+        f"td_att_per_15_{prefix}": td_att_15,
+        f"td_att_per_15_missing_{prefix}": td_att_m,
         f"td_absorbed_per_15_{prefix}": td_abs_15,
+        f"td_absorbed_per_15_missing_{prefix}": td_abs_m,
         f"sub_att_per_15_{prefix}": sub_15,
+        f"sub_att_per_15_missing_{prefix}": sub_m,
         f"ctrl_per_min_{prefix}": ctrl_pm,
-        f"perf_missing_{prefix}": missing,
-        f"opp_perf_missing_{prefix}": opp_missing,
+        f"ctrl_per_min_missing_{prefix}": ctrl_m,
+        f"perf_missing_{prefix}": 1.0 if any_own == 0 else 0.0,
+        f"opp_perf_missing_{prefix}": 1.0 if any_opp == 0 else 0.0,
     }
 
 
@@ -184,7 +246,22 @@ def matchup_performance(
     a = performance_features_for_fighter(snapshot, fighter_a_id, cutoff, prefix="a")
     b = performance_features_for_fighter(snapshot, fighter_b_id, cutoff, prefix="b")
     merged = {**a, **b}
-    merged["sig_str_landed_pm_diff"] = a["sig_str_landed_pm_a"] - b["sig_str_landed_pm_b"]
-    merged["sig_str_acc_diff"] = a["sig_str_acc_a"] - b["sig_str_acc_b"]
-    merged["td_landed_per_15_diff"] = a["td_landed_per_15_a"] - b["td_landed_per_15_b"]
+    merged["sig_str_landed_pm_diff"] = safe_diff(
+        a["sig_str_landed_pm_a"],
+        b["sig_str_landed_pm_b"],
+        a["sig_str_landed_pm_missing_a"],
+        b["sig_str_landed_pm_missing_b"],
+    )
+    merged["sig_str_acc_diff"] = safe_diff(
+        a["sig_str_acc_a"],
+        b["sig_str_acc_b"],
+        a["sig_str_acc_missing_a"],
+        b["sig_str_acc_missing_b"],
+    )
+    merged["td_landed_per_15_diff"] = safe_diff(
+        a["td_landed_per_15_a"],
+        b["td_landed_per_15_b"],
+        a["td_landed_per_15_missing_a"],
+        b["td_landed_per_15_missing_b"],
+    )
     return merged

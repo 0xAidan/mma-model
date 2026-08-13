@@ -59,7 +59,7 @@ class SnapshotBout:
     event_id: str
     fighter_a_id: str
     fighter_b_id: str
-    scheduled_rounds: int = 3
+    scheduled_rounds: int | None = None
     weight_class: str | None = None
     status: str = "scheduled"
 
@@ -151,6 +151,16 @@ class FeatureSnapshot:
         return [bout for bout in self.bouts if bout.event_id == event_id]
 
 
+def history_bout_group_key(row: SnapshotHistoryBout) -> str:
+    """Group regional versions of one bout for one subject fighter.
+
+    Rows without ``external_bout_id`` stay unique so unrelated observations
+    are never merged just to invent a reversal chain.
+    """
+    bout_key = row.external_bout_id or f"{row.effective_at.isoformat()}:{row.revision}"
+    return f"{row.fighter_id}:{bout_key}"
+
+
 def parse_version_kind(raw: str) -> VersionKind:
     if raw == VersionKind.EVENT_NIGHT.value:
         return VersionKind.EVENT_NIGHT
@@ -206,6 +216,51 @@ def to_label_version(row: SnapshotResultVersion) -> ResultVersion:
     )
 
 
+def history_to_result_version(row: SnapshotHistoryBout) -> ResultVersion | None:
+    """Map one regional history observation onto a labeling ``ResultVersion``.
+
+    The subject fighter is corner A. Win/loss/draw/NC follow the source result
+    token; cancelled rows are dropped. Callers pass every admitted version for
+    the same ``external_bout_id`` into ``training_label``.
+    """
+    if row.bout_status == "cancelled":
+        return None
+    result = (row.result or "").strip().lower()
+    if result == "cancelled":
+        return None
+    result_class: ResultClass | None
+    winner_side: WinnerSide | None
+    if result == "win":
+        result_class = ResultClass.DECISIVE
+        winner_side = WinnerSide.A
+    elif result == "loss":
+        result_class = ResultClass.DECISIVE
+        winner_side = WinnerSide.B
+    elif result == "draw":
+        result_class = ResultClass.DRAW
+        winner_side = None
+    elif result in {"nc", "no_contest"}:
+        result_class = ResultClass.NO_CONTEST
+        winner_side = None
+    elif result in {"unknown", ""}:
+        result_class = ResultClass.UNKNOWN
+        winner_side = None
+    else:
+        result_class = parse_result_class(result)
+        winner_side = None
+        if result_class is None:
+            return None
+    return ResultVersion(
+        version_kind=parse_version_kind(row.version_kind),
+        effective_at=ensure_utc(row.effective_at),
+        observed_at=ensure_utc(row.observed_at),
+        winner_side=winner_side,
+        method_raw=row.method,
+        result_class=result_class,
+        revision=row.revision,
+    )
+
+
 def snapshot_from_session(session: Session) -> FeatureSnapshot:
     """Copy canonical PIT tables into an in-memory snapshot (read-only)."""
     events = [
@@ -224,7 +279,11 @@ def snapshot_from_session(session: Session) -> FeatureSnapshot:
             event_id=row.event_id,
             fighter_a_id=row.fighter_a_id,
             fighter_b_id=row.fighter_b_id,
-            scheduled_rounds=int(row.scheduled_rounds or 3),
+            scheduled_rounds=(
+                int(row.scheduled_rounds)
+                if row.scheduled_rounds is not None and int(row.scheduled_rounds) > 0
+                else None
+            ),
             weight_class=row.weight_class,
             status=row.status,
         )

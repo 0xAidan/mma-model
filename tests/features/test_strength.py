@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+from mma_model.features.snapshot import FeatureSnapshot
 from mma_model.features.strength import INITIAL_RATING, strengths_before_event
 from tests.features.helpers import add_bout, add_event, add_result, cutoff_of, dt
-from mma_model.features.snapshot import FeatureSnapshot
 
 
 def test_same_card_ratings_are_pre_card_and_do_not_chain() -> None:
@@ -97,6 +97,28 @@ def test_nc_and_pending_do_not_update_ratings() -> None:
         winner_id=None,
         method="NC",
         result_type="no_contest",
+        ending_round=1,
+        time_str="1:00",
+        effective_at=dt(2018, 1, 1),
+    )
+    cutoff = cutoff_of(snapshot, "e2")
+    states = strengths_before_event(snapshot, cutoff, fighter_ids=("a", "c"))
+    assert states["a"].missing is True
+    assert states["a"].rating == INITIAL_RATING
+    assert states["a"].prior_decisive_bouts == 0
+
+
+def test_decisive_without_winner_does_not_update_ratings() -> None:
+    snapshot = FeatureSnapshot()
+    add_event(snapshot, "e1", dt(2018, 1, 1))
+    add_event(snapshot, "e2", dt(2019, 6, 1))
+    bout = add_bout(snapshot, "b1", "e1", "a", "c")
+    add_result(
+        snapshot,
+        bout,
+        winner_id=None,
+        method="KO/TKO",
+        result_type="decisive",
         ending_round=1,
         time_str="1:00",
         effective_at=dt(2018, 1, 1),

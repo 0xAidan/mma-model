@@ -51,7 +51,11 @@ class EventCutoffSource(Protocol):
 
 
 def ensure_utc(value: datetime) -> datetime:
-    """Require a datetime; naive values are treated as UTC (SQLite round-trip)."""
+    """Return an aware UTC datetime.
+
+    Naive values are treated as UTC because SQLite ``DateTime(timezone=True)``
+    round-trips drop ``tzinfo``. Prefer passing timezone-aware UTC.
+    """
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)

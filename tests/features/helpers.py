@@ -47,7 +47,7 @@ def add_bout(
     fighter_a_id: str,
     fighter_b_id: str,
     *,
-    scheduled_rounds: int = 3,
+    scheduled_rounds: int | None = 3,
     weight_class: str | None = "lightweight",
 ) -> SnapshotBout:
     bout = SnapshotBout(
@@ -124,11 +124,14 @@ def add_strike_stats(
     landed: float,
     attempted: float,
     at: datetime,
-    td_landed: float = 0.0,
-    sub_att: float = 0.0,
-    ctrl_seconds: float = 0.0,
+    td_landed: float | None = None,
+    td_attempted: float | None = None,
+    sub_att: float | None = None,
+    ctrl_seconds: float | None = None,
     opp_id: str | None = None,
-    opp_landed: float = 0.0,
+    opp_landed: float | None = None,
+    opp_td_landed: float | None = None,
+    opp_td_attempted: float | None = None,
 ) -> None:
     add_stat(snapshot, fighter_id=fighter_id, bout_id=bout_id, key="sig_str_landed", value=landed, at=at)
     add_stat(
@@ -139,12 +142,19 @@ def add_strike_stats(
         value=attempted,
         at=at,
     )
-    add_stat(snapshot, fighter_id=fighter_id, bout_id=bout_id, key="td_landed", value=td_landed, at=at)
-    add_stat(snapshot, fighter_id=fighter_id, bout_id=bout_id, key="sub_att", value=sub_att, at=at)
-    add_stat(
-        snapshot, fighter_id=fighter_id, bout_id=bout_id, key="ctrl_seconds", value=ctrl_seconds, at=at
-    )
-    if opp_id is not None:
+    if td_landed is not None:
+        add_stat(snapshot, fighter_id=fighter_id, bout_id=bout_id, key="td_landed", value=td_landed, at=at)
+    if td_attempted is not None:
+        add_stat(
+            snapshot, fighter_id=fighter_id, bout_id=bout_id, key="td_attempted", value=td_attempted, at=at
+        )
+    if sub_att is not None:
+        add_stat(snapshot, fighter_id=fighter_id, bout_id=bout_id, key="sub_att", value=sub_att, at=at)
+    if ctrl_seconds is not None:
+        add_stat(
+            snapshot, fighter_id=fighter_id, bout_id=bout_id, key="ctrl_seconds", value=ctrl_seconds, at=at
+        )
+    if opp_id is not None and opp_landed is not None:
         add_stat(
             snapshot,
             fighter_id=opp_id,
@@ -159,6 +169,19 @@ def add_strike_stats(
             bout_id=bout_id,
             key="sig_str_attempted",
             value=opp_landed,
+            at=at,
+        )
+    if opp_id is not None and opp_td_landed is not None:
+        add_stat(
+            snapshot, fighter_id=opp_id, bout_id=bout_id, key="td_landed", value=opp_td_landed, at=at
+        )
+    if opp_id is not None and opp_td_attempted is not None:
+        add_stat(
+            snapshot,
+            fighter_id=opp_id,
+            bout_id=bout_id,
+            key="td_attempted",
+            value=opp_td_attempted,
             at=at,
         )
 
@@ -197,23 +220,29 @@ def add_history(
     method: str | None = "U-DEC",
     classification: str = "professional",
     external_bout_id: str = "hist-1",
+    scheduled_rounds: int | None = 3,
+    ending_round: int | None = 3,
+    time_str: str | None = "5:00",
+    version_kind: str = "event_night",
+    revision: int = 1,
+    event_date: date | None = None,
 ) -> None:
     snapshot.history_bouts.append(
         SnapshotHistoryBout(
             fighter_id=fighter_id,
             opponent_id=opponent_id,
-            event_date=at.date(),
+            event_date=event_date if event_date is not None else at.date(),
             event_name="Regional",
             classification=classification,
             result=result,
             method=method,
-            ending_round=3,
-            time_str="5:00",
-            elapsed_seconds=900,
-            scheduled_rounds=3,
+            ending_round=ending_round,
+            time_str=time_str,
+            elapsed_seconds=None,
+            scheduled_rounds=scheduled_rounds,
             promotion="regional",
-            version_kind="event_night",
-            revision=1,
+            version_kind=version_kind,
+            revision=revision,
             effective_at=at,
             observed_at=at,
             bout_status="completed",
