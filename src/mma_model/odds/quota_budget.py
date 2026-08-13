@@ -1,7 +1,7 @@
 """Quota budget / cost estimation for odds jobs (DWCS-205).
 
 Uses the provider cost contract plus persisted raw/inferred quota provenance.
-Never exceeds configured monthly/run reserve; emits explicit deferred/exhausted.
+Never assumes unused monthly quota. Never exceeds actual remaining.
 """
 
 from __future__ import annotations
@@ -18,8 +18,11 @@ from mma_model.db.tables.odds import OddsQuotaObservation
 from mma_model.odds.normalize import ensure_utc
 from mma_model.odds.schedule import (
     OddsScheduleContract,
+    RequestPurpose,
     estimate_endpoint_cost,
     load_default_schedule_contract,
+    normalize_markets,
+    normalize_regions,
 )
 from mma_model.odds.types import (
     REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
@@ -44,19 +47,19 @@ class QuotaBudgetDecision:
     spendable: int | None
     reason: str
     remaining_source: str
+    purpose: RequestPurpose
+    preserves_reserve: bool
 
 
-def cost_from_quota_headers(quota: QuotaHeaders) -> int:
-    """Prefer provider last cost; empty is 0; missing is non-authoritative 0."""
+def cost_from_quota_headers(quota: QuotaHeaders) -> int | None:
+    """Return known cost; missing provenance yields None (never invent 0)."""
     if quota.requests_last_source == REQUESTS_LAST_SOURCE_PROVIDER:
         assert quota.requests_last is not None
         return int(quota.requests_last)
     if quota.requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY:
         return 0
     if quota.requests_last_source == REQUESTS_LAST_SOURCE_MISSING:
-        # Missing provenance: do not invent a cost; treat as unknown (0 for ledger,
-        # but callers should not treat as authoritative spend).
-        return 0
+        return None
     raise ValueError(f"unsupported requests_last_source: {quota.requests_last_source!r}")
 
 
@@ -81,6 +84,8 @@ def latest_remaining_from_observations(
         return None, "missing_observation"
     if row.requests_remaining is None:
         return None, "missing_remaining_header"
+    if int(row.requests_remaining) < 0:
+        return None, "malformed_negative_remaining"
     return int(row.requests_remaining), "persisted_quota_observation"
 
 
@@ -88,88 +93,109 @@ def evaluate_quota_budget(
     *,
     estimated_cost: int,
     remaining: int | None,
+    purpose: RequestPurpose,
     contract: OddsScheduleContract | None = None,
     remaining_source: str = "caller",
+    allow_missing_remaining_override: bool = False,
 ) -> QuotaBudgetDecision:
-    """Decide allow / deferred / exhausted without exceeding monthly/run reserve."""
+    """Decide allow / deferred / exhausted with purpose-aware reserve rules."""
     if estimated_cost < 0:
         raise ValueError("estimated_cost must be nonnegative")
     sched = contract or load_default_schedule_contract()
     reserve = int(sched.quota.run_reserve)
-    monthly = int(sched.quota.monthly_limit)
+    preserves = purpose.value in sched.quota.preserve_reserve_for
+    may_spend = purpose.value in sched.quota.may_spend_reserve_for
+    if not preserves and not may_spend:
+        raise ValueError(f"purpose {purpose.value!r} not configured in schedule quota")
 
     if remaining is None:
-        # Without a remaining reading, refuse spend that would exceed run reserve
-        # relative to the configured monthly ceiling only when cost alone is huge.
-        if estimated_cost > monthly:
+        if allow_missing_remaining_override and remaining_source.startswith("override"):
+            # Explicit bounded operator override path only.
             return QuotaBudgetDecision(
-                state=QuotaBudgetState.EXHAUSTED,
+                state=QuotaBudgetState.ALLOWED,
                 estimated_cost=estimated_cost,
                 remaining=None,
                 run_reserve=reserve,
                 spendable=None,
-                reason="estimated_cost_exceeds_monthly_limit_without_remaining",
+                reason="explicit_bounded_operator_override",
                 remaining_source=remaining_source,
-            )
-        if estimated_cost > max(0, monthly - reserve):
-            return QuotaBudgetDecision(
-                state=QuotaBudgetState.DEFERRED,
-                estimated_cost=estimated_cost,
-                remaining=None,
-                run_reserve=reserve,
-                spendable=None,
-                reason="missing_remaining_defer_to_protect_reserve",
-                remaining_source=remaining_source,
+                purpose=purpose,
+                preserves_reserve=preserves,
             )
         return QuotaBudgetDecision(
-            state=QuotaBudgetState.ALLOWED,
+            state=QuotaBudgetState.DEFERRED,
             estimated_cost=estimated_cost,
             remaining=None,
             run_reserve=reserve,
             spendable=None,
-            reason="missing_remaining_within_conservative_monthly_bound",
+            reason="missing_remaining_fail_closed",
             remaining_source=remaining_source,
+            purpose=purpose,
+            preserves_reserve=preserves,
         )
 
-    spendable = max(0, int(remaining) - reserve)
-    if remaining <= 0:
+    remaining_i = int(remaining)
+    if remaining_i <= 0:
         return QuotaBudgetDecision(
             state=QuotaBudgetState.EXHAUSTED,
             estimated_cost=estimated_cost,
-            remaining=remaining,
+            remaining=remaining_i,
             run_reserve=reserve,
             spendable=0,
             reason="quota_remaining_nonpositive",
             remaining_source=remaining_source,
+            purpose=purpose,
+            preserves_reserve=preserves,
         )
-    if estimated_cost > remaining:
+
+    spendable = (
+        remaining_i
+        if may_spend and not preserves
+        else max(0, remaining_i - reserve)
+    )
+
+    if estimated_cost > remaining_i:
         return QuotaBudgetDecision(
             state=QuotaBudgetState.EXHAUSTED,
             estimated_cost=estimated_cost,
-            remaining=remaining,
+            remaining=remaining_i,
             run_reserve=reserve,
             spendable=spendable,
             reason="estimated_cost_exceeds_remaining",
             remaining_source=remaining_source,
+            purpose=purpose,
+            preserves_reserve=preserves,
         )
     if estimated_cost > spendable:
         return QuotaBudgetDecision(
             state=QuotaBudgetState.DEFERRED,
             estimated_cost=estimated_cost,
-            remaining=remaining,
+            remaining=remaining_i,
             run_reserve=reserve,
             spendable=spendable,
-            reason="estimated_cost_exceeds_spendable_after_run_reserve",
+            reason=(
+                "estimated_cost_exceeds_spendable_after_run_reserve"
+                if preserves
+                else "estimated_cost_exceeds_spendable"
+            ),
             remaining_source=remaining_source,
+            purpose=purpose,
+            preserves_reserve=preserves,
         )
     return QuotaBudgetDecision(
         state=QuotaBudgetState.ALLOWED,
         estimated_cost=estimated_cost,
-        remaining=remaining,
+        remaining=remaining_i,
         run_reserve=reserve,
         spendable=spendable,
-        reason="within_remaining_and_run_reserve",
+        reason=(
+            "within_remaining_including_reserve"
+            if may_spend and not preserves
+            else "within_remaining_and_run_reserve"
+        ),
         remaining_source=remaining_source,
+        purpose=purpose,
+        preserves_reserve=preserves,
     )
 
 
@@ -177,34 +203,44 @@ def plan_request_budget(
     session: Session | None,
     *,
     endpoint: str,
-    markets: str,
-    regions: str,
+    markets: str | None,
+    regions: str | None,
     provider: str,
     as_of: datetime,
+    purpose: RequestPurpose,
     contract: OddsScheduleContract | None = None,
     remaining_override: int | None = None,
 ) -> QuotaBudgetDecision:
     """Estimate cost and evaluate against persisted (or override) remaining."""
     sched = contract or load_default_schedule_contract()
+    markets_n = None if markets is None else normalize_markets(markets)
+    regions_n = None if regions is None else normalize_regions(regions)
     cost = estimate_endpoint_cost(
         endpoint=endpoint,
-        markets=markets,
-        regions=regions,
+        markets=markets_n,
+        regions=regions_n,
         contract=sched,
     )
     if remaining_override is not None:
-        remaining, source = int(remaining_override), "override"
+        if remaining_override < 0:
+            raise ValueError("remaining_override must be nonnegative")
+        remaining, source = int(remaining_override), "override_bounded"
+        allow_missing = True
     elif session is None:
         remaining, source = None, "no_session"
+        allow_missing = False
     else:
         remaining, source = latest_remaining_from_observations(
             session, provider=provider, as_of=as_of
         )
+        allow_missing = False
     return evaluate_quota_budget(
         estimated_cost=cost,
         remaining=remaining,
+        purpose=purpose,
         contract=sched,
         remaining_source=source,
+        allow_missing_remaining_override=allow_missing,
     )
 
 

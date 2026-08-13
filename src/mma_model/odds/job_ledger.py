@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +13,10 @@ from mma_model.odds.normalize import ensure_utc
 
 class JobLedgerDuplicate(RuntimeError):
     """Logical snapshot already succeeded for this idempotency key."""
+
+
+class JobLedgerTimeError(ValueError):
+    """Invalid explicit job timing / cutoff ordering."""
 
 
 def find_successful_run(
@@ -38,28 +42,31 @@ def record_job_run(
     event_id: str,
     mode: str,
     as_of: datetime,
+    finished_at: datetime,
     estimated_cost: int = 0,
     actual_cost: int | None = None,
+    actual_cost_source: str | None = None,
     requested_cutoff: datetime | None = None,
     snapshot_at: datetime | None = None,
     window_name: str | None = None,
     error_class: str | None = None,
     detail: str | None = None,
     started_at: datetime | None = None,
-    finished_at: datetime | None = None,
 ) -> OddsSnapshotJobRun:
-    """Persist a job run. Successful keys are unique; retries hit duplicate."""
+    """Persist a job run using explicit completion time (no hidden wall clock)."""
     stamp = ensure_utc(as_of, field="as_of")
     started = ensure_utc(started_at or stamp, field="started_at")
-    finished = (
-        None if finished_at is None else ensure_utc(finished_at, field="finished_at")
-    )
+    finished = ensure_utc(finished_at, field="finished_at")
+    if finished < started:
+        raise JobLedgerTimeError("finished_at must be >= started_at")
     cutoff = (
         None
         if requested_cutoff is None
         else ensure_utc(requested_cutoff, field="requested_cutoff")
     )
     snap = None if snapshot_at is None else ensure_utc(snapshot_at, field="snapshot_at")
+    if snap is not None and cutoff is not None and snap > cutoff:
+        raise JobLedgerTimeError("snapshot_at must be <= requested_cutoff")
 
     if status == "success":
         existing = find_successful_run(session, idempotency_key=idempotency_key)
@@ -70,6 +77,15 @@ def record_job_run(
         success_token = 1
     else:
         success_token = None
+
+    if actual_cost is not None and actual_cost < 0:
+        raise ValueError("actual_cost must be nonnegative when present")
+
+    source = actual_cost_source
+    if actual_cost is not None and source is None:
+        raise ValueError("actual_cost requires actual_cost_source provenance")
+    if actual_cost is None and source not in {None, "missing"}:
+        raise ValueError("missing actual_cost requires source None or 'missing'")
 
     row = OddsSnapshotJobRun(
         idempotency_key=idempotency_key,
@@ -87,44 +103,29 @@ def record_job_run(
         window_name=window_name,
         estimated_cost=int(estimated_cost),
         actual_cost=actual_cost,
+        actual_cost_source=source,
         error_class=error_class,
         detail=detail,
         started_at=started,
-        finished_at=finished or datetime.now(UTC),
+        finished_at=finished,
     )
     session.add(row)
     session.flush()
     return row
 
 
-def last_success_at_for_event(
+def slot_succeeded(
     session: Session,
     *,
-    event_id: str,
-    provider: str,
-    region: str,
-    markets: str,
-) -> datetime | None:
-    row = session.scalar(
-        select(OddsSnapshotJobRun)
-        .where(
-            OddsSnapshotJobRun.event_id == event_id,
-            OddsSnapshotJobRun.provider == provider,
-            OddsSnapshotJobRun.region == region,
-            OddsSnapshotJobRun.markets == markets,
-            OddsSnapshotJobRun.success_token == 1,
-        )
-        .order_by(OddsSnapshotJobRun.finished_at.desc(), OddsSnapshotJobRun.created_at.desc())
-        .limit(1)
-    )
-    if row is None or row.finished_at is None:
-        return None
-    return ensure_utc(row.finished_at, field="finished_at")
+    idempotency_key: str,
+) -> bool:
+    return find_successful_run(session, idempotency_key=idempotency_key) is not None
 
 
 __all__ = [
     "JobLedgerDuplicate",
+    "JobLedgerTimeError",
     "find_successful_run",
-    "last_success_at_for_event",
     "record_job_run",
+    "slot_succeeded",
 ]

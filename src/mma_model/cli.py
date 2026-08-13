@@ -46,9 +46,19 @@ from mma_model.odds.price_guidance import (
 )
 from mma_model.odds.reconcile import OddsReconcileError, run_odds_reconcile
 from mma_model.odds.backfill import run_odds_backfill
-from mma_model.odds.events_for_schedule import load_dwcs_schedule_events
+from mma_model.odds.events_for_schedule import (
+    load_dwcs_schedule_events,
+    load_upcoming_dwcs_events_from_db,
+)
+from mma_model.odds.job_ledger import slot_succeeded
+from mma_model.odds.quota_budget import (
+    QuotaBudgetState,
+    plan_request_budget,
+)
 from mma_model.odds.schedule import (
     DueAction,
+    RequestPurpose,
+    compute_due_work,
     compute_due_work_for_events,
 )
 from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
@@ -337,6 +347,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional cap on events for smoke/offline runs",
     )
+    p_odds_backfill.add_argument(
+        "--remaining-override",
+        type=int,
+        default=None,
+        help="Explicit bounded remaining-credits override when provenance is unknown",
+    )
 
     p_odds_due = odds_sub.add_parser(
         "due",
@@ -357,6 +373,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional single event start ISO when --event-id is synthetic",
     )
+    p_odds_due.add_argument(
+        "--database-url",
+        default=None,
+        help="Target DB for canonical upcoming DWCS events (required unless synthetic --event-id/--event-start)",
+    )
+    p_odds_due.add_argument(
+        "--remaining-override",
+        type=int,
+        default=None,
+        help="Explicit bounded remaining-credits override when provenance is unknown",
+    )
 
     p_jobs = sub.add_parser("jobs", help="Host-scheduled job entrypoints (DWCS-205)")
     jobs_sub = p_jobs.add_subparsers(dest="jobs_cmd", required=True)
@@ -374,6 +401,12 @@ def main(argv: list[str] | None = None) -> int:
     p_jobs_snap.add_argument("--lock-path", type=Path, default=None)
     p_jobs_snap.add_argument("--dry-run", action="store_true")
     p_jobs_snap.add_argument("--limit-events", type=int, default=None)
+    p_jobs_snap.add_argument(
+        "--remaining-override",
+        type=int,
+        default=None,
+        help="Explicit bounded remaining-credits override when provenance is unknown",
+    )
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
     p_train.add_argument(
@@ -705,29 +738,106 @@ def main(argv: list[str] | None = None) -> int:
                 print("--as-of must be timezone-aware UTC")
                 return 2
             event_ids = getattr(args, "event_id", None) or []
-            if event_ids and getattr(args, "event_start", None):
+            event_start = getattr(args, "event_start", None)
+            database_url = getattr(args, "database_url", None)
+            remaining_override = getattr(args, "remaining_override", None)
+            engine = None
+            SessionLocal = None
+            if event_ids and event_start:
+                # Synthetic single-event path for offline/unit checks only.
                 events = [
                     {
                         "event_id": event_ids[0],
-                        "event_start": args.event_start,
+                        "event_start": event_start,
                     }
                 ]
-            elif event_ids:
-                all_events = load_dwcs_schedule_events()
-                wanted = set(event_ids)
-                events = [e for e in all_events if e["event_id"] in wanted]
             else:
-                events = load_dwcs_schedule_events()
-            items = compute_due_work_for_events(
-                as_of=as_of_dt,
-                events=events,
-                provider="the_odds_api",
-                markets=args.markets,
-                region=parse_single_region(args.regions),
-            )
+                if not database_url:
+                    print(
+                        "odds due requires --database-url for canonical upcoming "
+                        "DWCS events (or synthetic --event-id with --event-start)"
+                    )
+                    return 2
+                db_url = str(database_url).strip()
+                engine = create_engine(db_url, future=True)
+                _attach_sqlite_listeners(engine)
+                SessionLocal = sessionmaker(bind=engine, future=True)
+                with SessionLocal() as session:
+                    events = load_upcoming_dwcs_events_from_db(
+                        session, as_of=as_of_dt, series=args.series
+                    )
+                if event_ids:
+                    wanted = set(event_ids)
+                    events = [e for e in events if e["event_id"] in wanted]
+
+            # Per-event success + purpose-aware quota (DB-backed live path).
+            succeeded: dict[str, bool] = {}
+            items_list = []
+            if SessionLocal is not None:
+                with SessionLocal() as session:
+                    for event in events:
+                        event_id = str(event["event_id"])
+                        event_start = event["event_start"]
+                        provisional = compute_due_work(
+                            as_of=as_of_dt,
+                            event_id=event_id,
+                            event_start=event_start,
+                            slot_already_succeeded=False,
+                            provider="the_odds_api",
+                            markets=args.markets,
+                            region=parse_single_region(args.regions),
+                        )
+                        key = provisional.idempotency_key or ""
+                        already = bool(
+                            key and slot_succeeded(session, idempotency_key=key)
+                        )
+                        if key:
+                            succeeded[key] = already
+                        purpose = provisional.purpose or RequestPurpose.LIVE_ORDINARY
+                        budget = plan_request_budget(
+                            session,
+                            endpoint="current_odds",
+                            markets=args.markets,
+                            regions=parse_single_region(args.regions),
+                            provider="the_odds_api",
+                            as_of=as_of_dt,
+                            purpose=purpose,
+                            remaining_override=remaining_override,
+                        )
+                        quota_state = None
+                        if budget.state == QuotaBudgetState.EXHAUSTED:
+                            quota_state = "exhausted"
+                        elif budget.state == QuotaBudgetState.DEFERRED:
+                            quota_state = "deferred"
+                        items_list.append(
+                            compute_due_work(
+                                as_of=as_of_dt,
+                                event_id=event_id,
+                                event_start=event_start,
+                                slot_already_succeeded=already,
+                                provider="the_odds_api",
+                                markets=args.markets,
+                                region=parse_single_region(args.regions),
+                                quota_state=quota_state,
+                            )
+                        )
+                items = tuple(items_list)
+            else:
+                items = compute_due_work_for_events(
+                    as_of=as_of_dt,
+                    events=events,
+                    slot_succeeded_keys=succeeded,
+                    provider="the_odds_api",
+                    markets=args.markets,
+                    region=parse_single_region(args.regions),
+                    quota_state=None,
+                )
+            if engine is not None:
+                engine.dispose()
             payload = {
                 "as_of": as_of_dt.isoformat().replace("+00:00", "Z"),
                 "series": args.series,
+                "upcoming_event_count": len(events),
                 "due": [
                     {
                         "event_id": item.event_id,
@@ -736,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
                         "window_name": item.window_name,
                         "idempotency_key": item.idempotency_key,
                         "estimated_cost": item.estimated_cost,
+                        "purpose": None if item.purpose is None else item.purpose.value,
                     }
                     for item in items
                     if item.action == DueAction.DUE
@@ -744,9 +855,14 @@ def main(argv: list[str] | None = None) -> int:
                 "deferred_quota": sum(
                     1 for item in items if item.action == DueAction.DEFERRED_QUOTA
                 ),
+                "exhausted_quota": sum(
+                    1 for item in items if item.action == DueAction.EXHAUSTED_QUOTA
+                ),
                 "total": len(items),
             }
-            print(json.dumps(payload, indent=2))
+            if not events:
+                payload["reason"] = "canonical_db_returned_zero_upcoming_dwcs_events"
+            print(json.dumps(payload, indent=2, default=str))
             return 0
 
         if odds_cmd == "backfill":
@@ -795,12 +911,14 @@ def main(argv: list[str] | None = None) -> int:
                     from_year=int(args.from_year),
                     events=events,
                     as_of=as_of_dt,
+                    finished_at=as_of_dt,
                     markets=args.markets,
                     region=parse_single_region(args.regions),
                     offline_fixtures=offline,
                     fixture_dir=fixture_dir,
                     evaluation_contract_path=Path(args.contract),
                     execute=not bool(getattr(args, "dry_run", False)),
+                    remaining_override=getattr(args, "remaining_override", None),
                 )
                 session.commit()
             engine.dispose()
@@ -1104,10 +1222,6 @@ def main(argv: list[str] | None = None) -> int:
             offline = bool(getattr(args, "offline_fixtures", False))
             fixture_dir = getattr(args, "fixture_dir", None)
             database_url = getattr(args, "database_url", None)
-            events = load_dwcs_schedule_events()
-            limit = getattr(args, "limit_events", None)
-            if limit is not None:
-                events = events[: int(limit)]
             if offline:
                 db_url = require_disposable_database_url(database_url)
             elif database_url:
@@ -1124,9 +1238,16 @@ def main(argv: list[str] | None = None) -> int:
             command.upgrade(cfg, "head")
             SessionLocal = sessionmaker(bind=engine, future=True)
             with SessionLocal() as session:
+                events = load_upcoming_dwcs_events_from_db(
+                    session, as_of=as_of_dt, series=args.series
+                )
+                limit = getattr(args, "limit_events", None)
+                if limit is not None:
+                    events = events[: int(limit)]
                 result = run_snapshot_odds_job(
                     session,
                     as_of=as_of_dt,
+                    finished_at=as_of_dt,
                     events=events,
                     markets=args.markets,
                     region=parse_single_region(args.regions),
@@ -1134,10 +1255,12 @@ def main(argv: list[str] | None = None) -> int:
                     offline_fixtures=offline,
                     fixture_dir=fixture_dir,
                     execute=not bool(getattr(args, "dry_run", False)),
+                    remaining_override=getattr(args, "remaining_override", None),
                 )
                 session.commit()
             engine.dispose()
             print(json.dumps(result.as_dict(), indent=2))
+            # Zero upcoming is an explicit report, not a silent success with frozen history.
             return 0 if result.failures == 0 else 2
         print(f"unsupported jobs command: {args.jobs_cmd}")
         return 1

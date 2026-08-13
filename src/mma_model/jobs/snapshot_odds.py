@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -16,22 +17,34 @@ from mma_model.jobs.locking import (
     hold_overlap_lock,
 )
 from mma_model.odds.job_ledger import (
-    JobLedgerDuplicate,
     find_successful_run,
-    last_success_at_for_event,
     record_job_run,
+    slot_succeeded,
 )
 from mma_model.odds.normalize import ensure_utc
-from mma_model.odds.quota_budget import QuotaBudgetState, plan_request_budget
+from mma_model.odds.quota_budget import (
+    QuotaBudgetState,
+    cost_from_quota_headers,
+    plan_request_budget,
+)
 from mma_model.odds.schedule import (
     DueAction,
     DueWorkItem,
     OddsScheduleContract,
+    RequestPurpose,
     compute_due_work,
     load_default_schedule_contract,
+    normalize_markets,
+    normalize_regions,
 )
 from mma_model.odds.snapshot import run_odds_snapshot
-from mma_model.odds.types import PROVIDER_THE_ODDS_API
+from mma_model.odds.types import (
+    REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+    REQUESTS_LAST_SOURCE_MISSING,
+    REQUESTS_LAST_SOURCE_PROVIDER,
+    PROVIDER_THE_ODDS_API,
+    QuotaHeaders,
+)
 
 
 @dataclass(frozen=True)
@@ -42,30 +55,45 @@ class SnapshotOddsJobResult:
     due: int
     no_op: int
     deferred: int
+    exhausted: int
     duplicates: int
     failures: int
+    batches: int
+    upcoming_event_count: int
     items: tuple[dict[str, Any], ...]
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _quota_allows(
-    session: Session,
-    *,
-    item: DueWorkItem,
-    contract: OddsScheduleContract,
-) -> bool:
-    decision = plan_request_budget(
-        session,
-        endpoint="current_odds",
-        markets=item.markets,
-        regions=item.region,
-        provider=PROVIDER_THE_ODDS_API,
-        as_of=item.as_of,
-        contract=contract,
+def _parse_event_start(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return ensure_utc(value, field="event_start")
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    return ensure_utc(datetime.fromisoformat(text), field="event_start")
+
+
+def _quota_headers_from_result(quota: Mapping[str, Any]) -> QuotaHeaders:
+    source = str(quota.get("requests_last_source") or REQUESTS_LAST_SOURCE_MISSING)
+    return QuotaHeaders(
+        requests_remaining=quota.get("x-requests-remaining"),
+        requests_used=quota.get("x-requests-used"),
+        requests_last=quota.get("x-requests-last"),
+        requests_last_inferred=quota.get("requests_last_inferred"),
+        requests_last_source=source,
     )
-    return decision.state == QuotaBudgetState.ALLOWED
+
+
+def _actual_cost_fields(quota: Mapping[str, Any]) -> tuple[int | None, str]:
+    headers = _quota_headers_from_result(quota)
+    cost = cost_from_quota_headers(headers)
+    if headers.requests_last_source == REQUESTS_LAST_SOURCE_PROVIDER:
+        return cost, "provider"
+    if headers.requests_last_source == REQUESTS_LAST_SOURCE_INFERRED_EMPTY:
+        return 0, "inferred_empty_zero"
+    return None, "missing"
 
 
 def run_snapshot_odds_job(
@@ -73,6 +101,7 @@ def run_snapshot_odds_job(
     *,
     as_of: datetime,
     events: Sequence[Mapping[str, Any]],
+    finished_at: datetime | None = None,
     lock: OverlapProtection | None = None,
     lock_path: Path | None = None,
     contract: OddsScheduleContract | None = None,
@@ -81,19 +110,22 @@ def run_snapshot_odds_job(
     offline_fixtures: bool = False,
     fixture_dir: Path | None = None,
     execute: bool = True,
+    remaining_override: int | None = None,
 ) -> SnapshotOddsJobResult:
-    """Evaluate due work and optionally execute snapshots under one-writer lock."""
+    """Evaluate due work and execute batched sport-wide snapshots under flock.
+
+    ``events`` must already be canonical upcoming rows from the target DB.
+    Empty upcoming input is reported explicitly (not a silent success).
+    """
     sched = contract or load_default_schedule_contract()
     stamp = ensure_utc(as_of, field="as_of")
-    markets_v = markets or sched.default_markets
-    region_v = region or sched.default_region
+    completion = ensure_utc(finished_at or stamp, field="finished_at")
+    markets_v = normalize_markets(markets or sched.default_markets)
+    region_v = normalize_regions(region or sched.default_region)
 
-    active_lock: OverlapProtection
-    if lock is not None:
-        active_lock = lock
-    else:
-        path = lock_path or Path("/tmp") / "mma-snapshot-odds.lock"
-        active_lock = FileFlockLock(path)
+    active_lock: OverlapProtection = lock or FileFlockLock(
+        lock_path or Path("/tmp") / "mma-snapshot-odds.lock"
+    )
 
     item_rows: list[dict[str, Any]] = []
     counts = {
@@ -101,68 +133,95 @@ def run_snapshot_odds_job(
         "due": 0,
         "no_op": 0,
         "deferred": 0,
+        "exhausted": 0,
         "duplicates": 0,
         "failures": 0,
+        "batches": 0,
     }
 
+    if not events:
+        return SnapshotOddsJobResult(
+            as_of=stamp.isoformat().replace("+00:00", "Z"),
+            action="snapshot-odds",
+            processed=0,
+            due=0,
+            no_op=0,
+            deferred=0,
+            exhausted=0,
+            duplicates=0,
+            failures=0,
+            batches=0,
+            upcoming_event_count=0,
+            items=(
+                {
+                    "action": "no_upcoming_events",
+                    "reason": "canonical_db_returned_zero_upcoming_dwcs_events",
+                },
+            ),
+        )
+
     with hold_overlap_lock(active_lock):
+        due_items: list[DueWorkItem] = []
         for event in events:
             event_id = str(event["event_id"])
-            event_start = event["event_start"]
-            if isinstance(event_start, str):
-                from datetime import datetime as _dt
-
-                raw = event_start.strip()
-                if raw.endswith("Z"):
-                    raw = raw[:-1] + "+00:00"
-                event_start = ensure_utc(_dt.fromisoformat(raw), field="event_start")
-            else:
-                event_start = ensure_utc(event_start, field="event_start")
-
-            last_success = last_success_at_for_event(
-                session,
-                event_id=event_id,
-                provider=PROVIDER_THE_ODDS_API,
-                region=region_v,
-                markets=markets_v,
-            )
-            # Provisional due calc; final-hour may flip to deferred after budget.
+            event_start = _parse_event_start(event["event_start"])
             provisional = compute_due_work(
                 as_of=stamp,
                 event_id=event_id,
                 event_start=event_start,
-                last_success_at=last_success,
+                slot_already_succeeded=False,
                 provider=PROVIDER_THE_ODDS_API,
                 markets=markets_v,
                 region=region_v,
                 contract=sched,
-                quota_allows=True,
             )
-            quota_ok = True
-            if provisional.requires_quota_headroom or provisional.action == DueAction.DUE:
-                quota_ok = _quota_allows(session, item=provisional, contract=sched)
+            succeeded = bool(
+                provisional.idempotency_key
+                and slot_succeeded(session, idempotency_key=provisional.idempotency_key)
+            )
+            purpose = provisional.purpose or RequestPurpose.LIVE_ORDINARY
+            budget = plan_request_budget(
+                session,
+                endpoint="current_odds",
+                markets=markets_v,
+                regions=region_v,
+                provider=PROVIDER_THE_ODDS_API,
+                as_of=stamp,
+                purpose=purpose,
+                contract=sched,
+                remaining_override=remaining_override,
+            )
+            quota_state = None
+            if budget.state == QuotaBudgetState.EXHAUSTED:
+                quota_state = "exhausted"
+            elif budget.state == QuotaBudgetState.DEFERRED:
+                quota_state = "deferred"
+
             item = compute_due_work(
                 as_of=stamp,
                 event_id=event_id,
                 event_start=event_start,
-                last_success_at=last_success,
+                slot_already_succeeded=succeeded,
                 provider=PROVIDER_THE_ODDS_API,
                 markets=markets_v,
                 region=region_v,
                 contract=sched,
-                quota_allows=quota_ok,
+                quota_state=quota_state,
             )
-
+            counts["processed"] += 1
             row: dict[str, Any] = {
                 "event_id": event_id,
                 "action": item.action.value,
                 "reason": item.reason,
                 "window_name": item.window_name,
+                "slot_start": None
+                if item.slot_start is None
+                else item.slot_start.isoformat().replace("+00:00", "Z"),
                 "idempotency_key": item.idempotency_key,
+                "batch_key": item.batch_key,
                 "estimated_cost": item.estimated_cost,
+                "purpose": None if item.purpose is None else item.purpose.value,
             }
-            counts["processed"] += 1
-
             if item.action == DueAction.NO_OP:
                 counts["no_op"] += 1
                 item_rows.append(row)
@@ -184,6 +243,28 @@ def run_snapshot_odds_job(
                     event_id=event_id,
                     mode=f"live:{item.window_name}",
                     as_of=stamp,
+                    finished_at=completion,
+                    estimated_cost=item.estimated_cost,
+                    window_name=item.window_name,
+                    detail=item.reason,
+                )
+                item_rows.append(row)
+                continue
+            if item.action == DueAction.EXHAUSTED_QUOTA:
+                counts["exhausted"] += 1
+                assert item.idempotency_key is not None
+                record_job_run(
+                    session,
+                    idempotency_key=item.idempotency_key,
+                    job_name="snapshot-odds",
+                    status="exhausted",
+                    provider=PROVIDER_THE_ODDS_API,
+                    region=region_v,
+                    markets=markets_v,
+                    event_id=event_id,
+                    mode=f"live:{item.window_name}",
+                    as_of=stamp,
+                    finished_at=completion,
                     estimated_cost=item.estimated_cost,
                     window_name=item.window_name,
                     detail=item.reason,
@@ -191,56 +272,36 @@ def run_snapshot_odds_job(
                 item_rows.append(row)
                 continue
 
-            # DUE
             counts["due"] += 1
-            assert item.idempotency_key is not None
-            prior = find_successful_run(session, idempotency_key=item.idempotency_key)
-            if prior is not None:
-                counts["duplicates"] += 1
-                row["action"] = "duplicate"
-                record_job_run(
-                    session,
-                    idempotency_key=item.idempotency_key,
-                    job_name="snapshot-odds",
-                    status="duplicate",
-                    provider=PROVIDER_THE_ODDS_API,
-                    region=region_v,
-                    markets=markets_v,
-                    event_id=event_id,
-                    mode=f"live:{item.window_name}",
-                    as_of=stamp,
-                    estimated_cost=item.estimated_cost,
-                    window_name=item.window_name,
-                    detail="prior_success",
-                )
-                item_rows.append(row)
-                continue
+            due_items.append(item)
+            item_rows.append(row)
 
-            if not execute:
-                item_rows.append(row)
-                continue
+        if not execute:
+            return SnapshotOddsJobResult(
+                as_of=stamp.isoformat().replace("+00:00", "Z"),
+                action="snapshot-odds",
+                processed=counts["processed"],
+                due=counts["due"],
+                no_op=counts["no_op"],
+                deferred=counts["deferred"],
+                exhausted=counts["exhausted"],
+                duplicates=counts["duplicates"],
+                failures=counts["failures"],
+                batches=0,
+                upcoming_event_count=len(events),
+                items=tuple(item_rows),
+            )
 
-            if not quota_ok:
-                counts["deferred"] += 1
-                record_job_run(
-                    session,
-                    idempotency_key=item.idempotency_key,
-                    job_name="snapshot-odds",
-                    status="deferred_quota",
-                    provider=PROVIDER_THE_ODDS_API,
-                    region=region_v,
-                    markets=markets_v,
-                    event_id=event_id,
-                    mode=f"live:{item.window_name}",
-                    as_of=stamp,
-                    estimated_cost=item.estimated_cost,
-                    window_name=item.window_name,
-                    detail="budget_blocked_before_execute",
-                )
-                row["action"] = DueAction.DEFERRED_QUOTA.value
-                item_rows.append(row)
-                continue
+        batches: dict[str, list[DueWorkItem]] = defaultdict(list)
+        for item in due_items:
+            assert item.batch_key is not None
+            batches[item.batch_key].append(item)
 
+        for batch_key, members in batches.items():
+            counts["batches"] += 1
+            representative = members[0]
+            # One sport-wide provider call per batch.
+            nested = session.begin_nested()
             try:
                 result = run_odds_snapshot(
                     session,
@@ -253,50 +314,75 @@ def run_snapshot_odds_job(
                     offline_fixtures=offline_fixtures,
                     observed_at=stamp,
                 )
-                expected = result.quota.get("expected_cost")
-                actual = 0 if expected is None else int(expected)
-                record_job_run(
-                    session,
-                    idempotency_key=item.idempotency_key,
-                    job_name="snapshot-odds",
-                    status="success",
-                    provider=PROVIDER_THE_ODDS_API,
-                    region=region_v,
-                    markets=markets_v,
-                    event_id=event_id,
-                    mode=f"live:{item.window_name}",
-                    as_of=stamp,
-                    estimated_cost=item.estimated_cost,
-                    actual_cost=actual,
-                    window_name=item.window_name,
-                    detail=f"inserted={result.inserted};deduped={result.deduped}",
-                )
-                row["inserted"] = result.inserted
-                row["actual_cost"] = actual
-            except JobLedgerDuplicate:
-                counts["duplicates"] += 1
-                row["action"] = "duplicate"
-            except Exception as exc:  # noqa: BLE001 — job boundary records class
-                counts["failures"] += 1
-                record_job_run(
-                    session,
-                    idempotency_key=item.idempotency_key,
-                    job_name="snapshot-odds",
-                    status="failed",
-                    provider=PROVIDER_THE_ODDS_API,
-                    region=region_v,
-                    markets=markets_v,
-                    event_id=event_id,
-                    mode=f"live:{item.window_name}",
-                    as_of=stamp,
-                    estimated_cost=item.estimated_cost,
-                    window_name=item.window_name,
-                    error_class=type(exc).__name__,
-                    detail=str(exc)[:500],
-                )
-                row["action"] = "failed"
-                row["error_class"] = type(exc).__name__
-            item_rows.append(row)
+                actual, source = _actual_cost_fields(result.quota)
+                for member in members:
+                    assert member.idempotency_key is not None
+                    if find_successful_run(
+                        session, idempotency_key=member.idempotency_key
+                    ):
+                        counts["duplicates"] += 1
+                        record_job_run(
+                            session,
+                            idempotency_key=member.idempotency_key,
+                            job_name="snapshot-odds",
+                            status="duplicate",
+                            provider=PROVIDER_THE_ODDS_API,
+                            region=region_v,
+                            markets=markets_v,
+                            event_id=member.event_id,
+                            mode=f"live:{member.window_name}",
+                            as_of=stamp,
+                            finished_at=completion,
+                            estimated_cost=0,
+                            window_name=member.window_name,
+                            detail=f"prior_success;batch={batch_key}",
+                        )
+                        continue
+                    is_primary = member is representative
+                    record_job_run(
+                        session,
+                        idempotency_key=member.idempotency_key,
+                        job_name="snapshot-odds",
+                        status="success",
+                        provider=PROVIDER_THE_ODDS_API,
+                        region=region_v,
+                        markets=markets_v,
+                        event_id=member.event_id,
+                        mode=f"live:{member.window_name}",
+                        as_of=stamp,
+                        finished_at=completion,
+                        estimated_cost=member.estimated_cost if is_primary else 0,
+                        actual_cost=actual if is_primary else None,
+                        actual_cost_source=source if is_primary else None,
+                        window_name=member.window_name,
+                        detail=(
+                            f"batch={batch_key};inserted={result.inserted};"
+                            f"deduped={result.deduped}"
+                        ),
+                    )
+                nested.commit()
+            except Exception as exc:  # noqa: BLE001 — job boundary
+                nested.rollback()
+                counts["failures"] += len(members)
+                for member in members:
+                    assert member.idempotency_key is not None
+                    record_job_run(
+                        session,
+                        idempotency_key=member.idempotency_key,
+                        job_name="snapshot-odds",
+                        status="failed",
+                        provider=PROVIDER_THE_ODDS_API,
+                        region=region_v,
+                        markets=markets_v,
+                        event_id=member.event_id,
+                        mode=f"live:{member.window_name}",
+                        as_of=stamp,
+                        finished_at=completion,
+                        estimated_cost=member.estimated_cost,
+                        window_name=member.window_name,
+                        error_class=type(exc).__name__,
+                        detail=str(exc)[:500],
+                    )
 
     return SnapshotOddsJobResult(
         as_of=stamp.isoformat().replace("+00:00", "Z"),
@@ -305,8 +391,11 @@ def run_snapshot_odds_job(
         due=counts["due"],
         no_op=counts["no_op"],
         deferred=counts["deferred"],
+        exhausted=counts["exhausted"],
         duplicates=counts["duplicates"],
         failures=counts["failures"],
+        batches=counts["batches"],
+        upcoming_event_count=len(events),
         items=tuple(item_rows),
     )
 

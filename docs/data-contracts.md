@@ -336,13 +336,16 @@ never receive synthetic betting performance.
 
 | Concern | Contract |
 |---------|----------|
-| **Cadence** | Event-relative half-open UTC windows: T−72h→−24h /30m; −24h→−6h /10m; −6h→−1h /5m; final hour /2m when quota permits. Outside `[T−72h, T)` is a deterministic no-op. |
-| **Due work** | Pure functions take explicit UTC `as_of`, event start, last success, provider/market/region — no hidden wall-clock. |
-| **Quota** | Cost from The Odds API contract (`current`=1×markets×regions; `historical`=10×markets×regions) plus persisted raw/inferred quota provenance. Never exceed monthly limit / run reserve; explicit `deferred` / `exhausted`. |
-| **Overlap + idempotency** | One-writer flock interface; durable `idempotency_key` so retries do not duplicate logical snapshots. |
-| **Historical cutoff** | Requested historical timestamp is a strict upper bound; `snapshot_at` must be `<=` cutoff or fail closed. Sparse checkpoints first: T−24h / T−6h / T−1h / close-proxy from 2020. |
-| **Coverage/cost** | Reports by card/book/market/time separate `absent`, `failed`, `deferred_quota`, `unmatched`, `observed`. |
-| **Archive** | Optional `bestfightodds_archive` reconciliation only as public historical odds (never stats/PIT evidence, never sportsbook-page scraping). Licensed bookmaker history refused unless DWCS-202 authorizes. |
-| **CLI** | `mma-model odds backfill --series dwcs --from 2020 --contract config/evaluation/dwcs_v1.json`; `mma-model odds due --as-of …`; `mma-model jobs snapshot-odds --as-of …`. |
+| **Cadence** | Event-relative half-open UTC windows: T−72h→−24h /30m; −24h→−6h /10m; −6h→−1h /5m; final hour /2m when quota permits. Slots are anchored at each window start (not Unix epoch). Outside `[T−72h, T)` is a deterministic no-op. |
+| **Live events** | Live due/job paths query canonical upcoming/scheduled DWCS rows from the target DB (with as_of horizon). Frozen 2017–2025 manifest is historical backfill only. Zero upcoming is reported explicitly. |
+| **Due work** | Pure functions take explicit UTC `as_of`, event start, per-window slot success, provider/market/region — no hidden wall-clock. Logical success time is explicit `finished_at` (CLI defaults to `as_of`). |
+| **Quota** | Cost from The Odds API contract (`current`=1×markets×regions; `historical`=10×markets×regions; fixed endpoints need no market/region counts) plus persisted remaining provenance. Missing remaining fails closed (defer) unless an explicit bounded operator override is supplied. Backfill/ordinary live preserve `run_reserve`; final-hour live may spend reserve but never exceed actual remaining. Distinguish `deferred` vs `exhausted`. Unknown actual cost stays `None` with provenance (never invent `0`). |
+| **Overlap + idempotency** | One-writer flock; durable per-event idempotency keys; one sport-wide provider call per batch key (provider/region/markets/mode/slot). |
+| **Historical cutoff** | `snapshot_at <= requested_cutoff <= as_of` or fail closed. Future checkpoints after `as_of` are skipped. Sparse checkpoints: T−24h / T−6h / T−1h / close-proxy from 2020. |
+| **Transactions** | Each logical snapshot + success ledger claim runs in a savepoint; failures roll back snapshot writes, then record failure outside the savepoint. |
+| **Coverage/cost** | Reports by card/book/market/time separate `absent`, `failed`, `deferred_quota`, `unmatched`, `observed`. Per-book cells come from quotes + DWCS-203 alias presence; scheduling alone is not value eligibility. |
+| **Archive** | Optional `bestfightodds_archive` HTTPS odds-archive reconciliation only (exact host, no credentials; never stats/PIT evidence, never sportsbook-page scraping). Licensed bookmaker history refused unless DWCS-202 authorizes. |
+| **Schedule contract** | Pinned digest + deep cadence/quota/source-policy validation; plan-visible `config/odds/schedule_v1.yaml` bytes must match packaged resource. |
+| **CLI** | `mma-model odds backfill --series dwcs --from 2020 --as-of … --contract config/evaluation/dwcs_v1.json`; `mma-model odds due --as-of … --database-url …`; `mma-model jobs snapshot-odds --as-of … --database-url …`. |
 
 Exact bookmaker lines remain optional enrichment; sportsbook-agnostic actionable guidance remains the mandatory fallback. Quote value still requires matched alias + quote-level eligibility (DWCS-203/204) — scheduling alone never confers value.

@@ -60,7 +60,17 @@ sparse_backfill_checkpoints:
 quota:
   monthly_limit: 20000
   # Credits reserved so live final-hour polls are not starved by backfill.
+  # Backfill / ordinary live must preserve this reserve. Final-hour live may
+  # spend the reserved pool but still never exceed actual remaining.
   run_reserve: 200
+  preserve_reserve_for:
+    - backfill
+    - live_ordinary
+  may_spend_reserve_for:
+    - live_final
+  # Paid requests fail closed when remaining provenance is unknown unless an
+  # explicit bounded operator override is supplied at the call site.
+  missing_remaining_policy: defer_fail_closed
   # Provider contract (The Odds API v4):
   #   current_odds: 1 × markets × regions
   #   historical_odds: 10 × markets × regions

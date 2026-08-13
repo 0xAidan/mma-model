@@ -42,6 +42,7 @@ def upgrade() -> None:
         sa.Column("window_name", sa.String(length=32), nullable=True),
         sa.Column("estimated_cost", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("actual_cost", sa.Integer(), nullable=True),
+        sa.Column("actual_cost_source", sa.String(length=64), nullable=True),
         sa.Column("error_class", sa.String(length=64), nullable=True),
         sa.Column("detail", sa.Text(), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
@@ -54,6 +55,17 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "estimated_cost >= 0 AND (actual_cost IS NULL OR actual_cost >= 0)",
             name="ck_odds_snapshot_job_runs_costs",
+        ),
+        sa.CheckConstraint(
+            "("
+            "actual_cost_source IS NULL AND actual_cost IS NULL"
+            ") OR ("
+            "actual_cost_source IN ('provider', 'inferred_empty_zero') "
+            "AND actual_cost IS NOT NULL"
+            ") OR ("
+            "actual_cost_source = 'missing' AND actual_cost IS NULL"
+            ")",
+            name="ck_odds_snapshot_job_runs_actual_cost_provenance",
         ),
         sa.CheckConstraint(
             "length(trim(idempotency_key)) > 0",

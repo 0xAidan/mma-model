@@ -3,22 +3,33 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import sessionmaker
 
 from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners
+from mma_model.db.tables.core import CanonicalEvent
+from mma_model.db.tables.odds import OddsQuotaObservation
+from mma_model.db.tables.odds_jobs import OddsSnapshotJobRun
 from mma_model.jobs.locking import FileFlockLock, OverlapError, hold_overlap_lock
 from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
 from mma_model.odds.backfill import run_odds_backfill
 from mma_model.odds.coverage_report import CoverageCell, build_odds_coverage_report
+from mma_model.odds.events_for_schedule import (
+    classify_event_status_for_tests,
+    load_dwcs_schedule_events,
+    load_upcoming_dwcs_events_from_db,
+)
 from mma_model.odds.job_ledger import (
     JobLedgerDuplicate,
+    JobLedgerTimeError,
     find_successful_run,
     record_job_run,
 )
@@ -26,29 +37,43 @@ from mma_model.odds.normalize import OddsTimestampError
 from mma_model.odds.provider_decision import LicensedBookmakerAdapterError
 from mma_model.odds.quota_budget import (
     QuotaBudgetState,
+    cost_from_quota_headers,
     evaluate_quota_budget,
     plan_request_budget,
 )
 from mma_model.odds.schedule import (
+    PINNED_SCHEDULE_CONTRACT_HASH,
     DueAction,
+    RequestPurpose,
+    ScheduleContractError,
     SnapshotCutoffError,
+    assert_plan_visible_schedule_bytes_match,
     assert_snapshot_at_or_before,
+    compute_batch_key,
     compute_due_work,
     compute_idempotency_key,
     estimate_endpoint_cost,
     load_schedule_contract,
+    normalize_markets,
+    normalize_regions,
     resolve_cadence_window,
     slot_floor,
+    slot_floor_in_window,
     sparse_checkpoint_cutoff,
+    window_bounds,
 )
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.types import (
+    REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+    REQUESTS_LAST_SOURCE_MISSING,
     REQUESTS_LAST_SOURCE_PROVIDER,
     QuotaHeaders,
 )
 from mma_model.sources.bestfightodds.reconcile import (
+    BestFightOddsPolicyError,
     reconcile_bestfightodds_archive,
     refuse_licensed_bookmaker_history_without_contract,
+    validate_bestfightodds_archive_url,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "odds"
@@ -65,8 +90,6 @@ def session(tmp_path: Path):
     db_url = f"sqlite:///{tmp_path / 'odds-schedule.db'}"
     engine = create_engine(db_url, future=True)
     _attach_sqlite_listeners(engine)
-
-
     root = get_settings().project_root
     cfg = Config(str(root / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "migrations"))
@@ -78,7 +101,30 @@ def session(tmp_path: Path):
     engine.dispose()
 
 
-def test_schedule_contract_cadence_matches_plan(schedule):
+def _seed_event(
+    session,
+    *,
+    event_id: str,
+    start: datetime,
+    status: str = "scheduled",
+    series: str = "dwcs",
+    name: str = "DWCS Test",
+) -> None:
+    session.add(
+        CanonicalEvent(
+            id=event_id,
+            name=name,
+            series=series,
+            status=status,
+            scheduled_start_at=start,
+        )
+    )
+    session.flush()
+
+
+def test_schedule_contract_pinned_and_deep(schedule):
+    assert schedule.content_hash == PINNED_SCHEDULE_CONTRACT_HASH
+    assert_plan_visible_schedule_bytes_match()
     by_name = {w.name: w for w in schedule.cadence_windows}
     assert by_name["far"].interval_sec == 1800
     assert by_name["mid"].interval_sec == 600
@@ -87,6 +133,12 @@ def test_schedule_contract_cadence_matches_plan(schedule):
     assert by_name["final"].requires_quota_headroom is True
     names = [c.name for c in schedule.sparse_backfill_checkpoints]
     assert names == ["t_minus_24h", "t_minus_6h", "t_minus_1h", "close_proxy"]
+    with pytest.raises(TypeError):
+        schedule.quota.cost_fixed["events"] = 9  # type: ignore[index]
+    with pytest.raises(ScheduleContractError):
+        load_schedule_contract(
+            raw_bytes=schedule.raw_bytes.replace(b"1.0.0", b"9.9.9", 1)
+        )
 
 
 @pytest.mark.parametrize(
@@ -94,7 +146,7 @@ def test_schedule_contract_cadence_matches_plan(schedule):
     [
         (timedelta(hours=80), None),
         (timedelta(hours=48), "far"),
-        (timedelta(hours=24), "mid"),  # inclusive start of mid
+        (timedelta(hours=24), "mid"),
         (timedelta(hours=12), "mid"),
         (timedelta(hours=6), "near"),
         (timedelta(hours=2), "near"),
@@ -119,7 +171,7 @@ def test_due_work_no_op_outside_window(schedule):
         as_of=event_start - timedelta(hours=100),
         event_id="evt-1",
         event_start=event_start,
-        last_success_at=None,
+        slot_already_succeeded=False,
         provider="the_odds_api",
         markets="h2h",
         region="us",
@@ -129,27 +181,32 @@ def test_due_work_no_op_outside_window(schedule):
     assert item.idempotency_key is None
 
 
-def test_due_work_interval_and_idempotency_deterministic(schedule):
-    event_start = datetime(2024, 6, 1, 20, 0, tzinfo=UTC)
-    as_of = event_start - timedelta(hours=48)
+def test_window_anchored_first_slot_due_despite_prior_window_success(schedule):
+    """Epoch anchoring skipped first polls; window anchoring must not."""
+    event_start = datetime(2024, 6, 1, 20, 7, tzinfo=UTC)  # off-grid vs epoch
+    mid = next(w for w in schedule.cadence_windows if w.name == "mid")
+    window_start, _ = window_bounds(event_start=event_start, window=mid)
+    # First instant of mid window.
+    as_of = window_start
     first = compute_due_work(
         as_of=as_of,
         event_id="evt-1",
         event_start=event_start,
-        last_success_at=None,
+        slot_already_succeeded=False,
         provider="the_odds_api",
         markets="h2h",
         region="us",
         contract=schedule,
     )
     assert first.action == DueAction.DUE
-    assert first.window_name == "far"
-    assert first.idempotency_key is not None
+    assert first.window_name == "mid"
+    assert first.slot_start == window_start
+    # Prior-window success must not suppress this first mid slot.
     again = compute_due_work(
         as_of=as_of,
         event_id="evt-1",
         event_start=event_start,
-        last_success_at=None,
+        slot_already_succeeded=False,
         provider="the_odds_api",
         markets="h2h",
         region="us",
@@ -160,7 +217,7 @@ def test_due_work_interval_and_idempotency_deterministic(schedule):
         as_of=as_of,
         event_id="evt-1",
         event_start=event_start,
-        last_success_at=first.slot_start,
+        slot_already_succeeded=True,
         provider="the_odds_api",
         markets="h2h",
         region="us",
@@ -169,20 +226,77 @@ def test_due_work_interval_and_idempotency_deterministic(schedule):
     assert satisfied.action == DueAction.NOT_DUE
 
 
-def test_final_hour_defers_without_quota(schedule):
+def test_slot_floor_in_window_exact_boundaries(schedule):
+    window_start = datetime(2024, 6, 1, 0, 7, tzinfo=UTC)
+    # Exact window start is slot 0.
+    assert slot_floor_in_window(
+        window_start, window_start=window_start, interval_sec=600
+    ) == window_start
+    # Just before next boundary stays on first slot.
+    assert slot_floor_in_window(
+        window_start + timedelta(seconds=599),
+        window_start=window_start,
+        interval_sec=600,
+    ) == window_start
+    assert slot_floor_in_window(
+        window_start + timedelta(seconds=600),
+        window_start=window_start,
+        interval_sec=600,
+    ) == window_start + timedelta(seconds=600)
+    # Off-grid vs Unix epoch: epoch floor would differ from window floor.
+    stamp = window_start + timedelta(minutes=17)
+    window_slot = slot_floor_in_window(
+        stamp, window_start=window_start, interval_sec=600
+    )
+    epoch_slot = slot_floor(stamp, interval_sec=600)
+    assert window_slot != epoch_slot
+    assert window_slot == window_start + timedelta(minutes=10)
+
+
+def test_transition_t24_t6_t1_first_slots_due(schedule):
     event_start = datetime(2024, 6, 1, 20, 0, tzinfo=UTC)
-    item = compute_due_work(
+    for name, offset in (("mid", 24), ("near", 6), ("final", 1)):
+        as_of = event_start - timedelta(hours=offset)
+        item = compute_due_work(
+            as_of=as_of,
+            event_id="evt-1",
+            event_start=event_start,
+            slot_already_succeeded=False,
+            provider="the_odds_api",
+            markets="h2h",
+            region="us",
+            contract=schedule,
+        )
+        assert item.action == DueAction.DUE
+        assert item.window_name == name
+
+
+def test_final_hour_defers_and_exhausts(schedule):
+    event_start = datetime(2024, 6, 1, 20, 0, tzinfo=UTC)
+    deferred = compute_due_work(
         as_of=event_start - timedelta(minutes=20),
         event_id="evt-1",
         event_start=event_start,
-        last_success_at=None,
+        slot_already_succeeded=False,
         provider="the_odds_api",
         markets="h2h",
         region="us",
         contract=schedule,
-        quota_allows=False,
+        quota_state="deferred",
     )
-    assert item.action == DueAction.DEFERRED_QUOTA
+    assert deferred.action == DueAction.DEFERRED_QUOTA
+    exhausted = compute_due_work(
+        as_of=event_start - timedelta(minutes=20),
+        event_id="evt-1",
+        event_start=event_start,
+        slot_already_succeeded=False,
+        provider="the_odds_api",
+        markets="h2h",
+        region="us",
+        contract=schedule,
+        quota_state="exhausted",
+    )
+    assert exhausted.action == DueAction.EXHAUSTED_QUOTA
 
 
 def test_naive_as_of_rejected(schedule):
@@ -192,7 +306,7 @@ def test_naive_as_of_rejected(schedule):
             as_of=datetime(2024, 6, 1, 10, 0),
             event_id="evt-1",
             event_start=event_start,
-            last_success_at=None,
+            slot_already_succeeded=False,
             provider="the_odds_api",
             markets="h2h",
             region="us",
@@ -200,7 +314,7 @@ def test_naive_as_of_rejected(schedule):
         )
 
 
-def test_endpoint_cost_contract(schedule):
+def test_endpoint_cost_and_market_region_normalize(schedule):
     assert (
         estimate_endpoint_cost(
             endpoint="current_odds", markets="h2h", regions="us", contract=schedule
@@ -210,33 +324,126 @@ def test_endpoint_cost_contract(schedule):
     assert (
         estimate_endpoint_cost(
             endpoint="historical_odds",
-            markets="h2h,totals",
-            regions="us",
+            markets="totals,h2h",
+            regions="uk,us",
             contract=schedule,
         )
-        == 20
+        == 40
     )
+    assert normalize_markets("totals,h2h") == "h2h,totals"
+    assert normalize_regions("uk,us") == "uk,us"
     assert (
-        estimate_endpoint_cost(
-            endpoint="events", markets="h2h", regions="us", contract=schedule
-        )
+        estimate_endpoint_cost(endpoint="events", markets=None, regions=None, contract=schedule)
         == 0
     )
+    with pytest.raises(ValueError):
+        normalize_markets("h2h,h2h")
+    with pytest.raises(ValueError):
+        normalize_markets("")
 
 
-def test_quota_budget_reserve_and_exhausted(schedule):
-    allowed = evaluate_quota_budget(
-        estimated_cost=10, remaining=500, contract=schedule
+def test_quota_missing_remaining_fail_closed(schedule):
+    decision = evaluate_quota_budget(
+        estimated_cost=1,
+        remaining=None,
+        purpose=RequestPurpose.LIVE_ORDINARY,
+        contract=schedule,
     )
-    assert allowed.state == QuotaBudgetState.ALLOWED
+    assert decision.state == QuotaBudgetState.DEFERRED
+    assert decision.reason == "missing_remaining_fail_closed"
+    override = evaluate_quota_budget(
+        estimated_cost=1,
+        remaining=None,
+        purpose=RequestPurpose.LIVE_ORDINARY,
+        contract=schedule,
+        remaining_source="override_bounded",
+        allow_missing_remaining_override=True,
+    )
+    assert override.state == QuotaBudgetState.ALLOWED
+
+
+def test_quota_malformed_and_stale_observation(session, schedule):
+    store = OddsQuoteStore(session)
+    as_of = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    store.record_quota(
+        provider="the_odds_api",
+        endpoint="current_odds",
+        observed_at=as_of + timedelta(hours=1),  # after as_of → invisible
+        quota=QuotaHeaders(
+            requests_remaining=500,
+            requests_used=1,
+            requests_last=1,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+        ),
+        empty_response=False,
+    )
+    session.flush()
+    missing = plan_request_budget(
+        session,
+        endpoint="current_odds",
+        markets="h2h",
+        regions="us",
+        provider="the_odds_api",
+        as_of=as_of,
+        purpose=RequestPurpose.LIVE_ORDINARY,
+        contract=schedule,
+    )
+    assert missing.state == QuotaBudgetState.DEFERRED
+    assert missing.remaining_source == "missing_observation"
+
+    # DB CHECKs reject negative remaining; still prove loader fail-closes on it.
+    fake_row = SimpleNamespace(requests_remaining=-3)
+    with patch.object(session, "scalar", return_value=fake_row):
+        from mma_model.odds.quota_budget import latest_remaining_from_observations
+
+        remaining, source = latest_remaining_from_observations(
+            session, provider="the_odds_api", as_of=as_of
+        )
+    assert remaining is None and source == "malformed_negative_remaining"
+    malformed = evaluate_quota_budget(
+        estimated_cost=1,
+        remaining=None,
+        purpose=RequestPurpose.LIVE_ORDINARY,
+        contract=schedule,
+        remaining_source=source,
+    )
+    assert malformed.state == QuotaBudgetState.DEFERRED
+
+
+def test_quota_reserve_purpose_boundaries(schedule):
+    # Ordinary live preserves reserve=200: remaining 205, cost 10 → spendable 5 → deferred
     deferred = evaluate_quota_budget(
-        estimated_cost=50, remaining=220, contract=schedule
+        estimated_cost=10,
+        remaining=205,
+        purpose=RequestPurpose.LIVE_ORDINARY,
+        contract=schedule,
     )
     assert deferred.state == QuotaBudgetState.DEFERRED
-    exhausted = evaluate_quota_budget(
-        estimated_cost=10, remaining=5, contract=schedule
+    # Final-hour may spend reserve: remaining 205, cost 10 → allowed
+    final_ok = evaluate_quota_budget(
+        estimated_cost=10,
+        remaining=205,
+        purpose=RequestPurpose.LIVE_FINAL,
+        contract=schedule,
     )
-    assert exhausted.state == QuotaBudgetState.EXHAUSTED
+    assert final_ok.state == QuotaBudgetState.ALLOWED
+    assert final_ok.reason == "within_remaining_including_reserve"
+    # Final-hour still cannot exceed actual remaining
+    final_ex = evaluate_quota_budget(
+        estimated_cost=10,
+        remaining=5,
+        purpose=RequestPurpose.LIVE_FINAL,
+        contract=schedule,
+    )
+    assert final_ex.state == QuotaBudgetState.EXHAUSTED
+    backfill = evaluate_quota_budget(
+        estimated_cost=10,
+        remaining=205,
+        purpose=RequestPurpose.BACKFILL,
+        contract=schedule,
+    )
+    assert backfill.state == QuotaBudgetState.DEFERRED
 
 
 def test_quota_uses_persisted_observation(session, schedule):
@@ -263,27 +470,66 @@ def test_quota_uses_persisted_observation(session, schedule):
         regions="us",
         provider="the_odds_api",
         as_of=as_of,
+        purpose=RequestPurpose.BACKFILL,
         contract=schedule,
     )
     assert decision.remaining == 250
     assert decision.state == QuotaBudgetState.ALLOWED
 
 
-def test_snapshot_cutoff_fail_closed():
+def test_actual_cost_provenance_none_vs_zero():
+    missing = QuotaHeaders(
+        requests_remaining=10,
+        requests_used=1,
+        requests_last=None,
+        requests_last_inferred=None,
+        requests_last_source=REQUESTS_LAST_SOURCE_MISSING,
+    )
+    assert cost_from_quota_headers(missing) is None
+    inferred = QuotaHeaders(
+        requests_remaining=10,
+        requests_used=1,
+        requests_last=None,
+        requests_last_inferred=0,
+        requests_last_source=REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
+    )
+    assert cost_from_quota_headers(inferred) == 0
+    provider = QuotaHeaders(
+        requests_remaining=10,
+        requests_used=1,
+        requests_last=3,
+        requests_last_inferred=None,
+        requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+    )
+    assert cost_from_quota_headers(provider) == 3
+
+
+def test_snapshot_cutoff_and_as_of_pit():
     cutoff = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+    as_of = datetime(2024, 1, 2, tzinfo=UTC)
     ok = assert_snapshot_at_or_before(
-        snapshot_at=cutoff - timedelta(minutes=5), requested_cutoff=cutoff
+        snapshot_at=cutoff - timedelta(minutes=5),
+        requested_cutoff=cutoff,
+        as_of=as_of,
     )
     assert ok == cutoff - timedelta(minutes=5)
     with pytest.raises(SnapshotCutoffError):
         assert_snapshot_at_or_before(
-            snapshot_at=cutoff + timedelta(seconds=1), requested_cutoff=cutoff
+            snapshot_at=cutoff + timedelta(seconds=1),
+            requested_cutoff=cutoff,
+            as_of=as_of,
+        )
+    with pytest.raises(SnapshotCutoffError):
+        assert_snapshot_at_or_before(
+            snapshot_at=cutoff,
+            requested_cutoff=as_of + timedelta(hours=1),
+            as_of=as_of,
         )
     with pytest.raises(SnapshotCutoffError):
         assert_snapshot_at_or_before(snapshot_at=None, requested_cutoff=cutoff)
 
 
-def test_idempotency_key_stable_and_distinct():
+def test_idempotency_and_batch_keys_stable():
     stamp = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
     a = compute_idempotency_key(
         provider="the_odds_api",
@@ -311,6 +557,14 @@ def test_idempotency_key_stable_and_distinct():
     )
     assert a == b
     assert a != c
+    batch = compute_batch_key(
+        provider="the_odds_api",
+        region="us",
+        markets="h2h",
+        mode="live:far",
+        slot_or_cutoff=stamp,
+    )
+    assert "e1" not in batch
 
 
 def test_flock_overlap_rejects_second_writer(tmp_path: Path):
@@ -321,9 +575,10 @@ def test_flock_overlap_rejects_second_writer(tmp_path: Path):
         second.acquire()
 
 
-def test_job_ledger_success_unique(session):
+def test_job_ledger_explicit_finished_at(session):
     key = "odds_snap:testkey"
     as_of = datetime(2024, 1, 1, tzinfo=UTC)
+    finished = as_of + timedelta(minutes=5)
     record_job_run(
         session,
         idempotency_key=key,
@@ -335,6 +590,7 @@ def test_job_ledger_success_unique(session):
         event_id="e1",
         mode="historical:t_minus_24h",
         as_of=as_of,
+        finished_at=finished,
         estimated_cost=10,
         error_class="OddsApiError",
     )
@@ -349,8 +605,10 @@ def test_job_ledger_success_unique(session):
         event_id="e1",
         mode="historical:t_minus_24h",
         as_of=as_of,
+        finished_at=finished,
         estimated_cost=10,
         actual_cost=10,
+        actual_cost_source="provider",
     )
     session.flush()
     assert find_successful_run(session, idempotency_key=key) is not None
@@ -366,12 +624,45 @@ def test_job_ledger_success_unique(session):
             event_id="e1",
             mode="historical:t_minus_24h",
             as_of=as_of,
+            finished_at=finished,
             estimated_cost=10,
             actual_cost=10,
+            actual_cost_source="provider",
+        )
+    with pytest.raises(JobLedgerTimeError):
+        record_job_run(
+            session,
+            idempotency_key="odds_snap:badtime",
+            job_name="odds-backfill",
+            status="failed",
+            provider="the_odds_api",
+            region="us",
+            markets="h2h",
+            event_id="e1",
+            mode="historical:t_minus_24h",
+            as_of=as_of,
+            finished_at=as_of - timedelta(seconds=1),
+            estimated_cost=0,
+        )
+    with pytest.raises(ValueError):
+        record_job_run(
+            session,
+            idempotency_key="odds_snap:nocostsrc",
+            job_name="odds-backfill",
+            status="success",
+            provider="the_odds_api",
+            region="us",
+            markets="h2h",
+            event_id="e1",
+            mode="historical:t_minus_24h",
+            as_of=as_of,
+            finished_at=finished,
+            estimated_cost=1,
+            actual_cost=1,
         )
 
 
-def test_coverage_separates_absent_failed_deferred(schedule):
+def test_coverage_separates_statuses_and_unknown_cost(schedule):
     as_of = datetime(2024, 1, 1, tzinfo=UTC)
     report = build_odds_coverage_report(
         series="dwcs",
@@ -385,7 +676,25 @@ def test_coverage_separates_absent_failed_deferred(schedule):
             ),
             CoverageCell("c1", "draftkings", "h2h", "close_proxy", "unmatched"),
             CoverageCell(
-                "c1", "draftkings", "h2h", "live", "observed", 1, actual_cost=1
+                "c1",
+                "draftkings",
+                "h2h",
+                "live",
+                "observed",
+                1,
+                actual_cost=1,
+                actual_cost_known=True,
+            ),
+            CoverageCell(
+                "c1",
+                "fanduel",
+                "h2h",
+                "live",
+                "observed",
+                0,
+                actual_cost=None,
+                actual_cost_known=False,
+                detail="missing_cost",
             ),
         ],
     )
@@ -393,7 +702,9 @@ def test_coverage_separates_absent_failed_deferred(schedule):
     assert report.status_counts["failed"] == 1
     assert report.status_counts["deferred_quota"] == 1
     assert report.status_counts["unmatched"] == 1
-    assert report.status_counts["observed"] == 1
+    assert report.status_counts["observed"] == 2
+    assert report.known_actual_cost_total == 1
+    assert report.unknown_actual_cost_cells == 5
 
 
 def test_sparse_checkpoint_cutoffs(schedule):
@@ -407,8 +718,8 @@ def test_sparse_checkpoint_cutoffs(schedule):
     ) == start
 
 
-def test_backfill_dry_run_and_offline_cutoff(session, schedule, tmp_path: Path):
-    as_of = datetime(2026, 8, 12, 0, 0, tzinfo=UTC)
+def test_backfill_skips_future_checkpoints_and_pit(session, schedule, tmp_path: Path):
+    as_of = datetime(2024, 5, 31, 12, 0, tzinfo=UTC)  # before event; some cuts future
     events = [
         {
             "event_id": "evt-offline-1",
@@ -422,32 +733,81 @@ def test_backfill_dry_run_and_offline_cutoff(session, schedule, tmp_path: Path):
         from_year=2020,
         events=events,
         as_of=as_of,
+        finished_at=as_of,
         contract=schedule,
         offline_fixtures=True,
         fixture_dir=FIXTURE_DIR,
         evaluation_contract_path=EVAL_CONTRACT,
         execute=False,
         lock_path=tmp_path / "bf.lock",
+        remaining_override=10_000,
     )
-    assert dry.attempted == 4
-    assert dry.coverage.status_counts["absent"] == 4
-
-    # Fixture snapshot_at is 2026-08-11T20:55:00Z which is AFTER a 2024 cutoff → fail closed
+    assert dry.skipped_future_checkpoint >= 1
+    # Historical run after event with fixture snapshot after cutoffs → fail closed
+    late = datetime(2026, 8, 12, 0, 0, tzinfo=UTC)
     live = run_odds_backfill(
         session,
         series="dwcs",
         from_year=2020,
         events=events,
-        as_of=as_of,
+        as_of=late,
+        finished_at=late,
         contract=schedule,
         offline_fixtures=True,
         fixture_dir=FIXTURE_DIR,
         evaluation_contract_path=EVAL_CONTRACT,
         execute=True,
         lock_path=tmp_path / "bf2.lock",
+        remaining_override=10_000,
     )
     assert live.failed == 4
     assert live.coverage.status_counts["failed"] == 4
+
+
+def test_live_upcoming_from_db_not_frozen_manifest(session):
+    as_of = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+    _seed_event(
+        session,
+        event_id="live-upcoming-1",
+        start=as_of + timedelta(hours=30),
+        status="upcoming",
+    )
+    _seed_event(
+        session,
+        event_id="live-completed-1",
+        start=as_of + timedelta(hours=20),
+        status="completed",
+    )
+    _seed_event(
+        session,
+        event_id="live-cancelled-1",
+        start=as_of + timedelta(hours=25),
+        status="cancelled",
+    )
+    rows = load_upcoming_dwcs_events_from_db(session, as_of=as_of)
+    assert [r["event_id"] for r in rows] == ["live-upcoming-1"]
+    assert classify_event_status_for_tests("scheduled") == "upcoming"
+    assert classify_event_status_for_tests("completed") == "completed"
+    assert classify_event_status_for_tests("cancelled") == "cancelled"
+    # Frozen manifest has no 2026+ production schedule; live must not use it.
+    manifest = load_dwcs_schedule_events()
+    assert all(r["event_start"].year <= 2025 for r in manifest)
+    assert all(r["source"] == "frozen_manifest" for r in manifest)
+
+
+def test_snapshot_odds_job_zero_upcoming_explicit(session, tmp_path: Path):
+    as_of = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+    result = run_snapshot_odds_job(
+        session,
+        as_of=as_of,
+        finished_at=as_of,
+        events=[],
+        lock_path=tmp_path / "snap.lock",
+        execute=False,
+        remaining_override=500,
+    )
+    assert result.upcoming_event_count == 0
+    assert result.items[0]["action"] == "no_upcoming_events"
 
 
 def test_snapshot_odds_job_no_op_outside_window(session, tmp_path: Path):
@@ -461,12 +821,123 @@ def test_snapshot_odds_job_no_op_outside_window(session, tmp_path: Path):
     result = run_snapshot_odds_job(
         session,
         as_of=as_of,
+        finished_at=as_of,
         events=events,
         lock_path=tmp_path / "snap.lock",
         execute=False,
+        remaining_override=500,
     )
     assert result.no_op == 1
     assert result.due == 0
+
+
+def test_multi_event_same_slot_one_batch(session, tmp_path: Path, schedule):
+    as_of = datetime(2024, 5, 30, 20, 0, tzinfo=UTC)  # 48h before Jun 1 20:00
+    event_start = datetime(2024, 6, 1, 20, 0, tzinfo=UTC)
+    events = [
+        {"event_id": "e-a", "event_start": event_start},
+        {"event_id": "e-b", "event_start": event_start},
+    ]
+    calls: list[str] = []
+
+    def fake_snapshot(*_args, **_kwargs):
+        calls.append("call")
+
+        class _R:
+            inserted = 0
+            deduped = 0
+            snapshot_at = None
+            quota = {
+                "x-requests-remaining": 1000,
+                "x-requests-used": 1,
+                "x-requests-last": 1,
+                "requests_last_source": REQUESTS_LAST_SOURCE_PROVIDER,
+            }
+
+        return _R()
+
+    with patch(
+        "mma_model.jobs.snapshot_odds.run_odds_snapshot", side_effect=fake_snapshot
+    ):
+        result = run_snapshot_odds_job(
+            session,
+            as_of=as_of,
+            finished_at=as_of,
+            events=events,
+            lock_path=tmp_path / "batch.lock",
+            execute=True,
+            remaining_override=500,
+            contract=schedule,
+        )
+    assert result.due == 2
+    assert result.batches == 1
+    assert len(calls) == 1
+
+
+def test_injected_failure_rolls_back_partial_snapshot(session, tmp_path: Path, schedule):
+    as_of = datetime(2024, 5, 30, 20, 0, tzinfo=UTC)
+    event_start = datetime(2024, 6, 1, 20, 0, tzinfo=UTC)
+    events = [{"event_id": "e-fail", "event_start": event_start}]
+
+    def boom(session_arg, **_kwargs):
+        session_arg.add(
+            OddsQuotaObservation(
+                provider="the_odds_api",
+                endpoint="current_odds",
+                observed_at=as_of,
+                requests_remaining=999,
+                requests_used=1,
+                requests_last=1,
+                requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+                empty_response=False,
+            )
+        )
+        session_arg.flush()
+        raise RuntimeError("injected_failure")
+
+    with patch("mma_model.jobs.snapshot_odds.run_odds_snapshot", side_effect=boom):
+        result = run_snapshot_odds_job(
+            session,
+            as_of=as_of,
+            finished_at=as_of,
+            events=events,
+            lock_path=tmp_path / "fail.lock",
+            execute=True,
+            remaining_override=500,
+            contract=schedule,
+        )
+        session.commit()
+    assert result.failures == 1
+    assert (
+        session.scalar(
+            select(OddsQuotaObservation).where(
+                OddsQuotaObservation.requests_remaining == 999
+            ).limit(1)
+        )
+        is None
+    )
+    failed = session.scalars(
+        select(OddsSnapshotJobRun).where(OddsSnapshotJobRun.status == "failed")
+    ).all()
+    assert len(failed) == 1
+    assert failed[0].error_class == "RuntimeError"
+
+
+def test_bestfightodds_url_rejects_lookalikes():
+    ok = validate_bestfightodds_archive_url(
+        "https://www.bestfightodds.com/archive/mma"
+    )
+    assert ok.startswith("https://www.bestfightodds.com/")
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url(
+            "https://www.bestfightodds.com.evil.com/archive"
+        )
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url("http://www.bestfightodds.com/archive")
+    with pytest.raises(BestFightOddsPolicyError):
+        validate_bestfightodds_archive_url(
+            "https://user:pass@www.bestfightodds.com/archive"
+        )
 
 
 def test_bestfightodds_fixture_never_stats_pit(tmp_path: Path):
@@ -487,23 +958,21 @@ def test_licensed_history_refused_without_contract():
         refuse_licensed_bookmaker_history_without_contract()
 
 
-def test_slot_floor_deterministic():
-    stamp = datetime(2024, 1, 1, 12, 17, tzinfo=UTC)
-    floored = slot_floor(stamp, interval_sec=600)
-    assert floored.minute in {10, 0} or floored == datetime(2024, 1, 1, 12, 10, tzinfo=UTC)
-
-
-def test_cli_backfill_help():
+def test_cli_backfill_and_due_help():
     from mma_model.cli import main
 
     with pytest.raises(SystemExit) as exc:
         main(["odds", "backfill", "--help"])
     assert exc.value.code == 0
+    with pytest.raises(SystemExit) as exc2:
+        main(["jobs", "snapshot-odds", "--help"])
+    assert exc2.value.code == 0
 
 
 def test_migration_creates_job_table(session):
-    from sqlalchemy import inspect
-
-    bind = session.get_bind()
-    names = set(inspect(bind).get_table_names())
+    names = set(inspect(session.get_bind()).get_table_names())
     assert "odds_snapshot_job_runs" in names
+    cols = {c["name"] for c in inspect(session.get_bind()).get_columns(
+        "odds_snapshot_job_runs"
+    )}
+    assert "actual_cost_source" in cols

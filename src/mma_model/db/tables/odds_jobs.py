@@ -56,6 +56,17 @@ class OddsSnapshotJobRun(Base):
             name="ck_odds_snapshot_job_runs_costs",
         ),
         CheckConstraint(
+            "("
+            "actual_cost_source IS NULL AND actual_cost IS NULL"
+            ") OR ("
+            "actual_cost_source IN ('provider', 'inferred_empty_zero') "
+            "AND actual_cost IS NOT NULL"
+            ") OR ("
+            "actual_cost_source = 'missing' AND actual_cost IS NULL"
+            ")",
+            name="ck_odds_snapshot_job_runs_actual_cost_provenance",
+        ),
+        CheckConstraint(
             "length(trim(idempotency_key)) > 0",
             name="ck_odds_snapshot_job_runs_idem_nonempty",
         ),
@@ -83,6 +94,7 @@ class OddsSnapshotJobRun(Base):
     window_name: Mapped[str | None] = mapped_column(String(32), nullable=True)
     estimated_cost: Mapped[int] = mapped_column(Integer, default=0)
     actual_cost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actual_cost_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

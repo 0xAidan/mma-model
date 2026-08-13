@@ -1,8 +1,9 @@
 """Optional BestFightOdds archive reconciliation (DWCS-205).
 
-Policy-gated public historical *odds* reconciliation only. Never stats/PIT
-evidence, never sportsbook-page scraping, never access-control bypass.
-Uses the shared polite HTTP client when live fetches are enabled.
+Policy-gated public historical *odds archive* reconciliation only. This is not
+direct sportsbook-site scraping, never stats/PIT evidence, and never an
+access-control bypass. Uses the shared polite HTTP client when live fetches
+are enabled.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from mma_model.odds.normalize import ensure_utc
 from mma_model.odds.provider_decision import (
@@ -22,6 +24,9 @@ from mma_model.odds.schedule import OddsScheduleContract, load_default_schedule_
 from mma_model.sources.http.polite_client import PoliteHttpClient
 from mma_model.sources.http_politeness import load_http_politeness
 from mma_model.sources.policy import SourceId, load_source_policy
+
+_ALLOWED_HOSTS = frozenset({"bestfightodds.com", "www.bestfightodds.com"})
+_ALLOWED_PATH_PREFIXES = ("/",)
 
 
 class BestFightOddsPolicyError(RuntimeError):
@@ -43,6 +48,26 @@ class BestFightOddsReconcileResult:
         return asdict(self)
 
 
+def validate_bestfightodds_archive_url(url: str) -> str:
+    """Fail closed unless HTTPS, exact allowed host, no credentials, allowed path."""
+    parsed = urlparse(str(url).strip())
+    if parsed.scheme != "https":
+        raise BestFightOddsPolicyError("archive URL must use https")
+    host = (parsed.hostname or "").lower()
+    if host not in _ALLOWED_HOSTS:
+        raise BestFightOddsPolicyError(f"archive host not allowed: {host!r}")
+    if parsed.username is not None or parsed.password is not None:
+        raise BestFightOddsPolicyError("archive URL must not include credentials")
+    if parsed.port not in {None, 443}:
+        raise BestFightOddsPolicyError("archive URL must use default https port")
+    path = parsed.path or "/"
+    if not any(path.startswith(prefix) for prefix in _ALLOWED_PATH_PREFIXES):
+        raise BestFightOddsPolicyError(f"archive path not allowed: {path!r}")
+    # Rebuild normalized URL without credentials/fragments for fetch.
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"https://{host}{path}{query}"
+
+
 def reconcile_bestfightodds_archive(
     *,
     as_of: datetime,
@@ -53,11 +78,7 @@ def reconcile_bestfightodds_archive(
     live_fetch: bool = False,
     url: str | None = None,
 ) -> BestFightOddsReconcileResult:
-    """Reconcile a public archive page only when source policy permits.
-
-    ``fixture_html`` enables deterministic offline tests. Live fetch requires
-    ``live_fetch=True`` and uses polite HTTP with no cookies/auth.
-    """
+    """Reconcile a public odds-archive page only when source policy permits."""
     stamp = ensure_utc(as_of, field="as_of")
     sched = schedule or load_default_schedule_contract()
     bfo_cfg = dict(sched.bestfightodds_archive)
@@ -94,11 +115,11 @@ def reconcile_bestfightodds_archive(
             "schedule contract must set never_sportsbook_page_scrape=true"
         )
 
-    # Even if a licensed adapter is later authorized, this module never scrapes
-    # sportsbook pages; licensed history uses require_licensed_bookmaker_adapter.
     _ = licensed_bookmaker_adapter_authorized()
 
     if fixture_html is not None:
+        if url is not None:
+            url = validate_bestfightodds_archive_url(url)
         digest = hashlib.sha256(fixture_html.encode("utf-8")).hexdigest()
         return BestFightOddsReconcileResult(
             enabled=True,
@@ -109,8 +130,9 @@ def reconcile_bestfightodds_archive(
             url=url,
             payload_hash=digest,
             detail=(
-                f"offline fixture for event={event_name!r} as_of="
-                f"{stamp.isoformat()}; not_stats_pit_evidence"
+                f"offline odds-archive fixture for event={event_name!r} as_of="
+                f"{stamp.isoformat()}; not_stats_pit_evidence; "
+                "not_direct_sportsbook_scrape"
             ),
         )
 
@@ -126,10 +148,9 @@ def reconcile_bestfightodds_archive(
             detail="live_fetch_disabled",
         )
 
-    if not url or not str(url).startswith("https://www.bestfightodds.com/"):
-        raise BestFightOddsPolicyError(
-            "live fetch requires an https://www.bestfightodds.com/ URL"
-        )
+    if not url:
+        raise BestFightOddsPolicyError("live fetch requires an archive URL")
+    safe_url = validate_bestfightodds_archive_url(url)
 
     politeness = load_http_politeness()
     client = PoliteHttpClient(
@@ -138,18 +159,22 @@ def reconcile_bestfightodds_archive(
         cache_dir=Path(cache_dir),
     )
     try:
-        body, digest = client.get_text(url)
+        body, digest = client.get_text(safe_url)
     finally:
         client.close()
+    _ = body
     return BestFightOddsReconcileResult(
         enabled=True,
         role="public_historical_odds_reconciliation",
         stats_or_pit_evidence=False,
         sportsbook_page_scrape=False,
         status="fetched",
-        url=url,
+        url=safe_url,
         payload_hash=digest,
-        detail="polite_http_archive_fetch; not_stats_pit_evidence",
+        detail=(
+            "polite_http_odds_archive_fetch; not_stats_pit_evidence; "
+            "not_direct_sportsbook_scrape"
+        ),
     )
 
 
@@ -163,4 +188,5 @@ __all__ = [
     "BestFightOddsReconcileResult",
     "reconcile_bestfightodds_archive",
     "refuse_licensed_bookmaker_history_without_contract",
+    "validate_bestfightodds_archive_url",
 ]
