@@ -22,6 +22,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from mma_model.db.base import Base
 
+# Shared with migration 0016 — keep predicate text identical in both places.
+IDENTITY_DECISION_EVIDENCE_INDEX_NAME = "uq_identity_evidence_review_decision"
+IDENTITY_DECISION_EVIDENCE_WHERE = (
+    "action IN ('approved', 'rejected') AND review_id IS NOT NULL"
+)
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -80,12 +86,10 @@ class IdentityMatchEvidence(Base):
     __table_args__ = (
         # One terminal approve/reject evidence row per review (defense in depth).
         Index(
-            "uq_identity_evidence_review_decision",
+            IDENTITY_DECISION_EVIDENCE_INDEX_NAME,
             "review_id",
             unique=True,
-            sqlite_where=text(
-                "action IN ('approved', 'rejected') AND review_id IS NOT NULL"
-            ),
+            sqlite_where=text(IDENTITY_DECISION_EVIDENCE_WHERE),
         ),
     )
 
