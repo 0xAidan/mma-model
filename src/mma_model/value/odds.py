@@ -6,6 +6,7 @@ display / persistence boundaries.
 
 from __future__ import annotations
 
+import math
 from typing import Final
 
 from mma_model.value.errors import InvalidOddsError, InvalidProbabilityError
@@ -18,53 +19,48 @@ DISPLAY_AMERICAN_PLACES: Final = 2
 DISPLAY_PROBABILITY_PLACES: Final = 6
 
 
+def _require_finite_number(value: object, *, field: str) -> float:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise InvalidOddsError(f"{field} must be a number") from exc
+    if not math.isfinite(number):
+        raise InvalidOddsError(f"{field} must be finite (got {value!r})")
+    return number
+
+
 def validate_probability(
     value: float,
     *,
     field: str = "probability",
-    allow_one: bool = False,
 ) -> float:
-    """Require a usable probability in (0, 1) or optionally (0, 1]."""
+    """Require a calibrated production probability in ``(0, 1)`` (strict)."""
     try:
         prob = float(value)
     except (TypeError, ValueError) as exc:
         raise InvalidProbabilityError(f"{field} must be a number") from exc
-    if allow_one:
-        if not 0.0 < prob <= 1.0:
-            raise InvalidProbabilityError(f"{field} must be in (0, 1]")
-    elif not 0.0 < prob < 1.0:
+    if not math.isfinite(prob):
+        raise InvalidProbabilityError(f"{field} must be finite (got {value!r})")
+    if not 0.0 < prob < 1.0:
         raise InvalidProbabilityError(f"{field} must be in (0, 1)")
     return prob
 
 
 def validate_decimal_odds(value: float, *, field: str = "decimal_odds") -> float:
-    """Require decimal odds strictly greater than 1.0."""
-    try:
-        decimal = float(value)
-    except (TypeError, ValueError) as exc:
-        raise InvalidOddsError(f"{field} must be a number") from exc
+    """Require finite decimal odds strictly greater than 1.0."""
+    decimal = _require_finite_number(value, field=field)
     if decimal <= 1.0:
         raise InvalidOddsError(f"{field} must be > 1 (got {value!r})")
-    if decimal != decimal:  # NaN
-        raise InvalidOddsError(f"{field} must be finite")
-    if decimal == float("inf"):
-        raise InvalidOddsError(f"{field} must be finite")
     return decimal
 
 
 def validate_american_odds(value: float, *, field: str = "american_odds") -> float:
-    """Require conventional American odds: <= -100 or >= +100.
+    """Require conventional American odds: ``<= -100`` or ``>= +100``.
 
-    Zero American odds are rejected as ambiguous. Values in (-100, 100)
-    excluding the conventional ±100 boundaries are invalid American quotes
-    (provider decimal pass-through belongs in odds.normalize only).
+    Zero and values in ``(-100, 100)`` are rejected as impossible/ambiguous
+    American quotes.
     """
-    try:
-        american = float(value)
-    except (TypeError, ValueError) as exc:
-        raise InvalidOddsError(f"{field} must be a number") from exc
-    if american != american or american in (float("inf"), float("-inf")):
-        raise InvalidOddsError(f"{field} must be finite")
+    american = _require_finite_number(value, field=field)
     if american == 0.0:
         raise InvalidOddsError(f"{field} cannot be 0 (ambiguous American odds)")
     if -100.0 < american < 100.0:
@@ -72,6 +68,26 @@ def validate_american_odds(value: float, *, field: str = "american_odds") -> flo
             f"{field} must be <= -100 or >= +100 (got {value!r})"
         )
     return american
+
+
+def validate_nonnegative_fraction(
+    value: float,
+    *,
+    field: str,
+    maximum: float | None = None,
+) -> float:
+    """Finite fraction in ``[0, maximum]`` (or ``[0, +inf)`` when maximum is None)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise InvalidOddsError(f"{field} must be a number") from exc
+    if not math.isfinite(number):
+        raise InvalidOddsError(f"{field} must be finite (got {value!r})")
+    if number < 0.0:
+        raise InvalidOddsError(f"{field} must be >= 0")
+    if maximum is not None and number > maximum:
+        raise InvalidOddsError(f"{field} must be <= {maximum}")
+    return number
 
 
 def american_to_decimal(american: float) -> float:
@@ -91,7 +107,7 @@ def decimal_to_american(decimal_odds: float) -> float:
 
 
 def decimal_to_implied_prob(decimal_odds: float) -> float:
-    """Book implied probability from decimal odds: 1 / decimal."""
+    """Book implied probability from decimal odds: ``1 / decimal``."""
     decimal_odds = validate_decimal_odds(decimal_odds)
     return 1.0 / decimal_odds
 
@@ -101,9 +117,9 @@ def american_to_implied_prob(american: float) -> float:
     return decimal_to_implied_prob(american_to_decimal(american))
 
 
-def probability_to_decimal(probability: float, *, allow_one: bool = False) -> float:
-    """Break-even decimal odds from a probability: 1 / p."""
-    probability = validate_probability(probability, allow_one=allow_one)
+def probability_to_decimal(probability: float) -> float:
+    """Break-even decimal odds from a probability in ``(0, 1)``: ``1 / p``."""
+    probability = validate_probability(probability)
     return 1.0 / probability
 
 
@@ -117,9 +133,6 @@ def round_american_for_display(american: float) -> float:
     return round(validate_american_odds(american), DISPLAY_AMERICAN_PLACES)
 
 
-def round_probability_for_display(probability: float, *, allow_one: bool = True) -> float:
-    """Display rounding for probabilities only."""
-    return round(
-        validate_probability(probability, allow_one=allow_one),
-        DISPLAY_PROBABILITY_PLACES,
-    )
+def round_probability_for_display(probability: float) -> float:
+    """Display rounding for probabilities only (strict ``(0, 1)``)."""
+    return round(validate_probability(probability), DISPLAY_PROBABILITY_PLACES)

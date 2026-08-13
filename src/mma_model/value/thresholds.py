@@ -3,9 +3,8 @@
 Delegates formula evaluation to the pinned DWCS evaluation contract helpers so
 price guidance stays consistent with DWCS-200 / DWCS-001.
 
-Target constants are defined here (not imported from markets.price_targets) to
-avoid an import cycle: markets.price_targets -> value.odds -> value.__init__ ->
-value.thresholds -> markets.price_targets.
+Production calibrated probabilities are strictly in ``(0, 1)`` so fair odds are
+always convertible to American form.
 """
 
 from __future__ import annotations
@@ -68,10 +67,7 @@ class ValuePriceThresholds:
 
 def conservative_break_even_decimal(p25: float) -> float:
     """Conservative break-even decimal odds from p25: 1 / p25."""
-    return probability_to_decimal(
-        validate_probability(p25, field="p25", allow_one=True),
-        allow_one=True,
-    )
+    return probability_to_decimal(validate_probability(p25, field="p25"))
 
 
 def compute_value_price_thresholds(
@@ -81,8 +77,8 @@ def compute_value_price_thresholds(
     family: MarketFamily,
 ) -> ValuePriceThresholds:
     """Fair, p25 break-even, 5% actionable, 10% strong-value (exact-round override)."""
-    p50_v = validate_probability(p50, field="p50", allow_one=True)
-    p25_v = validate_probability(p25, field="p25", allow_one=True)
+    p50_v = validate_probability(p50, field="p50")
+    p25_v = validate_probability(p25, field="p25")
     if p25_v > p50_v:
         raise ValueError("p25 must be <= p50 for conservative actionable thresholds")
 

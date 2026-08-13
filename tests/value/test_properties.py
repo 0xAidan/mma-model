@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from mma_model.domain.markets import MarketFamily
+from mma_model.domain.markets import MarketFamily, outcomes_for_family
 from mma_model.value.devig import proportional_devig
-from mma_model.value.errors import InvalidOddsError
+from mma_model.value.errors import InvalidOddsError, InvalidProbabilityError
 from mma_model.value.ev import expected_value
-from mma_model.value.kelly import quarter_kelly_fraction
+from mma_model.value.kelly import fractional_kelly, quarter_kelly_fraction
 from mma_model.value.odds import american_to_decimal, decimal_to_american
 from mma_model.value.thresholds import compute_value_price_thresholds
 
@@ -25,7 +27,6 @@ def test_decimal_american_round_trip(american: int) -> None:
 
 
 def test_even_money_american_minus_100_maps_to_plus_100() -> None:
-    """Decimal 2.0 is conventionally rendered as +100, not -100."""
     assert american_to_decimal(-100) == pytest.approx(2.0)
     assert decimal_to_american(2.0) == pytest.approx(100.0)
 
@@ -34,15 +35,6 @@ def test_even_money_american_minus_100_maps_to_plus_100() -> None:
 def test_american_decimal_round_trip_from_decimal(decimal: float) -> None:
     american = decimal_to_american(decimal)
     assert american_to_decimal(american) == pytest.approx(decimal, rel=1e-9, abs=1e-12)
-
-
-def test_implied_prob_monotonic_in_decimal() -> None:
-    prev = None
-    for decimal in [1.1, 1.5, 2.0, 3.0, 5.0, 11.0]:
-        implied = 1.0 / decimal
-        if prev is not None:
-            assert implied < prev
-        prev = implied
 
 
 def test_ev_monotonic_in_offered_price() -> None:
@@ -70,22 +62,41 @@ def test_zero_edge_property() -> None:
         assert expected_value(p, 1.0 / p) == pytest.approx(0.0, abs=1e-12)
 
 
-def test_complete_devig_sum_property() -> None:
-    grids = [
-        [1.8, 2.1],
-        [2.0, 3.0, 6.0],
-        [1.5, 2.5, 4.0, 8.0],
-    ]
-    for odds in grids:
-        result = proportional_devig(odds)
+def test_complete_canonical_devig_sum_property() -> None:
+    for family, rounds, line in [
+        (MarketFamily.MONEYLINE, None, None),
+        (MarketFamily.METHOD, None, None),
+        (MarketFamily.EXACT_ROUND, 3, None),
+        (MarketFamily.TOTALS, None, 2.5),
+    ]:
+        keys = [
+            o.value for o in outcomes_for_family(family, scheduled_rounds=rounds)
+        ]
+        prices = {k: 2.0 + i * 0.1 for i, k in enumerate(keys)}
+        result = proportional_devig(
+            prices,
+            family=family,
+            scheduled_rounds=rounds,
+            line_point=line,
+        )
         assert sum(result.fair_probs) == pytest.approx(1.0, abs=1e-12)
+        assert math.isfinite(result.overround)
 
 
-def test_stake_never_exceeds_cap_property() -> None:
+def test_stake_never_exceeds_hard_cap_property() -> None:
     for p in [0.55, 0.7, 0.9, 0.99]:
         for decimal in [1.5, 2.0, 5.0, 20.0]:
-            try:
-                stake = quarter_kelly_fraction(p, decimal, cap=0.01)
-            except InvalidOddsError:
-                continue
+            stake = quarter_kelly_fraction(p, decimal, cap=0.01)
             assert 0.0 <= stake <= 0.01 + 1e-15
+    for bad_cap in [0.0100001, 0.05, 1.0, math.inf, math.nan, -0.01]:
+        with pytest.raises(InvalidOddsError):
+            quarter_kelly_fraction(0.6, 2.0, cap=bad_cap)
+    for bad_fraction in [1.0001, 2.0, math.inf, math.nan, -0.1]:
+        with pytest.raises(InvalidOddsError):
+            fractional_kelly(0.6, -110, fraction=bad_fraction, cap=0.01)
+
+
+def test_probability_rejects_one_nan_inf_property() -> None:
+    for bad in [1.0, 0.0, -0.1, math.nan, math.inf, -math.inf]:
+        with pytest.raises(InvalidProbabilityError):
+            compute_value_price_thresholds(bad, 0.4, family=MarketFamily.MONEYLINE)

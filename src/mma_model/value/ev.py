@@ -1,9 +1,17 @@
-"""Expected value, CLV, closing EV, and flat-unit profit (DWCS-204)."""
+"""Expected value, same-selection CLV, closing EV, and flat-unit profit (DWCS-204).
+
+``probability_clv`` is in probability points (close_implied - bet_implied), not
+percent and not a price ratio.
+"""
 
 from __future__ import annotations
 
 from mma_model.markets.settlement import SettlementResult
 from mma_model.value.errors import InvalidOddsError, InvalidProbabilityError
+from mma_model.value.evidence import (
+    SelectionPriceObservation,
+    assert_same_selection,
+)
 from mma_model.value.odds import (
     american_to_decimal,
     american_to_implied_prob,
@@ -11,6 +19,8 @@ from mma_model.value.odds import (
     validate_decimal_odds,
     validate_probability,
 )
+
+CLV_UNIT = "probability_points"
 
 
 def expected_value(model_prob: float, offered_decimal: float) -> float:
@@ -21,8 +31,23 @@ def expected_value(model_prob: float, offered_decimal: float) -> float:
 
 
 def closing_ev(model_prob: float, closing_decimal: float) -> float:
-    """EV versus the same-line closing decimal price."""
+    """EV versus a closing decimal price (caller must enforce same selection)."""
     return expected_value(model_prob, closing_decimal)
+
+
+def unsafe_same_line_probability_clv(
+    *,
+    bet_decimal: float,
+    close_decimal: float,
+) -> float:
+    """Low-level numeric CLV without selection/time identity checks.
+
+    Returns probability points: ``implied(close) - implied(bet)``.
+    Product paths must use ``same_selection_probability_clv``.
+    """
+    bet_implied = decimal_to_implied_prob(bet_decimal)
+    close_implied = decimal_to_implied_prob(close_decimal)
+    return close_implied - bet_implied
 
 
 def same_line_probability_clv(
@@ -30,13 +55,39 @@ def same_line_probability_clv(
     bet_decimal: float,
     close_decimal: float,
 ) -> float:
-    """Same-line probability CLV: ``implied(close) - implied(bet)``.
+    """Deprecated alias for ``unsafe_same_line_probability_clv``."""
+    return unsafe_same_line_probability_clv(
+        bet_decimal=bet_decimal,
+        close_decimal=close_decimal,
+    )
+
+
+def same_selection_probability_clv(
+    *,
+    opening: SelectionPriceObservation,
+    closing: SelectionPriceObservation,
+) -> float:
+    """Same-selection probability CLV in probability points.
 
     Positive means the bet price beat the close (lower implied at bet time).
+    Rejects market/outcome/line mismatches and closing time before bet time.
     """
-    bet_implied = decimal_to_implied_prob(bet_decimal)
-    close_implied = decimal_to_implied_prob(close_decimal)
-    return close_implied - bet_implied
+    assert_same_selection(opening, closing)
+    return unsafe_same_line_probability_clv(
+        bet_decimal=opening.price_decimal,
+        close_decimal=closing.price_decimal,
+    )
+
+
+def same_selection_closing_ev(
+    *,
+    model_prob: float,
+    opening: SelectionPriceObservation,
+    closing: SelectionPriceObservation,
+) -> float:
+    """Closing EV after enforcing same-selection identity with ``opening``."""
+    assert_same_selection(opening, closing)
+    return closing_ev(model_prob, closing.price_decimal)
 
 
 def flat_unit_profit(
@@ -74,8 +125,8 @@ def ev_vs_fair(model_prob: float, offered_american: float) -> float:
         raise
 
 
-# Re-export for legacy tests / callers.
 __all__ = [
+    "CLV_UNIT",
     "american_to_implied_prob",
     "closing_ev",
     "compute_exact_ev",
@@ -83,4 +134,7 @@ __all__ = [
     "expected_value",
     "flat_unit_profit",
     "same_line_probability_clv",
+    "same_selection_closing_ev",
+    "same_selection_probability_clv",
+    "unsafe_same_line_probability_clv",
 ]

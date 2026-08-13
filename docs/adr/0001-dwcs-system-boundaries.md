@@ -99,11 +99,11 @@ here in DWCS-001.
    events to canonical bouts via exact provider IDs / participant pairs, versions
    aliases through replacements/cancellations, and blocks ambiguous or
    non-active lifecycles from value calculations. DWCS-204 centralizes validated
-   odds/probability math, complete-set proportional de-vig, fair/actionable/
+   odds/probability math, canonical complete-set proportional de-vig, fair/actionable/
    strong-value thresholds, and priced-only EV/CLV/flat-profit/quarter-Kelly
-   (1% bankroll cap) behind explicit method/version identity. Missing Bet365 must not block
-   sportsbook-agnostic price targets; reference quotes are never labeled as
-   Bet365.
+   (hard 1% bankroll cap) behind typed provenance evidence and method/version
+   identity. Missing Bet365 must not block sportsbook-agnostic price targets;
+   reference quotes are never labeled as Bet365.
 
 ## Consequences
 

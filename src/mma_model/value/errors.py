@@ -12,11 +12,19 @@ class InvalidOddsError(OddsMathError):
 
 
 class InvalidProbabilityError(OddsMathError):
-    """Probability is outside the allowed open/closed interval."""
+    """Probability is outside the allowed open interval (0, 1)."""
+
+
+class InvalidMarketSetSpecError(OddsMathError):
+    """De-vig market identity / outcome-key specification is invalid."""
 
 
 class IncompleteMarketSetError(OddsMathError):
     """De-vig requires a complete outcome set; the supplied set is incomplete."""
+
+
+class SelectionMismatchError(OddsMathError):
+    """Opening/closing prices do not share the same canonical selection identity."""
 
 
 class UnpricedMetricsError(OddsMathError):

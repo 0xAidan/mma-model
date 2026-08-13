@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from mma_model.value.errors import InvalidOddsError, InvalidProbabilityError
@@ -34,17 +36,23 @@ def test_rejects_ambiguous_short_american() -> None:
         validate_american_odds(1.74)
 
 
-def test_rejects_impossible_decimal_and_probability() -> None:
+def test_rejects_impossible_decimal_probability_nan_inf_and_one() -> None:
     with pytest.raises(InvalidOddsError):
         validate_decimal_odds(1.0)
     with pytest.raises(InvalidOddsError):
-        validate_decimal_odds(0.5)
+        validate_decimal_odds(math.nan)
+    with pytest.raises(InvalidOddsError):
+        validate_decimal_odds(math.inf)
     with pytest.raises(InvalidProbabilityError):
         validate_probability(0.0)
     with pytest.raises(InvalidProbabilityError):
         validate_probability(1.0)
     with pytest.raises(InvalidProbabilityError):
-        validate_probability(-0.1)
+        validate_probability(math.nan)
+    with pytest.raises(InvalidProbabilityError):
+        validate_probability(math.inf)
+    with pytest.raises(InvalidProbabilityError):
+        probability_to_decimal(1.0)
 
 
 def test_american_decimal_round_trip_known_points() -> None:
@@ -55,11 +63,9 @@ def test_american_decimal_round_trip_known_points() -> None:
     assert decimal_to_american(2.0) == pytest.approx(100.0)
     assert decimal_to_american(1.5) == pytest.approx(-200.0)
     assert decimal_to_implied_prob(2.0) == pytest.approx(0.5)
-    assert probability_to_decimal(0.5, allow_one=True) == pytest.approx(2.0)
+    assert probability_to_decimal(0.5) == pytest.approx(2.0)
 
 
 def test_display_rounding_is_boundary_only() -> None:
     raw = american_to_decimal(-150)
     assert round_decimal_for_display(raw) == pytest.approx(1.666667)
-    # Internal conversion remains unrounded relative to the display helper.
-    assert raw != round(raw, 4) or True

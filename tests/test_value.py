@@ -13,6 +13,6 @@ def test_ev_positive_edge():
 
 
 def test_fractional_kelly_non_negative():
-    k = fractional_kelly(0.55, -110, fraction=0.25, cap=0.05)
+    k = fractional_kelly(0.55, -110, fraction=0.25, cap=0.01)
     assert k >= 0
-    assert k <= 0.05
+    assert k <= 0.01

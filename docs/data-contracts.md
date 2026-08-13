@@ -296,13 +296,16 @@ Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exa
 
 | Field | Value |
 |-------|--------|
-| **Package** | `mma_model.value` (`odds`, `devig`, `thresholds`, `ev`, `kelly`, `portfolio`, `priced`) |
+| **Package** | `mma_model.value` (`odds`, `devig`, `thresholds`, `ev`, `kelly`, `portfolio`, `priced`, `evidence`) |
 | **Method / version** | `VALUE_MATH_METHOD=dwcs_value_math` / `VALUE_MATH_VERSION=1.0.0`; de-vig `proportional_complete_set` `1.0.0` |
-| **Odds interface** | Validated decimal (`> 1`) and American (`<= -100` or `>= +100`); reject `0` American and impossible probabilities |
-| **De-vig** | Complete-set proportional only; incomplete sets return `IncompleteMarketSet` / raise; fair probs sum to 1 |
+| **Odds interface** | Validated finite decimal (`> 1`) and American (`<= -100` or `>= +100`); reject `0` American; calibrated probs strictly `(0, 1)` |
+| **De-vig** | Canonical completeness requires DWCS-200 family (+ `scheduled_rounds` / totals `line_point`) and the exact catalog outcome-key set; invalid odds raise `InvalidOddsError`; incomplete sets return `IncompleteMarketSet`. Totals lines are separate over/under sets. Generic API requires explicit `expected_outcome_keys` and never claims canonical completeness without a family. Overround unit = probability mass (`sum(implied) - 1`). |
 | **Thresholds** | Fair `1/p50`, p25 break-even, actionable `max(1/p25,(1+target)/p50)`, strong-value at 10% (exact-round actionable 10%) — pinned to DWCS-001 formulas |
-| **Priced metrics** | EV, same-line probability CLV, closing EV, flat 1-unit profit, quarter-Kelly capped at 1% bankroll |
-| **Eligibility** | Provider quotes require DWCS-203 quote-level eligibility (match gate alone insufficient); user-observed uses DWCS-202 product eligibility |
+| **Priced metrics** | Require typed provenance evidence (DWCS-202 `ManualObservedPriceEvidence` or quote + DWCS-203 `QuoteEligibilityEvidence`). Booleans alone cannot grant metrics. EV / quarter-Kelly / stake; same-selection CLV + closing EV only with identity-matched closing observation; flat profit only when settled. |
+| **CLV unit** | Probability points (`implied(close) - implied(bet)`), not percent and not a price ratio |
+| **Partial availability** | Unresolved settlement suppresses realized profit only; missing close suppresses CLV/closing EV only (`MISSING_CLOSING_PRICE`) |
+| **Kelly** | Production quarter fraction fixed at 0.25; hard max bankroll cap `0.01` (cannot raise) |
+| **Normalize** | Known `odds_format='american'` rejects `(-100, 100)`; decimal pass-through only via `coerce_unknown_odds_price_to_decimal` / `unknown|legacy|auto` |
 | **Unpriced** | Price-target rows never receive EV / ROI / CLV / realized profit / stake |
 | **Push / void** | Realized flat-unit profit is exactly `0` |
 | **Rounding** | Full precision internally; display helpers only at boundaries |

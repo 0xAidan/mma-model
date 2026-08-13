@@ -74,9 +74,16 @@ def _session(tmp_path: Path):
 
 
 def test_american_and_decimal_price_conversion() -> None:
+    from mma_model.odds.normalize import coerce_unknown_odds_price_to_decimal
+
     assert american_to_decimal(-150) == pytest.approx(1.666667)
     assert american_to_decimal(130) == pytest.approx(2.3)
-    assert american_to_decimal(1.74) == pytest.approx(1.74)
+    with pytest.raises(ValueError):
+        american_to_decimal(1.74)
+    with pytest.raises(ValueError):
+        american_to_decimal(50)
+    # Decimal pass-through only on explicit unknown/legacy coercion.
+    assert coerce_unknown_odds_price_to_decimal(1.74) == pytest.approx(1.74)
 
 
 def test_current_and_historical_fixtures_normalize_identically() -> None:
