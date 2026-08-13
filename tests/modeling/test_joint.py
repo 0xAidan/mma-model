@@ -32,13 +32,15 @@ from mma_model.modeling.joint import (
     PINNED_JOINT_SPEC_HASH,
     PROBABILITY_CLIP_TOLERANCE,
     SWAP_ATOL,
-    DecisionClass,
     EarlyTechnicalOutcomeError,
     HazardClass,
     JointNumericalError,
     JointPredictor,
+    JointSpecError,
     MissingJointClassError,
+    OofSkipReason,
     _classify_sample,
+    _collect_oof,
     expand_person_period,
     fit_joint_predictor,
     identify_model_family,
@@ -51,6 +53,7 @@ from mma_model.modeling.joint import (
     stable_softmax,
     survival_multiply,
 )
+from mma_model.modeling.splits import tuning_folds
 from mma_model.quality.constants import EXIT_OK
 
 N_FEATURES = len(FEATURE_NAMES)
@@ -75,8 +78,6 @@ def _identity_predictor(*, ko_anti: float = 0.0) -> JointPredictor:
         spec_hash=spec_hash(),
         spec_version="dwcs_pit_v1.1",
         clip_tolerance=PROBABILITY_CLIP_TOLERANCE,
-        inactive_hazard=(),
-        inactive_decision=(),
     )
 
 
@@ -103,8 +104,12 @@ def _hand_hazard_probs(*, scheduled_rounds: int) -> np.ndarray:
 def test_joint_spec_hash_is_pinned() -> None:
     spec = load_joint_spec()
     assert spec.content_hash == PINNED_JOINT_SPEC_HASH
+    assert spec.spec_version == "1.1.0"
     assert spec.ordinary_allow_holdout is False
     assert spec.tied_ab_parameters is True
+    assert spec.swap_augment is False
+    assert spec.solver == "lbfgs"
+    assert spec.atom_sum_tolerance == 1e-10
     packaged = load_joint_spec(path=Path("config/model_specs/joint_v1.yaml"))
     assert packaged.content_hash == PINNED_JOINT_SPEC_HASH
     assert identify_model_family(Path("config/model_specs/joint_v1.yaml")) == "joint"
@@ -307,19 +312,13 @@ def test_early_technical_fails_by_default_and_pooling_is_documented() -> None:
     assert hazard is HazardClass.A_OTHER_STOPPAGE
     assert decision is None
     assert interval == 0
-    kind_d, hazard_d, decision_d, _unused = _classify_sample(
-        label,
-        duration_interval=0,
-        scheduled_rounds=3,
-        early_mode="pool_as_distance",
-        bout_id="td-early",
-    )
-    assert kind_d.value == "distance"
-    assert hazard_d is None
-    assert decision_d is DecisionClass.A_DECISION
+    payload = yaml.safe_load(Path("src/mma_model/modeling/joint_v1.yaml").read_text())
+    payload["early_technical"] = "pool_as_distance"
+    with pytest.raises(JointSpecError, match="pool_as_distance"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
 
 
-def test_missing_classes_fail_and_documented_pooling_works() -> None:
+def test_missing_classes_fail_closed_and_pool_config_is_rejected() -> None:
     spec = load_joint_spec()
     cards, snapshot = joint_protocol_training_universe()
     samples = [
@@ -332,19 +331,38 @@ def test_missing_classes_fail_and_documented_pooling_works() -> None:
     with pytest.raises(MissingJointClassError, match="a_other_stoppage") as exc:
         fit_joint_predictor(samples, spec)
     assert "a_other_stoppage" in exc.value.missing
+    assert "b_other_stoppage" in exc.value.missing
     payload = yaml.safe_load(Path("src/mma_model/modeling/joint_v1.yaml").read_text())
     payload["missing_classes"] = "pool"
+    with pytest.raises(JointSpecError, match="unsupported"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
+    payload["missing_classes"] = "fail"
     payload["class_pooling"] = {
         "a_other_stoppage": "a_ko_tko",
         "b_other_stoppage": "b_ko_tko",
     }
-    pooled = parse_joint_spec(payload, enforce_pinned_digest=False)
-    model = fit_joint_predictor(samples, pooled)
-    assert "a_other_stoppage" in model.inactive_hazard
-    fine = model.predict_fine(samples[0].values, scheduled_rounds=3)
-    other_mass = sum(value for key, value in fine.items() if "other_stoppage" in key)
-    assert other_mass == pytest.approx(0.0, abs=1e-12)
-    _assert_simplex(fine)
+    with pytest.raises(JointSpecError, match="class_pooling"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
+
+
+def test_spec_rejects_dishonest_solver_rounds_tolerance_and_swap_augment() -> None:
+    payload = yaml.safe_load(Path("src/mma_model/modeling/joint_v1.yaml").read_text())
+    payload["estimator"] = dict(payload["estimator"])
+    payload["estimator"]["solver"] = "saga"
+    with pytest.raises(JointSpecError, match="lbfgs"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
+    payload = yaml.safe_load(Path("src/mma_model/modeling/joint_v1.yaml").read_text())
+    payload["supported_scheduled_rounds"] = [3]
+    with pytest.raises(JointSpecError, match="supported_scheduled_rounds"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
+    payload = yaml.safe_load(Path("src/mma_model/modeling/joint_v1.yaml").read_text())
+    payload["atom_sum_tolerance"] = 1.0e-8
+    with pytest.raises(JointSpecError, match="atom_sum_tolerance"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
+    payload = yaml.safe_load(Path("src/mma_model/modeling/joint_v1.yaml").read_text())
+    payload["swap_augment"] = True
+    with pytest.raises(JointSpecError, match="swap_augment"):
+        parse_joint_spec(payload, enforce_pinned_digest=False)
 
 
 def test_decisions_only_receive_remaining_survival() -> None:
@@ -364,11 +382,21 @@ def test_protocol_train_exposes_oof_and_raw_fitted_swap(tmp_path: Path) -> None:
     assert report.model_id == "M2"
     assert "j25-hold" not in report.train_sample_ids
     assert report.metrics["n_oof"] >= 1
+    assert report.metrics["n_oof_expected"] == (
+        report.metrics["n_oof_emitted"] + report.metrics["n_oof_excluded_bouts"]
+    )
+    assert report.metrics["n_oof_emitted"] == report.metrics["n_oof"]
     oof = report.metrics["oof_predictions"]
     assert oof[0]["hazard_logits"]
     assert oof[0]["fine_probabilities"]
+    assert oof[0]["train_event_ids"]
+    assert oof[0]["train_event_ids_hash"]
+    assert oof[0]["train_max_timestamp"]
+    exclusions = report.metrics["oof_exclusions"]
+    assert any(item["reason_code"] == "empty_train" for item in exclusions)
     loaded = load_joint_artifact(tmp_path / "joint.json")
     assert loaded.payload["payload_kind"] == "tied_competing_risks_v1"
+    assert loaded.payload["oof_exclusions"] == exclusions
     spec = load_joint_spec()
     cards, snapshot = joint_protocol_training_universe()
     samples = joint_samples_from_snapshot(snapshot, cards, spec)
@@ -381,6 +409,66 @@ def test_protocol_train_exposes_oof_and_raw_fitted_swap(tmp_path: Path) -> None:
     for key in fine:
         assert swapped_input[key] == pytest.approx(mapped[key], abs=1e-8)
     _assert_simplex(fine)
+
+
+def test_sparse_fold_emits_explicit_exclusion_with_exact_missing_classes() -> None:
+    spec = load_joint_spec()
+    cards, snapshot = joint_protocol_training_universe()
+    samples = [
+        sample
+        for sample in joint_samples_from_snapshot(snapshot, cards, spec)
+        if sample.hazard_class
+        not in {HazardClass.A_OTHER_STOPPAGE, HazardClass.B_OTHER_STOPPAGE}
+        and sample.sample_id != "j24-aoth"
+    ]
+    inner = tuning_folds(cards, require_target_cards=False)
+    collected = _collect_oof(inner, samples, spec)
+    missing = [
+        item
+        for item in collected.exclusions
+        if item.reason_code is OofSkipReason.MISSING_CLASSES
+    ]
+    assert missing
+    first = missing[0]
+    assert first.missing_classes == ("a_other_stoppage", "b_other_stoppage")
+    assert first.test_event_ids
+    assert first.n_test >= 1
+    emitted_events = {row["event_id"] for row in collected.predictions}
+    emitted_bouts = {row["bout_id"] for row in collected.predictions}
+    for event_id in first.test_event_ids:
+        assert event_id not in emitted_events
+    for bout_id in first.test_bout_ids:
+        assert bout_id not in emitted_bouts
+    collected.reconcile()
+    assert collected.n_expected == collected.n_emitted + collected.excluded_bouts()
+
+
+def test_tied_multinomial_raises_when_optimizer_does_not_succeed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scipy.optimize import OptimizeResult
+
+    def fake_minimize(*args: object, **kwargs: object) -> OptimizeResult:
+        x0 = args[1]
+        return OptimizeResult(
+            x=np.zeros_like(x0),
+            success=False,
+            status=1,
+            message="forced failure",
+            nit=3,
+        )
+
+    monkeypatch.setattr("mma_model.modeling.joint.minimize", fake_minimize)
+    spec = load_joint_spec()
+    cards, snapshot = joint_protocol_training_universe()
+    samples = joint_samples_from_snapshot(snapshot, cards, spec)
+    with pytest.raises(JointNumericalError, match="L-BFGS-B failed") as exc:
+        fit_joint_predictor(samples, spec)
+    assert "forced failure" in str(exc.value)
+    assert "nit=3" in str(exc.value)
+    assert "status=1" in str(exc.value)
+    assert exc.value.status == 1
+    assert exc.value.nit == 3
 
 
 def test_joint_model_train_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -402,4 +490,26 @@ def test_joint_model_train_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str
     assert payload["model_id"] == "M2"
     assert Path(payload["artifact_path"]).is_file()
     assert "j25-hold" not in payload["train_sample_ids"]
+    metrics = payload["metrics"]
+    assert metrics["n_oof_expected"] == metrics["n_oof_emitted"] + metrics["n_oof_excluded_bouts"]
+    assert "oof_exclusions" in metrics
+    bout_id = payload["train_sample_ids"][0]
+    predict_code = main(
+        [
+            "model",
+            "predict",
+            "--artifact",
+            str(out),
+            "--fixture",
+            "protocol",
+            "--bout-id",
+            bout_id,
+        ]
+    )
+    assert predict_code == EXIT_OK
+    scored = json.loads(capsys.readouterr().out)
+    assert 0.0 < scored["p_fighter_a"] < 1.0
+    assert scored["scheduled_rounds"] in (3, 5)
+    assert "predict_fine" in scored["prediction_api"]
+    assert scored["frozen_probabilities"]
 

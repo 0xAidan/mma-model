@@ -24,6 +24,7 @@ from scipy.optimize import minimize
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy.orm import Session
 
+from mma_model.domain.markets import OutcomeKey
 from mma_model.dwcs.classification import SeriesVariant
 from mma_model.dwcs.duration import DurationStatus
 from mma_model.evaluation.contract import (
@@ -51,7 +52,6 @@ from mma_model.features.spec import (
     FeatureRole,
     row_bytes,
     spec_hash,
-    swap_values,
 )
 from mma_model.labels.outcomes import (
     MethodLabel,
@@ -94,6 +94,7 @@ from mma_model.modeling.baselines import (
 )
 from mma_model.modeling.splits import (
     FoldKind,
+    FoldMetadata,
     FoldPlan,
     FoldRole,
     HoldoutLockedError,
@@ -104,12 +105,13 @@ from mma_model.modeling.splits import (
     tuning_folds,
     validation_folds,
 )
+from mma_model.quality.schema import sha256_canonical
 
 JOINT_SPEC_FILENAME: Final = "joint_v1.yaml"
 JOINT_SPEC_ID: Final = "joint_v1"
 JOINT_CONTRACT_ID: Final = "dwcs_model_spec"
 EXPECTED_JOINT_SCHEMA_VERSION: Final = 1
-EXPECTED_JOINT_SPEC_VERSION: Final = "1.0.0"
+EXPECTED_JOINT_SPEC_VERSION: Final = "1.1.0"
 EXPECTED_JOINT_MODEL_ID: Final = "M2"
 EXPECTED_JOINT_FAMILY: Final = "competing_risks"
 EXPECTED_CUTOFF_POLICY: Final = "scheduled_minus_60m"
@@ -119,12 +121,16 @@ ESTIMATOR_KIND: Final = "tied_multinomial_hazards_plus_decision"
 MAX_INTERVALS: Final = 10
 SWAP_ATOL: Final = 1e-8
 PROBABILITY_CLIP_TOLERANCE: Final = 1e-12
+SPEC_SOLVER_TOKEN: Final = "lbfgs"
+SCIPY_LBFGS_METHOD: Final = "L-BFGS-B"
+REQUIRED_SCHEDULED_ROUNDS: Final = (3, 5)
+REQUIRED_ATOM_SUM_TOLERANCE: Final = 1e-10
 PINNED_JOINT_SPEC_HASH: Final = (
-    "0ba554c635cec82c36c6c887ac0c4186a141d10a6a088b6cb035bd2b48008fac"
+    "f3249e2e786ba16d66f85c5614d4037f00c7d5e48b0b49c5969f5dbdc18986ec"
 )
 
-MissingClassMode = Literal["fail", "pool"]
-EarlyTechnicalMode = Literal["fail", "pool_other_stoppage", "pool_as_distance"]
+MissingClassMode = Literal["fail"]
+EarlyTechnicalMode = Literal["fail", "pool_other_stoppage"]
 ModelFamilyKind = Literal["ridge", "joint"]
 
 
@@ -186,7 +192,8 @@ class MissingJointClassError(JointError):
         listed = ", ".join(self.missing) if self.missing else "(none)"
         super().__init__(
             "required joint classes are missing from training labels: "
-            f"{listed}. Declare class_pooling in the spec or add labeled rows."
+            f"{listed}. v1 does not support class pooling; add labeled rows "
+            "or exclude the fold with an explicit OOF exclusion."
         )
 
 
@@ -196,6 +203,76 @@ class EarlyTechnicalOutcomeError(JointError):
 
 class JointNumericalError(JointError):
     """Logits or probabilities were non-finite or failed normalization."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: object | None = None,
+        nit: object | None = None,
+    ) -> None:
+        self.status = status
+        self.nit = nit
+        super().__init__(message)
+
+
+class OofSkipReason(StrEnum):
+    EMPTY_TRAIN = "empty_train"
+    EMPTY_TEST = "empty_test"
+    MISSING_CLASSES = "missing_classes"
+
+
+@dataclass(frozen=True)
+class OofExclusion:
+    fold_id: str
+    fold_kind: str
+    test_event_ids: tuple[str, ...]
+    reason_code: OofSkipReason
+    missing_classes: tuple[str, ...]
+    n_train: int
+    n_test: int
+    test_bout_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fold_id": self.fold_id,
+            "fold_kind": self.fold_kind,
+            "missing_classes": list(self.missing_classes),
+            "n_test": self.n_test,
+            "n_train": self.n_train,
+            "reason_code": self.reason_code.value,
+            "test_bout_ids": list(self.test_bout_ids),
+            "test_event_ids": list(self.test_event_ids),
+        }
+
+
+@dataclass(frozen=True)
+class OofCollection:
+    predictions: tuple[dict[str, Any], ...]
+    exclusions: tuple[OofExclusion, ...]
+    n_expected: int
+    n_emitted: int
+
+    def excluded_bouts(self) -> int:
+        return sum(item.n_test for item in self.exclusions)
+
+    def excluded_events(self) -> int:
+        return len(
+            {event_id for item in self.exclusions for event_id in item.test_event_ids}
+        )
+
+    def reconcile(self) -> None:
+        if self.n_emitted != len(self.predictions):
+            raise JointError(
+                f"n_oof_emitted {self.n_emitted} != {len(self.predictions)} prediction rows"
+            )
+        excluded = self.excluded_bouts()
+        if self.n_emitted + excluded != self.n_expected:
+            raise JointError(
+                "OOF counts do not reconcile: "
+                f"n_oof_expected={self.n_expected} n_oof_emitted={self.n_emitted} "
+                f"n_oof_excluded_bouts={excluded}"
+            )
 
 
 def oriented_features(values: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
@@ -393,8 +470,6 @@ def survival_multiply(
     *,
     scheduled_rounds: int,
     clip_tolerance: float = PROBABILITY_CLIP_TOLERANCE,
-    inactive_hazard: frozenset[HazardClass] | None = None,
-    inactive_decision: frozenset[DecisionClass] | None = None,
 ) -> dict[str, float]:
     """P(cause at t) = S_t * h_cause,t; remaining survival goes to the decision head."""
     rounds_n = interval_count_for_schedule(scheduled_rounds)
@@ -406,15 +481,13 @@ def survival_multiply(
         )
     if decisions.shape != (len(DECISION_CLASSES),):
         raise JointError(f"decision_probs must have shape (3,), got {decisions.shape}")
-    skipped_h = inactive_hazard or frozenset()
-    skipped_d = inactive_decision or frozenset()
     fine = {key: 0.0 for key in fine_atom_keys(scheduled_rounds)}
     survival = 1.0
     for interval in range(rounds_n):
-        row = np.array(hazards[interval], dtype=np.float64, copy=True)
-        for cls in skipped_h:
-            row[HAZARD_INDEX[cls]] = 0.0
-        row = _renormalize_simplex(row, name=f"hazard[{interval}]")
+        row = _renormalize_simplex(
+            np.asarray(hazards[interval], dtype=np.float64),
+            name=f"hazard[{interval}]",
+        )
         for cls in FINISH_HAZARD_CLASSES:
             fine[finish_atom_key_for_hazard(cls, interval)] = float(
                 survival * row[HAZARD_INDEX[cls]]
@@ -422,10 +495,10 @@ def survival_multiply(
         survival = float(survival * row[CONTINUE_INDEX])
         if not math.isfinite(survival) or survival < 0.0:
             raise JointNumericalError("survival path is not a finite non-negative mass")
-    dec = np.array(decisions, dtype=np.float64, copy=True)
-    for cls in skipped_d:
-        dec[DECISION_INDEX[cls]] = 0.0
-    dec = _renormalize_simplex(dec, name="decision")
+    dec = _renormalize_simplex(
+        np.asarray(decisions, dtype=np.float64),
+        name="decision",
+    )
     fine["a_decision"] = float(survival * dec[DECISION_INDEX[DecisionClass.A_DECISION]])
     fine["b_decision"] = float(survival * dec[DECISION_INDEX[DecisionClass.B_DECISION]])
     fine["draw"] = float(survival * dec[DECISION_INDEX[DecisionClass.DRAW]])
@@ -460,7 +533,6 @@ class JointModelSpec:
     cutoff_policy: str
     missing_classes: MissingClassMode
     early_technical: EarlyTechnicalMode
-    class_pooling: Mapping[str, str]
     probability_clip_tolerance: float
     atom_sum_tolerance: float
     content_hash: str
@@ -539,24 +611,80 @@ def _require_false_holdout(value: object) -> bool:
 
 
 def _parse_missing_mode(value: object) -> MissingClassMode:
-    if value == "fail":
+    if value is None or value == "fail":
         return "fail"
     if value == "pool":
-        return "pool"
-    raise JointSpecError(f"missing_classes must be 'fail' or 'pool', got {value!r}")
+        raise JointSpecError(
+            "missing_classes=pool is unsupported in v1; structural tied pooling "
+            "is mathematically inconsistent with serving. Keep missing_classes=fail."
+        )
+    raise JointSpecError(f"missing_classes must be 'fail', got {value!r}")
 
 
 def _parse_early_mode(value: object) -> EarlyTechnicalMode:
-    if value == "fail":
+    if value is None or value == "fail":
         return "fail"
     if value == "pool_other_stoppage":
         return "pool_other_stoppage"
     if value == "pool_as_distance":
-        return "pool_as_distance"
+        raise JointSpecError(
+            "early_technical=pool_as_distance is unsupported; it pretends survival "
+            "through later intervals. Use fail or winner-defined pool_other_stoppage."
+        )
     raise JointSpecError(
-        "early_technical must be fail, pool_other_stoppage, or pool_as_distance, "
-        f"got {value!r}"
+        f"early_technical must be fail or pool_other_stoppage, got {value!r}"
     )
+
+
+def _require_empty_class_pooling(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise JointSpecError("class_pooling must be a mapping")
+    if value:
+        raise JointSpecError(
+            "class_pooling is unsupported in v1; structural tied pooling is not "
+            "implemented. Leave class_pooling empty and use missing_classes=fail."
+        )
+
+
+def _require_lbfgs_solver(value: object) -> str:
+    if value != SPEC_SOLVER_TOKEN:
+        raise JointSpecError(
+            "estimator.solver must be 'lbfgs' (the spec token for scipy.optimize "
+            f"method {SCIPY_LBFGS_METHOD})"
+        )
+    return SPEC_SOLVER_TOKEN
+
+
+def _require_scheduled_rounds(value: object) -> None:
+    if not isinstance(value, list):
+        raise JointSpecError("supported_scheduled_rounds must be [3, 5]")
+    try:
+        rounds = tuple(int(item) for item in value)
+    except (TypeError, ValueError) as exc:
+        raise JointSpecError("supported_scheduled_rounds must be [3, 5]") from exc
+    if rounds != REQUIRED_SCHEDULED_ROUNDS:
+        raise JointSpecError("supported_scheduled_rounds must be [3, 5]")
+
+
+def _require_atom_sum_tolerance(value: object) -> float:
+    try:
+        tolerance = float(value)
+    except (TypeError, ValueError) as exc:
+        raise JointSpecError("atom_sum_tolerance must be 1e-10") from exc
+    if tolerance != REQUIRED_ATOM_SUM_TOLERANCE:
+        raise JointSpecError("atom_sum_tolerance must be 1e-10")
+    return tolerance
+
+
+def _scipy_lbfgs_method(solver: str) -> str:
+    if solver != SPEC_SOLVER_TOKEN:
+        raise JointError(
+            f"estimator.solver {solver!r} is not {SPEC_SOLVER_TOKEN!r} "
+            f"(scipy {SCIPY_LBFGS_METHOD})"
+        )
+    return SCIPY_LBFGS_METHOD
 
 
 def parse_joint_spec(
@@ -593,15 +721,18 @@ def parse_joint_spec(
         raise JointSpecError("cutoff_policy must be scheduled_minus_60m")
     if payload.get("standardize") is not True:
         raise JointSpecError("standardize must be true")
-    if payload.get("swap_augment") is not True:
-        raise JointSpecError("swap_augment must be true")
+    if payload.get("swap_augment") is not False:
+        raise JointSpecError(
+            "swap_augment must be false; tied A/B parameters already guarantee "
+            "raw swap equivariance. Duplicating orientations would silently "
+            "double NLL relative to C."
+        )
     if payload.get("tied_ab_parameters") is not True:
         raise JointSpecError("tied_ab_parameters must be true")
-    pooling = payload.get("class_pooling", {})
-    if pooling is None:
-        pooling = {}
-    if not isinstance(pooling, Mapping):
-        raise JointSpecError("class_pooling must be a mapping")
+    solver = _require_lbfgs_solver(estimator.get("solver"))
+    _require_empty_class_pooling(payload.get("class_pooling", {}))
+    _require_scheduled_rounds(payload.get("supported_scheduled_rounds"))
+    atom_sum_tolerance = _require_atom_sum_tolerance(payload.get("atom_sum_tolerance"))
     content_hash = compute_joint_spec_hash(payload)
     if enforce_pinned_digest and content_hash != PINNED_JOINT_SPEC_HASH:
         raise JointSpecError(
@@ -615,20 +746,19 @@ def parse_joint_spec(
         penalty=str(estimator["penalty"]),
         C=float(estimator["C"]),
         max_iter=int(estimator["max_iter"]),
-        solver=str(estimator["solver"]),
+        solver=solver,
         standardize=True,
-        swap_augment=True,
+        swap_augment=False,
         tied_ab_parameters=True,
         ordinary_allow_holdout=_require_false_holdout(folds.get("ordinary_allow_holdout")),
         final_refit=str(folds["final_refit"]),
         cutoff_policy=str(payload["cutoff_policy"]),
         missing_classes=_parse_missing_mode(payload.get("missing_classes", "fail")),
         early_technical=_parse_early_mode(payload.get("early_technical", "fail")),
-        class_pooling={str(key): str(value) for key, value in pooling.items()},
         probability_clip_tolerance=float(
             payload.get("probability_clip_tolerance", PROBABILITY_CLIP_TOLERANCE)
         ),
-        atom_sum_tolerance=float(payload.get("atom_sum_tolerance", ATOM_SUM_ATOL)),
+        atom_sum_tolerance=atom_sum_tolerance,
         content_hash=content_hash,
     )
 
@@ -757,33 +887,6 @@ def _chosen_result_row(
     return max(eligible, key=lambda row: (row.effective_at, row.observed_at, row.revision))
 
 
-def _apply_pooling(name: str, pooling: Mapping[str, str], *, seen: set[str] | None = None) -> str:
-    trail = seen if seen is not None else set()
-    if name in trail:
-        raise JointError(f"class_pooling cycle involving {name!r}")
-    target = pooling.get(name)
-    if target is None:
-        return name
-    trail.add(name)
-    return _apply_pooling(target, pooling, seen=trail)
-
-
-def _pool_hazard(value: HazardClass, pooling: Mapping[str, str]) -> HazardClass:
-    mapped = _apply_pooling(value.value, pooling)
-    try:
-        return HazardClass(mapped)
-    except ValueError as exc:
-        raise JointError(f"class_pooling target {mapped!r} is not a hazard class") from exc
-
-
-def _pool_decision(value: DecisionClass, pooling: Mapping[str, str]) -> DecisionClass:
-    mapped = _apply_pooling(value.value, pooling)
-    try:
-        return DecisionClass(mapped)
-    except ValueError as exc:
-        raise JointError(f"class_pooling target {mapped!r} is not a decision class") from exc
-
-
 def _handle_early_technical(
     label: OutcomeLabel,
     *,
@@ -802,23 +905,13 @@ def _handle_early_technical(
     if mode == "fail":
         raise EarlyTechnicalOutcomeError(
             f"{bout_id}: early technical outcome at interval {interval} "
-            "(set early_technical=pool_other_stoppage or pool_as_distance)"
+            "(set early_technical=pool_other_stoppage)"
         )
-    if mode == "pool_as_distance":
-        decision = decision_class_from_atom(label.terminal_atom) if label.terminal_atom else None
-        if decision is None:
-            if label.method is MethodLabel.TECHNICAL_DRAW:
-                decision = DecisionClass.DRAW
-            else:
-                raise EarlyTechnicalOutcomeError(
-                    f"{bout_id}: pool_as_distance needs a decision/draw atom"
-                )
-        return BoutTerminalKind.DISTANCE, None, decision, None
     if mode == "pool_other_stoppage":
         if label.method is MethodLabel.TECHNICAL_DRAW:
             raise EarlyTechnicalOutcomeError(
                 f"{bout_id}: early technical draw has no winner; "
-                "pool_other_stoppage is not defined (use fail or pool_as_distance)"
+                "pool_other_stoppage is not defined (use fail)"
             )
         if label.winner_side is WinnerSide.A:
             return BoutTerminalKind.FINISH, HazardClass.A_OTHER_STOPPAGE, None, interval
@@ -1007,11 +1100,6 @@ def _sample_from_bout(
         early_mode=spec.early_technical,
         bout_id=bout.bout_id,
     )
-    if spec.class_pooling:
-        if hazard is not None:
-            hazard = _pool_hazard(hazard, spec.class_pooling)
-        if decision is not None:
-            decision = _pool_decision(decision, spec.class_pooling)
     row = builder.build(
         bout.fighter_a_id,
         bout.fighter_b_id,
@@ -1048,26 +1136,12 @@ def require_joint_classes(
     *,
     hazard: set[HazardClass],
     decision: set[DecisionClass],
-    spec: JointModelSpec,
-) -> tuple[frozenset[HazardClass], frozenset[DecisionClass]]:
-    """Fail on missing required classes unless the spec declares pooling."""
+) -> None:
+    """Fail closed when any required hazard or decision class is absent."""
     missing = [item.value for item in HAZARD_CLASSES if item not in hazard]
     missing.extend(item.value for item in DECISION_CLASSES if item not in decision)
-    inactive_h = frozenset(item for item in HAZARD_CLASSES if item not in hazard)
-    inactive_d = frozenset(item for item in DECISION_CLASSES if item not in decision)
-    if not missing:
-        return frozenset(), frozenset()
-    if spec.missing_classes == "fail":
+    if missing:
         raise MissingJointClassError(missing)
-    if spec.missing_classes == "pool":
-        undeclared = [
-            name for name in missing if _apply_pooling(name, spec.class_pooling) == name
-        ]
-        if undeclared:
-            raise MissingJointClassError(undeclared)
-        return inactive_h - {HazardClass.CONTINUE}, inactive_d
-    never_mode: Never = spec.missing_classes
-    raise JointError(f"unhandled missing_classes mode: {never_mode!r}")
 
 
 def _hazard_logits_from_oriented(
@@ -1118,6 +1192,7 @@ def _fit_tied_multinomial(
     C: float,
     max_iter: int,
     args: tuple[Any, ...],
+    solver: str = SPEC_SOLVER_TOKEN,
 ) -> np.ndarray:
     def loss_and_grad(theta: np.ndarray) -> tuple[float, np.ndarray]:
         logits = logits_fn(theta, *args)
@@ -1141,10 +1216,17 @@ def _fit_tied_multinomial(
     result = minimize(
         loss_and_grad,
         start,
-        method="L-BFGS-B",
+        method=_scipy_lbfgs_method(solver),
         jac=True,
         options={"maxiter": int(max_iter)},
     )
+    if not bool(result.success):
+        raise JointNumericalError(
+            "tied multinomial L-BFGS-B failed: "
+            f"status={result.status} message={result.message!r} nit={result.nit}",
+            status=result.status,
+            nit=result.nit,
+        )
     if not np.all(np.isfinite(result.x)):
         raise JointNumericalError("tied multinomial fit produced non-finite weights")
     return np.asarray(result.x, dtype=np.float64)
@@ -1268,8 +1350,6 @@ class JointPredictor:
     spec_hash: str
     spec_version: str
     clip_tolerance: float
-    inactive_hazard: tuple[str, ...]
-    inactive_decision: tuple[str, ...]
 
     def _scaled(self, values: Sequence[float]) -> tuple[float, ...]:
         if tuple(self.feature_names) != FEATURE_NAMES:
@@ -1296,15 +1376,11 @@ class JointPredictor:
         for interval in range(rounds_n):
             hazards[interval] = stable_softmax(self.raw_hazard_logits(values, interval))
         decisions = stable_softmax(self.raw_decision_logits(values))
-        inactive_h = frozenset(HazardClass(item) for item in self.inactive_hazard)
-        inactive_d = frozenset(DecisionClass(item) for item in self.inactive_decision)
         return survival_multiply(
             hazards,
             decisions,
             scheduled_rounds=scheduled_rounds,
             clip_tolerance=self.clip_tolerance,
-            inactive_hazard=inactive_h,
-            inactive_decision=inactive_d,
         )
 
     def predict_frozen(
@@ -1324,8 +1400,7 @@ class JointPredictor:
         self,
         sample: JointBoutSample,
         *,
-        fold_id: str,
-        fold_kind: str,
+        fold: FoldMetadata,
     ) -> dict[str, Any]:
         rounds_n = interval_count_for_schedule(sample.scheduled_rounds)
         hazard_logits = [
@@ -1337,16 +1412,26 @@ class JointPredictor:
         frozen = {atom.value: value for atom, value in self.predict_frozen(
             sample.values, scheduled_rounds=sample.scheduled_rounds
         ).items()}
+        train_event_ids = list(fold.train_event_ids)
+        kind = fold.kind.value if isinstance(fold.kind, FoldKind) else str(fold.kind)
         return {
             "bout_id": sample.sample_id,
             "decision_logits": decision_logits,
             "event_id": sample.event_id,
             "fine_probabilities": fine,
-            "fold_id": fold_id,
-            "fold_kind": fold_kind,
+            "fold_id": fold.fold_id,
+            "fold_kind": kind,
             "frozen_probabilities": frozen,
             "hazard_logits": hazard_logits,
             "scheduled_rounds": sample.scheduled_rounds,
+            "test_cutoff": sample.cutoff.isoformat(),
+            "train_event_ids": train_event_ids,
+            "train_event_ids_hash": sha256_canonical({"train_event_ids": train_event_ids}),
+            "train_max_timestamp": (
+                fold.max_train_timestamp.isoformat()
+                if fold.max_train_timestamp is not None
+                else None
+            ),
         }
 
 
@@ -1360,43 +1445,6 @@ def _oriented_stack(rows: Sequence[Sequence[float]]) -> tuple[np.ndarray, np.nda
     return np.vstack(syms), np.vstack(antis)
 
 
-def _augment_hazard(
-    scaled_rows: list[tuple[float, ...]],
-    intervals: list[int],
-    labels: list[int],
-    *,
-    swap_augment: bool,
-) -> tuple[list[tuple[float, ...]], list[int], list[int]]:
-    if not swap_augment:
-        return scaled_rows, intervals, labels
-    out_rows = list(scaled_rows)
-    out_intervals = list(intervals)
-    out_labels = list(labels)
-    for row, interval, label in zip(scaled_rows, intervals, labels, strict=True):
-        out_rows.append(swap_values(row))
-        out_intervals.append(interval)
-        cls = HAZARD_CLASSES[label]
-        out_labels.append(HAZARD_INDEX[swap_hazard_class(cls)])
-    return out_rows, out_intervals, out_labels
-
-
-def _augment_decision(
-    scaled_rows: list[tuple[float, ...]],
-    labels: list[int],
-    *,
-    swap_augment: bool,
-) -> tuple[list[tuple[float, ...]], list[int]]:
-    if not swap_augment:
-        return scaled_rows, labels
-    out_rows = list(scaled_rows)
-    out_labels = list(labels)
-    for row, label in zip(scaled_rows, labels, strict=True):
-        out_rows.append(swap_values(row))
-        cls = DECISION_CLASSES[label]
-        out_labels.append(DECISION_INDEX[swap_decision_class(cls)])
-    return out_rows, out_labels
-
-
 def fit_joint_predictor(
     samples: Sequence[JointBoutSample],
     spec: JointModelSpec,
@@ -1405,6 +1453,10 @@ def fit_joint_predictor(
         raise TrainError("joint fit needs at least one labeled bout")
     if spec.ordinary_allow_holdout:
         raise HoldoutLockedError("joint spec must not enable ordinary holdout")
+    if spec.swap_augment:
+        raise JointSpecError(
+            "swap_augment must be false; tied parameters already guarantee raw equivariance"
+        )
     period_rows: list[PersonPeriodRow] = []
     for sample in samples:
         period_rows.extend(expand_person_period(sample))
@@ -1412,9 +1464,7 @@ def fit_joint_predictor(
         raise TrainError("person-period expansion produced no rows")
     hazard_seen = observed_hazard_classes(period_rows)
     decision_seen = observed_decision_classes(samples)
-    inactive_h, inactive_d = require_joint_classes(
-        hazard=hazard_seen, decision=decision_seen, spec=spec
-    )
+    require_joint_classes(hazard=hazard_seen, decision=decision_seen)
     bout_matrix = np.asarray([list(sample.values) for sample in samples], dtype=np.float64)
     mean, scale = fit_tied_scaler(bout_matrix)
     scaled_period = [
@@ -1422,9 +1472,6 @@ def fit_joint_predictor(
     ]
     intervals = [row.interval for row in period_rows]
     hazard_y = [HAZARD_INDEX[row.hazard_class] for row in period_rows]
-    scaled_period, intervals, hazard_y = _augment_hazard(
-        scaled_period, intervals, hazard_y, swap_augment=spec.swap_augment
-    )
     z_sym, z_anti = _oriented_stack(scaled_period)
     hazard_theta = _fit_tied_multinomial(
         logits_fn=_hazard_batch_logits,
@@ -1432,6 +1479,7 @@ def fit_joint_predictor(
         y=np.asarray(hazard_y, dtype=np.int64),
         C=spec.C,
         max_iter=spec.max_iter,
+        solver=spec.solver,
         args=("hazard", z_sym, z_anti, np.asarray(intervals, dtype=np.int64)),
     )
     decision_samples = [sample for sample in samples if sample.decision_class is not None]
@@ -1439,9 +1487,6 @@ def fit_joint_predictor(
         raise MissingJointClassError([item.value for item in DECISION_CLASSES])
     scaled_dec = [scale_row(sample.values, mean, scale) for sample in decision_samples]
     decision_y = [DECISION_INDEX[sample.decision_class] for sample in decision_samples]
-    scaled_dec, decision_y = _augment_decision(
-        scaled_dec, decision_y, swap_augment=spec.swap_augment
-    )
     d_sym, d_anti = _oriented_stack(scaled_dec)
     decision_theta = _fit_tied_multinomial(
         logits_fn=_decision_batch_logits,
@@ -1449,6 +1494,7 @@ def fit_joint_predictor(
         y=np.asarray(decision_y, dtype=np.int64),
         C=spec.C,
         max_iter=spec.max_iter,
+        solver=spec.solver,
         args=("decision", d_sym, d_anti),
     )
     return JointPredictor(
@@ -1460,8 +1506,6 @@ def fit_joint_predictor(
         spec_hash=spec_hash(),
         spec_version=SPEC_VERSION,
         clip_tolerance=spec.probability_clip_tolerance,
-        inactive_hazard=tuple(item.value for item in sorted(inactive_h, key=lambda x: x.value)),
-        inactive_decision=tuple(item.value for item in sorted(inactive_d, key=lambda x: x.value)),
     )
 
 
@@ -1493,6 +1537,7 @@ def predictor_to_payload(
     cutoff_policy: str,
     metrics: Mapping[str, Any],
     oof_predictions: Sequence[Mapping[str, Any]],
+    oof_exclusions: Sequence[Mapping[str, Any]],
     contract_hash: str,
     config_hash: str,
     splits_config_hash: str,
@@ -1518,13 +1563,12 @@ def predictor_to_payload(
         "feature_spec_hash": predictor.spec_hash,
         "feature_spec_version": predictor.spec_version,
         "hazard_theta": list(predictor.hazard_theta),
-        "inactive_decision": list(predictor.inactive_decision),
-        "inactive_hazard": list(predictor.inactive_hazard),
         "max_train_timestamp": (
             max_train_timestamp.isoformat() if max_train_timestamp is not None else None
         ),
         "metrics": dict(metrics),
         "model_id": model_id,
+        "oof_exclusions": [dict(item) for item in oof_exclusions],
         "oof_predictions": [dict(item) for item in oof_predictions],
         "payload_kind": PAYLOAD_KIND,
         "probability_clip_tolerance": predictor.clip_tolerance,
@@ -1547,6 +1591,7 @@ def save_joint_artifact(
     cutoff_policy: str,
     metrics: Mapping[str, Any],
     oof_predictions: Sequence[Mapping[str, Any]],
+    oof_exclusions: Sequence[Mapping[str, Any]],
     contract_hash: str,
     config_hash: str,
     splits_config_hash: str,
@@ -1567,6 +1612,7 @@ def save_joint_artifact(
         cutoff_policy=cutoff_policy,
         metrics=metrics,
         oof_predictions=oof_predictions,
+        oof_exclusions=oof_exclusions,
         contract_hash=contract_hash,
         config_hash=config_hash,
         splits_config_hash=splits_config_hash,
@@ -1620,6 +1666,7 @@ class LoadedJointArtifact:
     payload_path: Path
     manifest_path: Path
     oof_predictions: tuple[dict[str, Any], ...]
+    oof_exclusions: tuple[dict[str, Any], ...]
 
 
 def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
@@ -1666,6 +1713,8 @@ def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
         raise ArtifactConfigMismatchError("joint artifact config hash mismatch")
     if str(loaded.get("contract_hash", "")) != PINNED_CONTRACT_HASH:
         raise ArtifactConfigMismatchError("joint artifact contract hash mismatch")
+    _reject_inactive_classes(loaded, "inactive_hazard")
+    _reject_inactive_classes(loaded, "inactive_decision")
     predictor = JointPredictor(
         feature_names=FEATURE_NAMES,
         scaler_mean=_require_finite_tuple(
@@ -1683,12 +1732,13 @@ def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
         spec_hash=str(loaded.get("feature_spec_hash", "")),
         spec_version=str(loaded.get("feature_spec_version", SPEC_VERSION)),
         clip_tolerance=float(loaded.get("probability_clip_tolerance", PROBABILITY_CLIP_TOLERANCE)),
-        inactive_hazard=tuple(str(item) for item in loaded.get("inactive_hazard") or ()),
-        inactive_decision=tuple(str(item) for item in loaded.get("inactive_decision") or ()),
     )
     oof = loaded.get("oof_predictions", [])
     if not isinstance(oof, list):
         raise UntrustedArtifactError("oof_predictions must be a list")
+    exclusions = loaded.get("oof_exclusions", [])
+    if not isinstance(exclusions, list):
+        raise UntrustedArtifactError("oof_exclusions must be a list")
     return LoadedJointArtifact(
         payload=loaded,
         predictor=predictor,
@@ -1696,6 +1746,20 @@ def load_joint_artifact(payload_path: Path) -> LoadedJointArtifact:
         payload_path=target,
         manifest_path=side,
         oof_predictions=tuple(dict(item) for item in oof if isinstance(item, dict)),
+        oof_exclusions=tuple(
+            dict(item) for item in exclusions if isinstance(item, dict)
+        ),
+    )
+
+
+def _reject_inactive_classes(loaded: Mapping[str, Any], key: str) -> None:
+    value = loaded.get(key)
+    if value is None:
+        return
+    if isinstance(value, (list, tuple)) and len(value) == 0:
+        return
+    raise UntrustedArtifactError(
+        f"{key} must be absent or empty; asymmetric inactive classes are unsupported"
     )
 
 
@@ -1758,28 +1822,118 @@ def _assert_no_holdout_betting_keys(payload: Mapping[str, Any]) -> None:
             stack.extend(current)
 
 
+def _fold_kind(fold: FoldMetadata) -> str:
+    return fold.kind.value if isinstance(fold.kind, FoldKind) else str(fold.kind)
+
+
+def _oof_exclusion(
+    fold: FoldMetadata,
+    *,
+    reason_code: OofSkipReason,
+    n_train: int,
+    n_test: int,
+    test_bout_ids: Sequence[str],
+    missing_classes: Sequence[str] = (),
+) -> OofExclusion:
+    return OofExclusion(
+        fold_id=fold.fold_id,
+        fold_kind=_fold_kind(fold),
+        test_event_ids=tuple(fold.test_event_ids),
+        reason_code=reason_code,
+        missing_classes=tuple(missing_classes),
+        n_train=n_train,
+        n_test=n_test,
+        test_bout_ids=tuple(test_bout_ids),
+    )
+
+
+def _merge_oof(parts: Sequence[OofCollection]) -> OofCollection:
+    merged = OofCollection(
+        predictions=tuple(row for part in parts for row in part.predictions),
+        exclusions=tuple(item for part in parts for item in part.exclusions),
+        n_expected=sum(part.n_expected for part in parts),
+        n_emitted=sum(part.n_emitted for part in parts),
+    )
+    merged.reconcile()
+    return merged
+
+
+def _oof_metrics(oof: OofCollection) -> dict[str, Any]:
+    oof.reconcile()
+    return {
+        "n_oof": oof.n_emitted,
+        "n_oof_emitted": oof.n_emitted,
+        "n_oof_excluded_bouts": oof.excluded_bouts(),
+        "n_oof_excluded_events": oof.excluded_events(),
+        "n_oof_excluded_folds": len(oof.exclusions),
+        "n_oof_expected": oof.n_expected,
+        "oof_exclusions": [item.to_dict() for item in oof.exclusions],
+        "oof_fold_kinds": sorted({item["fold_kind"] for item in oof.predictions}),
+        "oof_predictions": list(oof.predictions),
+    }
+
+
 def _collect_oof(
     plan: FoldPlan,
     samples: Sequence[JointBoutSample],
     spec: JointModelSpec,
-) -> list[dict[str, Any]]:
+) -> OofCollection:
     rows: list[dict[str, Any]] = []
-    skipped = 0
+    exclusions: list[OofExclusion] = []
+    n_expected = 0
     for fold in plan.folds:
         train = _samples_for_events(samples, fold.train_event_ids)
         test = _samples_for_ids(samples, fold.test_bout_ids)
-        if not train or not test:
-            skipped += 1
+        n_train = len(train)
+        n_test = len(test)
+        n_expected += n_test
+        test_bout_ids = tuple(sample.sample_id for sample in test)
+        if n_train == 0:
+            exclusions.append(
+                _oof_exclusion(
+                    fold,
+                    reason_code=OofSkipReason.EMPTY_TRAIN,
+                    n_train=n_train,
+                    n_test=n_test,
+                    test_bout_ids=test_bout_ids,
+                )
+            )
+            continue
+        if n_test == 0:
+            exclusions.append(
+                _oof_exclusion(
+                    fold,
+                    reason_code=OofSkipReason.EMPTY_TEST,
+                    n_train=n_train,
+                    n_test=n_test,
+                    test_bout_ids=test_bout_ids,
+                )
+            )
             continue
         try:
             model = fit_joint_predictor(train, spec)
-        except MissingJointClassError:
-            skipped += 1
+        except MissingJointClassError as exc:
+            exclusions.append(
+                _oof_exclusion(
+                    fold,
+                    reason_code=OofSkipReason.MISSING_CLASSES,
+                    n_train=n_train,
+                    n_test=n_test,
+                    test_bout_ids=test_bout_ids,
+                    missing_classes=exc.missing,
+                )
+            )
             continue
-        kind = fold.kind.value if isinstance(fold.kind, FoldKind) else str(fold.kind)
         for sample in test:
-            rows.append(model.oof_payload(sample, fold_id=fold.fold_id, fold_kind=kind))
-    return rows
+            rows.append(model.oof_payload(sample, fold=fold))
+    collected = OofCollection(
+        predictions=tuple(rows),
+        exclusions=tuple(exclusions),
+        n_expected=n_expected,
+        n_emitted=len(rows),
+    )
+    collected.reconcile()
+    return collected
 
 
 def train_joint(
@@ -1803,12 +1957,15 @@ def train_joint(
     outer = validation_folds(
         cards, require_target_cards=require_target_cards, contract=contract
     )
-    oof = _collect_oof(inner, samples, spec) + _collect_oof(outer, samples, spec)
+    oof = _merge_oof(
+        (
+            _collect_oof(inner, samples, spec),
+            _collect_oof(outer, samples, spec),
+        )
+    )
     metrics: dict[str, Any] = {
         "n_labeled": len(samples),
-        "n_oof": len(oof),
-        "oof_fold_kinds": sorted({item["fold_kind"] for item in oof}),
-        "oof_predictions": oof,
+        **_oof_metrics(oof),
     }
     _assert_no_holdout_betting_keys(metrics)
     final_rows = _final_refit_samples(samples, cards, contract)
@@ -1830,7 +1987,8 @@ def train_joint(
         max_train_timestamp=max_ts,
         cutoff_policy=spec.cutoff_policy,
         metrics=metrics,
-        oof_predictions=oof,
+        oof_predictions=oof.predictions,
+        oof_exclusions=[item.to_dict() for item in oof.exclusions],
         contract_hash=outer.contract_hash,
         config_hash=spec.content_hash,
         splits_config_hash=outer.config_hash,
@@ -2146,6 +2304,66 @@ def run_protocol_joint_train(
         include_holdout=include_holdout,
         contract=contract,
     )
+
+
+def protocol_joint_feature_vector(
+    bout_id: str,
+) -> tuple[tuple[str, ...], tuple[float, ...], int]:
+    """PIT feature row and scheduled rounds for a joint protocol-fixture bout."""
+    cards, snapshot = joint_protocol_training_universe()
+    card = next((item for item in cards if bout_id in item.bout_ids), None)
+    if card is None:
+        raise TrainError(f"unknown joint protocol bout_id {bout_id!r}")
+    groups = {group.event_id: group for group in group_cards(cards)}
+    role = groups[card.event_id].role
+    if role is FoldRole.HOLDOUT:
+        raise HoldoutLockedError("refusing protocol feature vector for locked 2025 holdout")
+    cutoff = cutoff_for_event(card)
+    bout = snapshot.bout_by_id(bout_id)
+    if bout is None:
+        raise TrainError(f"joint protocol snapshot missing bout {bout_id!r}")
+    row = FeatureBuilder(snapshot).build(
+        bout.fighter_a_id,
+        bout.fighter_b_id,
+        cutoff,
+        bout_id=bout_id,
+    )
+    return row.names, row.values, int(bout.scheduled_rounds)
+
+
+def peek_artifact_payload_kind(path: Path) -> str | None:
+    try:
+        payload = json.loads(Path(path).read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    kind = payload.get("payload_kind")
+    if isinstance(kind, str) and kind:
+        return kind
+    return None
+
+
+def predict_loaded_joint(
+    loaded: LoadedJointArtifact,
+    values: Sequence[float],
+    *,
+    scheduled_rounds: int,
+) -> dict[str, Any]:
+    """Score a joint artifact via predict_fine / predict_markets."""
+    frozen = {
+        atom.value: value
+        for atom, value in loaded.predictor.predict_frozen(
+            values, scheduled_rounds=scheduled_rounds
+        ).items()
+    }
+    markets = loaded.predictor.predict_markets(values, scheduled_rounds=scheduled_rounds)
+    return {
+        "frozen_probabilities": frozen,
+        "p_fighter_a": markets.moneyline[OutcomeKey.FIGHTER_A],
+        "prediction_api": "JointPredictor.predict_fine / predict_markets",
+        "scheduled_rounds": scheduled_rounds,
+    }
 
 
 

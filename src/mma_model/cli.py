@@ -94,12 +94,17 @@ from mma_model.modeling.baselines import (
     train_from_session,
 )
 from mma_model.modeling.joint import (
+    PAYLOAD_KIND as JOINT_PAYLOAD_KIND,
     EarlyTechnicalOutcomeError,
     JointError,
     JointSpecError,
     MissingJointClassError,
     identify_model_family,
+    load_joint_artifact,
     load_joint_spec,
+    peek_artifact_payload_kind,
+    predict_loaded_joint,
+    protocol_joint_feature_vector,
     run_protocol_joint_train,
     train_joint_from_session,
 )
@@ -851,7 +856,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_mpred = model_sub.add_parser(
         "predict",
-        help="Score a matchup from a versioned JSON artifact (DWCS-303)",
+        help="Score a matchup from a versioned JSON ridge or joint artifact",
     )
     p_mpred.add_argument(
         "--artifact",
@@ -2119,13 +2124,74 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "model":
         if args.model_cmd == "predict":
             try:
-                loaded = load_artifact(Path(args.artifact))
+                artifact_path = Path(args.artifact)
+                payload_kind = peek_artifact_payload_kind(artifact_path)
                 if args.features_json is not None and args.fixture is not None:
                     print(
                         "model configuration error: pass --features-json or "
                         "--fixture protocol, not both"
                     )
                     return EXIT_INTERNAL
+                if payload_kind == JOINT_PAYLOAD_KIND:
+                    loaded_joint = load_joint_artifact(artifact_path)
+                    scheduled_rounds: int | None = None
+                    if args.features_json is not None:
+                        raw_features = json.loads(
+                            Path(args.features_json).read_text(encoding="utf-8")
+                        )
+                        if not isinstance(raw_features, dict):
+                            print(
+                                "model configuration error: features-json root must be an object"
+                            )
+                            return EXIT_INTERNAL
+                        if "scheduled_rounds" not in raw_features:
+                            print(
+                                "model configuration error: joint predict requires "
+                                "scheduled_rounds in --features-json"
+                            )
+                            return EXIT_INTERNAL
+                        scheduled_rounds = int(raw_features["scheduled_rounds"])
+                        values = load_feature_vector(raw_features)
+                        names = loaded_joint.predictor.feature_names
+                        bout_id = None
+                    elif args.fixture == "protocol":
+                        bout_id = str(args.bout_id or "").strip()
+                        if not bout_id:
+                            print(
+                                "model configuration error: --fixture protocol requires --bout-id"
+                            )
+                            return EXIT_INTERNAL
+                        names, values, scheduled_rounds = protocol_joint_feature_vector(
+                            bout_id
+                        )
+                    else:
+                        print(
+                            "model configuration error: pass --features-json or "
+                            "--fixture protocol --bout-id"
+                        )
+                        return EXIT_INTERNAL
+                    scored = predict_loaded_joint(
+                        loaded_joint,
+                        values,
+                        scheduled_rounds=scheduled_rounds,
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "artifact_path": str(artifact_path.resolve()),
+                                "bout_id": bout_id,
+                                "feature_names": list(names),
+                                "frozen_probabilities": scored["frozen_probabilities"],
+                                "model_id": loaded_joint.manifest.model_id,
+                                "p_fighter_a": scored["p_fighter_a"],
+                                "prediction_api": scored["prediction_api"],
+                                "scheduled_rounds": scored["scheduled_rounds"],
+                            },
+                            indent=2,
+                        )
+                    )
+                    return 0
+                loaded = load_artifact(artifact_path)
                 if args.features_json is not None:
                     raw_features = json.loads(
                         Path(args.features_json).read_text(encoding="utf-8")
