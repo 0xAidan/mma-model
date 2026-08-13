@@ -112,3 +112,27 @@ def half_round_duration(
         interval_count=interval_count,
         reason=None,
     )
+
+
+def elapsed_seconds_for_rates(
+    *,
+    ending_round: int | None,
+    time_str: str | None,
+    scheduled_rounds: int | None,
+) -> int | None:
+    """Elapsed seconds for PIT rate denominators. Never invents a schedule.
+
+    Missing or unsupported ``scheduled_rounds`` (not in {3, 5}) and missing or
+    invalid clocks all return ``None`` so the bout is excluded from minutes.
+    """
+    if scheduled_rounds is None:
+        return None
+    got = half_round_duration(
+        ending_round=ending_round,
+        time_str=time_str,
+        scheduled_rounds=scheduled_rounds,
+    )
+    if got.status is DurationStatus.VALID and got.elapsed_seconds is not None:
+        if got.elapsed_seconds > 0:
+            return got.elapsed_seconds
+    return None
