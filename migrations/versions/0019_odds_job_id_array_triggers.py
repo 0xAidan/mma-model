@@ -1,7 +1,7 @@
 """Validate odds job quote/availability ID JSON arrays (DWCS-205).
 
-Revision ID: 0018_odds_job_id_array_triggers
-Revises: 0017_odds_job_ledger_integrity
+Revision ID: 0019_odds_job_id_array_triggers
+Revises: 0018_odds_job_ledger_integrity
 Create Date: 2026-08-13
 """
 
@@ -13,8 +13,8 @@ from alembic import op
 
 from mma_model.db.odds_guards import install_odds_sqlite_guards
 
-revision: str = "0018_odds_job_id_array_triggers"
-down_revision: Union[str, Sequence[str], None] = "0017_odds_job_ledger_integrity"
+revision: str = "0019_odds_job_id_array_triggers"
+down_revision: Union[str, Sequence[str], None] = "0018_odds_job_ledger_integrity"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

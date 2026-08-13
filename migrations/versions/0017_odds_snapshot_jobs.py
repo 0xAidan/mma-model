@@ -1,7 +1,7 @@
 """Add odds snapshot job idempotency ledger (DWCS-205).
 
-Revision ID: 0016_odds_snapshot_jobs
-Revises: 0015_quote_eligibility_scope
+Revision ID: 0017_odds_snapshot_jobs
+Revises: 0016_identity_decision_evidence_unique
 Create Date: 2026-08-13
 """
 
@@ -12,8 +12,10 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0016_odds_snapshot_jobs"
-down_revision: Union[str, Sequence[str], None] = "0015_quote_eligibility_scope"
+revision: str = "0017_odds_snapshot_jobs"
+down_revision: Union[str, Sequence[str], None] = (
+    "0016_identity_decision_evidence_unique"
+)
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

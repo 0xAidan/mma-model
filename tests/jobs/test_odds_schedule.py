@@ -2300,7 +2300,7 @@ def test_ledger_id_array_trigger_rejects_invalid_and_downgrade_removes_trigger(s
     cfg.set_main_option("script_location", str(root / "migrations"))
     cfg.set_main_option("sqlalchemy.url", db_url)
     command.upgrade(cfg, "head")
-    command.downgrade(cfg, "0017_odds_job_ledger_integrity")
+    command.downgrade(cfg, "0018_odds_job_ledger_integrity")
     with engine.begin() as conn:
         conn.execute(
             text(

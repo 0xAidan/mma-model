@@ -1,7 +1,7 @@
 """Strengthen odds job ledger integrity + availability IDs (DWCS-205).
 
-Revision ID: 0017_odds_job_ledger_integrity
-Revises: 0016_odds_snapshot_jobs
+Revision ID: 0018_odds_job_ledger_integrity
+Revises: 0017_odds_snapshot_jobs
 Create Date: 2026-08-13
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017_odds_job_ledger_integrity"
-down_revision: Union[str, Sequence[str], None] = "0016_odds_snapshot_jobs"
+revision: str = "0018_odds_job_ledger_integrity"
+down_revision: Union[str, Sequence[str], None] = "0017_odds_snapshot_jobs"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
