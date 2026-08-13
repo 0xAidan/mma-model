@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from alembic import command
@@ -43,6 +44,7 @@ from mma_model.odds.price_guidance import (
     PriceGuidanceSelectionError,
     build_price_guidance,
 )
+from mma_model.odds.reconcile import OddsReconcileError, run_odds_reconcile
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
@@ -220,6 +222,48 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON file with book/region/market/outcome/price_or_lifecycle/time",
     )
     p_odds_manual.add_argument("--database-url", default=None)
+    p_odds_reconcile = odds_sub.add_parser(
+        "reconcile",
+        help=(
+            "DWCS-203 match provider odds events to canonical bouts "
+            "(deterministic report; --strict exits nonzero on blockers)"
+        ),
+    )
+    p_odds_reconcile.add_argument(
+        "--next-dwcs",
+        action="store_true",
+        help="Require 100% exact active-bout matches for next-DWCS readiness",
+    )
+    p_odds_reconcile.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero when blockers are present",
+    )
+    p_odds_reconcile.add_argument(
+        "--golden-card",
+        type=Path,
+        default=None,
+        help=(
+            "Offline/test golden-card fixture only "
+            "(requires --offline-fixtures + disposable --database-url)"
+        ),
+    )
+    p_odds_reconcile.add_argument(
+        "--offline-fixtures",
+        action="store_true",
+        help="Enable offline golden-card seeding (disposable DB required)",
+    )
+    p_odds_reconcile.add_argument(
+        "--as-of",
+        default=None,
+        help="UTC ISO timestamp for next-DWCS card selection (default: now)",
+    )
+    p_odds_reconcile.add_argument(
+        "--provider",
+        default="the-odds-api",
+        help="Odds provider id (DWCS-203: the-odds-api / the_odds_api)",
+    )
+    p_odds_reconcile.add_argument("--database-url", default=None)
     p_odds_guide = odds_sub.add_parser(
         "price-guidance",
         help="Emit fair/actionable/strong-value guidance (exact EV only if priced)",
@@ -567,6 +611,100 @@ def main(argv: list[str] | None = None) -> int:
             report = run_bookmaker_audit(next_dwcs=bool(getattr(args, "next_dwcs", False)))
             print(json.dumps(report, indent=2))
             return 0 if not report.get("scraper_paths_present") else 2
+
+        if odds_cmd == "reconcile":
+            provider_arg = str(getattr(args, "provider", "the-odds-api")).strip()
+            if provider_arg in {"the-odds-api", "the_odds_api"}:
+                provider = "the_odds_api"
+            else:
+                print(f"unsupported odds provider for reconcile: {provider_arg!r}")
+                return 2
+            database_url = getattr(args, "database_url", None)
+            golden = getattr(args, "golden_card", None)
+            offline = bool(getattr(args, "offline_fixtures", False))
+            strict = bool(getattr(args, "strict", False))
+            next_dwcs = bool(getattr(args, "next_dwcs", False))
+            as_of_raw = getattr(args, "as_of", None)
+            try:
+                as_of = None
+                if as_of_raw:
+                    text = str(as_of_raw).strip()
+                    if text.endswith("Z"):
+                        text = text[:-1] + "+00:00"
+                    as_of_dt = datetime.fromisoformat(text)
+                    if as_of_dt.tzinfo is None:
+                        raise ValueError("--as-of must be timezone-aware UTC")
+                    as_of = as_of_dt
+
+                if golden is not None:
+                    if not offline:
+                        raise OddsReconcileError(
+                            "--golden-card requires --offline-fixtures and a "
+                            "disposable --database-url"
+                        )
+                    db_url = require_disposable_database_url(database_url)
+                elif database_url:
+                    db_url = str(database_url).strip()
+                    if not db_url:
+                        print("refusing empty --database-url")
+                        return 2
+                else:
+                    db_url = None
+
+                if db_url is not None:
+                    engine = create_engine(db_url, future=True)
+                    _attach_sqlite_listeners(engine)
+                    root = get_settings().project_root
+                    cfg = Config(str(root / "alembic.ini"))
+                    cfg.set_main_option("script_location", str(root / "migrations"))
+                    cfg.set_main_option("sqlalchemy.url", db_url)
+                    command.upgrade(cfg, "head")
+                    Session = sessionmaker(bind=engine, future=True)
+                    with Session() as session:
+                        report = run_odds_reconcile(
+                            session,
+                            next_dwcs=next_dwcs,
+                            strict=strict,
+                            golden_card_path=golden,
+                            provider=provider,
+                            as_of=as_of,
+                            offline_fixtures=offline,
+                            database_url=db_url,
+                            allow_golden_seed=bool(golden is not None and offline),
+                        )
+                        session.commit()
+                    engine.dispose()
+                else:
+                    if golden is not None:
+                        raise OddsReconcileError(
+                            "--golden-card refuses the default/live database"
+                        )
+                    init_db()
+                    with session_scope() as session:
+                        report = run_odds_reconcile(
+                            session,
+                            next_dwcs=next_dwcs,
+                            strict=strict,
+                            golden_card_path=None,
+                            provider=provider,
+                            as_of=as_of,
+                            offline_fixtures=False,
+                            database_url=None,
+                            allow_golden_seed=False,
+                        )
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                OddsReconcileError,
+                OddsOfflineModeError,
+            ) as exc:
+                print(str(exc))
+                return 2
+            print(json.dumps(report, indent=2))
+            if strict and report.get("blockers"):
+                return 2
+            return 0
 
         if odds_cmd == "price-guidance":
             try:

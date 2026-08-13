@@ -112,7 +112,12 @@ def raw_reference(payload: Mapping[str, Any] | Sequence[Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def quote_dedupe_key(
+# v1 = DWCS-201 legacy (no raw/participant). v2 adds raw_ref + participants.
+QUOTE_DEDUPE_VERSION: int = 2
+QUOTE_DEDUPE_VERSION_LEGACY: int = 1
+
+
+def quote_dedupe_key_v1(
     *,
     provider: str,
     event_id: str,
@@ -126,7 +131,7 @@ def quote_dedupe_key(
     commence_time: datetime,
     snapshot_at: datetime | None,
 ) -> str:
-    """Stable identity for append-only quote deduplication."""
+    """Legacy DWCS-201 quote dedupe material (pre raw/participant identity)."""
     point = "" if line_point is None else f"{float(line_point):.4f}"
     src = "" if source_updated_at is None else source_updated_at.isoformat()
     snap = "" if snapshot_at is None else snapshot_at.isoformat()
@@ -143,6 +148,54 @@ def quote_dedupe_key(
             src,
             commence_time.isoformat(),
             snap,
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def quote_dedupe_key(
+    *,
+    provider: str,
+    event_id: str,
+    bookmaker_key: str,
+    region: str,
+    market_family: MarketFamily,
+    outcome_key: OutcomeKey,
+    line_point: float | None,
+    price_decimal: float,
+    source_updated_at: datetime | None,
+    commence_time: datetime,
+    snapshot_at: datetime | None,
+    raw_ref: str,
+    home_team: str,
+    away_team: str,
+) -> str:
+    """v2 quote dedupe: legacy fields plus raw_ref and participant identity.
+
+    Same-external-ID replacement quotes (changed opponents / labels) cannot
+    collide with prior rows when book/market/outcome-key/price/commence/source
+    are otherwise equal. Identical same-version polls still dedupe.
+    """
+    point = "" if line_point is None else f"{float(line_point):.4f}"
+    src = "" if source_updated_at is None else source_updated_at.isoformat()
+    snap = "" if snapshot_at is None else snapshot_at.isoformat()
+    # Order-independent participant identity (home/away may flip across polls).
+    participants = "|".join(sorted((home_team.strip(), away_team.strip())))
+    material = "|".join(
+        [
+            provider,
+            event_id,
+            bookmaker_key,
+            region,
+            market_family.value,
+            outcome_key.value,
+            point,
+            f"{price_decimal:.6f}",
+            src,
+            commence_time.isoformat(),
+            snap,
+            (raw_ref or "").strip(),
+            participants,
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -384,6 +437,9 @@ def normalize_odds_payload(
                         source_updated_at=source_updated,
                         commence_time=commence,
                         snapshot_at=snapshot_utc,
+                        raw_ref=raw_ref,
+                        home_team=home_team,
+                        away_team=away_team,
                     )
                     quotes.append(
                         NormalizedQuote(

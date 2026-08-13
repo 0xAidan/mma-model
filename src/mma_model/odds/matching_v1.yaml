@@ -1,0 +1,48 @@
+# DWCS-203 odds event ↔ canonical bout matching contract.
+# Packaged authority: mma_model/odds/matching_v1.yaml
+# Plan-visible path: config/odds/matching_v1.yaml (symlink).
+
+contract_id: dwcs_odds_matching
+contract_version: "1.0.0"
+schema_version: 1
+ticket: DWCS-203
+
+provider: the_odds_api
+match_window_minutes: 30
+stale_after_minutes: 360
+
+match_rules:
+  - provider_id
+  - participant_pair
+  - manual_review
+
+match_statuses:
+  - matched
+  - unmatched
+  - ambiguous_blocked
+
+lifecycle_states:
+  - active
+  - stale
+  - missing_unknown
+  - locked
+  - cancelled
+  - replaced
+  - review_blocked
+
+prohibited:
+  - home_away_ordering_guess
+  - fuzzy_auto_merge
+  - silent_replacement_quote_inheritance
+  - forward_fill_prices
+  - infer_lock_or_suspension_without_evidence
+  - labeling_reference_as_bet365
+
+notes: >
+  Stored provider IDs are a strong candidate only after verifying the linked bout
+  exists, is active DWCS, matches both participants order-independently, and lies
+  inside match_window_minutes. Ambiguity uses the dedicated odds-bout review queue
+  with manual_review activation after revalidation. First alias versions include
+  prior quotes; reused-ID replacement versions establish a quote cutoff. Lifecycle
+  and quote freshness are PIT-safe at observed_at. Golden seeding is
+  offline/disposable-DB only against one card event.

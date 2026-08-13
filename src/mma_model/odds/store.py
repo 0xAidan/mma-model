@@ -17,7 +17,12 @@ from mma_model.db.tables.odds import (
     OddsQuotaObservation,
     OddsQuote,
 )
+from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.manual_price import MANUAL_SOURCE_LABEL, ObservedPrice, PriceSourceKind
+from mma_model.odds.normalize import (
+    QUOTE_DEDUPE_VERSION,
+    quote_dedupe_key_v1,
+)
 from mma_model.odds.types import (
     REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
     NormalizedQuote,
@@ -142,16 +147,14 @@ class OddsQuoteStore:
                 event_map[quote.event_id] = event_row
                 event_upserts += 1
 
-            existing = self._session.scalar(
-                select(OddsQuote.id).where(OddsQuote.dedupe_key == quote.dedupe_key)
-            )
-            if existing is not None:
+            if self._quote_already_persisted(quote):
                 deduped += 1
                 continue
 
             self._session.add(
                 OddsQuote(
                     dedupe_key=quote.dedupe_key,
+                    dedupe_version=QUOTE_DEDUPE_VERSION,
                     provider=quote.provider,
                     bookmaker_key=quote.bookmaker_key,
                     bookmaker_title=quote.bookmaker_title,
@@ -180,6 +183,41 @@ class OddsQuoteStore:
             deduped=deduped,
             event_upserts=event_upserts,
         )
+
+    def _quote_already_persisted(self, quote: NormalizedQuote) -> bool:
+        """v2 key hit, or legacy v1 key with matching raw_ref (no rewrite)."""
+        if (
+            self._session.scalar(
+                select(OddsQuote.id).where(OddsQuote.dedupe_key == quote.dedupe_key)
+            )
+            is not None
+        ):
+            return True
+        legacy_key = quote_dedupe_key_v1(
+            provider=quote.provider,
+            event_id=quote.event_id,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family
+            if isinstance(quote.market_family, MarketFamily)
+            else MarketFamily(quote.market_family),
+            outcome_key=quote.outcome_key
+            if isinstance(quote.outcome_key, OutcomeKey)
+            else OutcomeKey(quote.outcome_key),
+            line_point=quote.line_point,
+            price_decimal=quote.price_decimal,
+            source_updated_at=quote.source_updated_at,
+            commence_time=quote.commence_time,
+            snapshot_at=quote.snapshot_at,
+        )
+        legacy = self._session.scalar(
+            select(OddsQuote).where(OddsQuote.dedupe_key == legacy_key)
+        )
+        if legacy is None:
+            return False
+        # Identical re-poll of a pre-v2 row: same sanitized fragment.
+        # Different raw_ref (e.g. opponent/label change) must insert under v2.
+        return (legacy.raw_ref or "") == (quote.raw_ref or "")
 
     def append_unknown_observations(
         self,

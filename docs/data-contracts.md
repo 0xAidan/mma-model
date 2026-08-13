@@ -240,6 +240,7 @@ Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 | **Client** | `mma_model.odds.the_odds_api.TheOddsApiClient` |
 | **Normalize** | `mma_model.odds.normalize.normalize_odds_payload` |
 | **Storage** | `odds_events`, `odds_quotes` (append-only + dedupe), `odds_quota_observations`, `odds_availability_observations` (append-only unknown markets) |
+| **Quote dedupe key** | v2 SHA-256 over provider/event/book/region/market/outcome/line/price/`source_updated_at`/commence/`snapshot_at` **plus** sanitized `raw_ref` and order-independent participant names (`dedupe_version=2`). Legacy v1 keys omit raw/participants (`dedupe_version=1`). Store dedupes on v2 hit **or** legacy v1 key with matching `raw_ref` (identical re-poll); different `raw_ref` inserts under v2 so same-ID replacements never collide. Append-only: legacy rows are not rewritten. |
 | **Migrations** | `0011_odds_quotes`, `0012_odds_availability` |
 | **CLI** | `mma-model odds` (legacy live fetch); `mma-model odds snapshot …`; `mma-model odds audit …` |
 | **Markets** | Supported provider keys: `h2h` → `moneyline`, `totals` → `totals` with DWCS-200 catalog line points `(1.5, 2.5)`. Unsupported props/points are skipped, never fabricated. |
@@ -270,6 +271,26 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 | **Bet365 identity** | Explicit aliases only (`bet365`, `bet365_au`); automated/reference observations reject those keys while fallback is active; only non-automated `user_observed` may claim Bet365 |
 | **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance … [--line-point]`; `mma-model odds record-manual-price …` |
 | **Prohibited** | Sportsbook website scraping, credential/cookie storage, Bet365 claims for reference consensus |
+
+## Odds event matching + bout lifecycle (DWCS-203)
+
+| Field | Value |
+|-------|--------|
+| **Contract** | Packaged `mma_model/odds/matching_v1.yaml` (`config/odds/matching_v1.yaml` symlink); pinned content hash + frozen load |
+| **Matcher** | Stored provider IDs are a strong candidate only after active-DWCS / participant / time-window verification; then exact participant pair within `match_window_minutes` (default 30). |
+| **Value eligibility** | Bout `eligible_for_value` / `match_value_gate` = matched + nonterminal only (does **not** mean every quote is usable). Quote-level resolver requires the **latest persisted match observation at cutoff** to be `matched` to the **same bout** as the effective alias; newer `ambiguous_blocked` / `unmatched` decisions block all quote value even if an old alias remains. Caller bout/status may only further restrict. Also requires alias-visible row + bout nonterminal + selection not locked + market not UNKNOWN + quote AVAILABLE + quote’s own freshness. |
+| **Availability** | `odds_availability_observations` UNKNOWN blocks that bookmaker/region/market when UNKNOWN is ≥ quote evidence; only a *strictly newer* available quote clears prior UNKNOWN (`availability_note=recovered_by_newer_quote`, non-blocking). Equal timestamps stay fail-closed. Never infers SUSPENDED/LOCKED. |
+| **Ordering** | Provider home/away ignored; both canonical fighters required |
+| **Ambiguity** | Dedicated `odds_bout_match_reviews` queue (not fighter identity); approve **claims** the review via version CAS first (savepoint), then activates/attaches the owned alias; CAS loss rolls back claim+alias with zero side effects; reject stays blocked; no fighter mapping writes |
+| **Aliases / source IDs** | Immutable `BoutSourceId` + versioned `odds_provider_event_aliases`; exactly one active alias per provider/external ID (partial unique index). Same-ID replacements supersede history and do not expose prior quotes under the new active alias |
+| **Lifecycle** | Bout-scoped latest explicit lifecycle wins for cancel/replace/review/global lock. Selection-scoped lock/removal uses optional book/region/market/outcome/line/`quote_id` on lifecycle rows (null = bout-wide). Terminal→ACTIVE matrix unchanged; no inference/forward-fill. |
+| **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations` (+ selection scope cols), `odds_bout_match_reviews`; `odds_quotes.dedupe_version`; migrations `0014_odds_matching`, `0015_quote_eligibility_scope` |
+| **Next DWCS** | `--next-dwcs --as-of <UTC>` selects nearest upcoming DWCS card (fight-night cluster), scopes provider events, fail-closed on zero bouts/events |
+| **CLI** | `mma-model odds reconcile --next-dwcs --strict [--as-of …]`; golden seeding only with `--golden-card` + `--offline-fixtures` + disposable `--database-url` |
+| **Golden** | Offline/disposable-DB only; committed fixtures under `tests/fixtures/odds/golden/` must achieve 100% exact active-bout matches |
+| **Prohibited** | Home/away guess, fuzzy auto-merge, silent replacement quote inheritance, forward-fill, inferred lock/suspension without evidence, live-DB golden seeding |
+
+Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exact bookmaker lines remain optional enrichment; sportsbook-agnostic actionable price guidance remains the mandatory fallback. Snapshot/reference rows stay `provider_unmatched` until proven by this matcher.
 
 ## Governing product rule (odds)
 
