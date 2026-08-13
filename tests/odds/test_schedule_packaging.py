@@ -14,7 +14,7 @@ from mma_model.odds.schedule import PINNED_SCHEDULE_CONTRACT_HASH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PINNED_DIGEST_LITERAL = (
-    "d966bdb1f1cbc14806001e2f11d6f273e7f93ceda25f49969e38a42eb3798b75"
+    "1c12251bddaf2004bb0658b5763185a1930d0717b2aa6ed77639ba635a212a01"
 )
 
 

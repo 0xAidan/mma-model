@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -137,7 +137,7 @@ def test_schedule_contract_pinned_and_deep(schedule):
         schedule.quota.cost_fixed["events"] = 9  # type: ignore[index]
     with pytest.raises(ScheduleContractError):
         load_schedule_contract(
-            raw_bytes=schedule.raw_bytes.replace(b"1.0.0", b"9.9.9", 1)
+            raw_bytes=schedule.raw_bytes.replace(b"1.1.0", b"9.9.9", 1)
         )
 
 
@@ -393,12 +393,14 @@ def test_quota_malformed_and_stale_observation(session, schedule):
     assert missing.remaining_source == "missing_observation"
 
     # DB CHECKs reject negative remaining; still prove loader fail-closes on it.
-    fake_row = SimpleNamespace(requests_remaining=-3)
+    fake_row = SimpleNamespace(
+        requests_remaining=-3, observed_at=as_of - timedelta(minutes=1)
+    )
     with patch.object(session, "scalar", return_value=fake_row):
         from mma_model.odds.quota_budget import latest_remaining_from_observations
 
         remaining, source = latest_remaining_from_observations(
-            session, provider="the_odds_api", as_of=as_of
+            session, provider="the_odds_api", as_of=as_of, contract=schedule
         )
     assert remaining is None and source == "malformed_negative_remaining"
     malformed = evaluate_quota_budget(
@@ -662,7 +664,9 @@ def test_job_ledger_explicit_finished_at(session):
         )
 
 
-def test_coverage_separates_statuses_and_unknown_cost(schedule):
+def test_coverage_separates_statuses_and_batch_costs(schedule):
+    from mma_model.odds.coverage_report import BatchCostRecord, PlannedWorkItem
+
     as_of = datetime(2024, 1, 1, tzinfo=UTC)
     report = build_odds_coverage_report(
         series="dwcs",
@@ -670,9 +674,9 @@ def test_coverage_separates_statuses_and_unknown_cost(schedule):
         contract=schedule,
         cells=[
             CoverageCell("c1", "draftkings", "h2h", "t_minus_24h", "absent"),
-            CoverageCell("c1", "draftkings", "h2h", "t_minus_6h", "failed", 10),
+            CoverageCell("c1", "draftkings", "h2h", "t_minus_6h", "failed"),
             CoverageCell(
-                "c1", "draftkings", "h2h", "t_minus_1h", "deferred_quota", 10
+                "c1", "draftkings", "h2h", "t_minus_1h", "deferred_quota"
             ),
             CoverageCell("c1", "draftkings", "h2h", "close_proxy", "unmatched"),
             CoverageCell(
@@ -681,9 +685,10 @@ def test_coverage_separates_statuses_and_unknown_cost(schedule):
                 "h2h",
                 "live",
                 "observed",
-                1,
-                actual_cost=1,
-                actual_cost_known=True,
+                matched=True,
+                quote_count=2,
+                quote_eligible_count=1,
+                match_reason="alias_effective_maps_to_card_bout",
             ),
             CoverageCell(
                 "c1",
@@ -691,11 +696,38 @@ def test_coverage_separates_statuses_and_unknown_cost(schedule):
                 "h2h",
                 "live",
                 "observed",
-                0,
+                matched=True,
+                quote_count=1,
+                quote_eligible_count=0,
+                detail="collection_observed_not_value_ready",
+            ),
+        ],
+        batch_costs=[
+            BatchCostRecord(
+                batch_key="b1",
+                estimated_cost=10,
+                actual_cost=10,
+                actual_cost_known=True,
+                actual_cost_source="provider",
+                remaining_source="persisted_quota_observation",
+            ),
+            BatchCostRecord(
+                batch_key="b2",
+                estimated_cost=10,
                 actual_cost=None,
                 actual_cost_known=False,
-                detail="missing_cost",
+                actual_cost_source="missing",
+                remaining_source="persisted_quota_observation",
             ),
+        ],
+        planned=[
+            PlannedWorkItem(
+                card_id="c1",
+                time_label="t_minus_24h",
+                market="h2h",
+                estimated_cost=10,
+                batch_key="b3",
+            )
         ],
     )
     assert report.status_counts["absent"] == 1
@@ -703,8 +735,12 @@ def test_coverage_separates_statuses_and_unknown_cost(schedule):
     assert report.status_counts["deferred_quota"] == 1
     assert report.status_counts["unmatched"] == 1
     assert report.status_counts["observed"] == 2
-    assert report.known_actual_cost_total == 1
-    assert report.unknown_actual_cost_cells == 5
+    assert report.known_actual_cost_total == 10
+    assert report.unknown_actual_cost_batches == 1
+    assert report.estimated_cost_total == 20
+    assert report.collection_only is True
+    assert report.as_dict()["value_ready"] is False
+    assert len(report.planned) == 1
 
 
 def test_sparse_checkpoint_cutoffs(schedule):
@@ -976,3 +1012,392 @@ def test_migration_creates_job_table(session):
         "odds_snapshot_job_runs"
     )}
     assert "actual_cost_source" in cols
+    assert "remaining_source" in cols
+    assert "snapshot_quote_ids" in cols
+
+
+def test_cumulative_batch_quota_exhaustion(schedule):
+    from mma_model.odds.quota_budget import RunningQuotaLedger
+
+    # remaining 230, reserve 200 → spendable 30 for backfill; three 10-credit batches
+    ledger = RunningQuotaLedger(remaining=230, remaining_source="test")
+    allowed = 0
+    deferred = 0
+    for _ in range(5):
+        decision = ledger.evaluate(
+            estimated_cost=10, purpose=RequestPurpose.BACKFILL, contract=schedule
+        )
+        if decision.state == QuotaBudgetState.ALLOWED:
+            ledger.reserve(10)
+            allowed += 1
+        else:
+            deferred += 1
+    assert allowed == 3
+    assert deferred == 2
+    assert ledger.reserved == 30
+
+
+def test_remaining_override_bounded_to_monthly_limit(schedule):
+    from mma_model.odds.quota_budget import validate_remaining_override
+
+    value, source = validate_remaining_override(100, contract=schedule)
+    assert value == 100
+    assert source.startswith("override_bounded:")
+    with pytest.raises(ValueError):
+        validate_remaining_override(schedule.quota.monthly_limit + 1, contract=schedule)
+    with pytest.raises(ValueError):
+        validate_remaining_override(-1, contract=schedule)
+
+
+def test_quota_stale_billing_cycle_and_max_age(session, schedule):
+    from mma_model.odds.quota_budget import latest_remaining_from_observations
+
+    store = OddsQuoteStore(session)
+    as_of = datetime(2024, 6, 15, 12, 0, tzinfo=UTC)
+    # Prior calendar month → stale billing cycle
+    store.record_quota(
+        provider="the_odds_api",
+        endpoint="events",
+        observed_at=datetime(2024, 5, 31, 23, 0, tzinfo=UTC),
+        quota=QuotaHeaders(
+            requests_remaining=9000,
+            requests_used=1,
+            requests_last=0,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+        ),
+        empty_response=False,
+    )
+    session.flush()
+    remaining, source = latest_remaining_from_observations(
+        session, provider="the_odds_api", as_of=as_of, contract=schedule
+    )
+    assert remaining is None
+    assert source == "stale_billing_cycle"
+
+    # Same month but older than max age
+    store.record_quota(
+        provider="the_odds_api",
+        endpoint="events",
+        observed_at=as_of - timedelta(seconds=schedule.quota.remaining_max_age_sec + 10),
+        quota=QuotaHeaders(
+            requests_remaining=8000,
+            requests_used=1,
+            requests_last=0,
+            requests_last_inferred=None,
+            requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+        ),
+        empty_response=False,
+    )
+    session.flush()
+    # May still be stale_billing_cycle if age crosses month; force same-month old via patch
+    same_month_old = as_of - timedelta(days=10)
+    if same_month_old.month == as_of.month:
+        store.record_quota(
+            provider="the_odds_api",
+            endpoint="events",
+            observed_at=as_of - timedelta(seconds=schedule.quota.remaining_max_age_sec + 60),
+            quota=QuotaHeaders(
+                requests_remaining=7000,
+                requests_used=1,
+                requests_last=0,
+                requests_last_inferred=None,
+                requests_last_source=REQUESTS_LAST_SOURCE_PROVIDER,
+            ),
+            empty_response=False,
+        )
+        session.flush()
+    remaining2, source2 = latest_remaining_from_observations(
+        session, provider="the_odds_api", as_of=as_of, contract=schedule
+    )
+    assert remaining2 is None
+    assert source2 in {"stale_max_age", "stale_billing_cycle"}
+
+
+def test_bootstrap_no_observation_then_allowed(session, schedule, tmp_path: Path):
+    from mma_model.odds.quota_budget import open_quota_ledger
+
+    as_of = datetime(2026, 8, 12, 0, 0, tzinfo=UTC)
+    ledger = open_quota_ledger(
+        session,
+        provider="the_odds_api",
+        as_of=as_of,
+        contract=schedule,
+        allow_bootstrap=True,
+        offline_fixtures=True,
+        fixture_dir=FIXTURE_DIR,
+    )
+    assert ledger.remaining == 500
+    assert ledger.remaining_source.startswith("bootstrap")
+    decision = ledger.evaluate(
+        estimated_cost=1, purpose=RequestPurpose.LIVE_ORDINARY, contract=schedule
+    )
+    assert decision.state == QuotaBudgetState.ALLOWED
+
+
+def test_bootstrap_failure_stays_deferred(session, schedule, tmp_path: Path):
+    from mma_model.odds.quota_budget import open_quota_ledger
+
+    as_of = datetime(2026, 8, 12, 0, 0, tzinfo=UTC)
+    ledger = open_quota_ledger(
+        session,
+        provider="the_odds_api",
+        as_of=as_of,
+        contract=schedule,
+        allow_bootstrap=True,
+        offline_fixtures=True,
+        fixture_dir=tmp_path / "missing-fixtures",
+    )
+    assert ledger.remaining is None
+    decision = ledger.evaluate(
+        estimated_cost=1, purpose=RequestPurpose.LIVE_ORDINARY, contract=schedule
+    )
+    assert decision.state == QuotaBudgetState.DEFERRED
+
+
+def test_normalize_markets_lowercases_and_rejects_ci_dupes():
+    assert normalize_markets("H2H,totals") == "h2h,totals"
+    with pytest.raises(ValueError):
+        normalize_markets("h2h,H2H")
+
+
+def test_changed_event_start_uses_canonical_not_manifest(session):
+    as_of = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+    _seed_event(
+        session,
+        event_id="live-move-1",
+        start=as_of + timedelta(hours=10),
+        status="scheduled",
+    )
+    rows = load_upcoming_dwcs_events_from_db(session, as_of=as_of)
+    assert rows[0]["event_id"] == "live-move-1"
+    # Late correction: move start further out but still in horizon
+    event = session.get(CanonicalEvent, "live-move-1")
+    assert event is not None
+    event.scheduled_start_at = as_of + timedelta(hours=40)
+    session.flush()
+    rows2 = load_upcoming_dwcs_events_from_db(session, as_of=as_of)
+    assert rows2[0]["event_start"] == as_of + timedelta(hours=40)
+    # Manifest must not be consulted / mixed in
+    assert rows2[0]["source"] == "canonical_db"
+
+
+def test_dry_run_uses_planned_not_absent(session, schedule, tmp_path: Path):
+    as_of = datetime(2024, 6, 2, 0, 0, tzinfo=UTC)
+    events = [
+        {
+            "event_id": "evt-dry",
+            "card_id": "card-dry",
+            "event_start": datetime(2024, 6, 1, 20, 0, tzinfo=UTC),
+        }
+    ]
+    dry = run_odds_backfill(
+        session,
+        series="dwcs",
+        from_year=2020,
+        events=events,
+        as_of=as_of,
+        finished_at=as_of,
+        contract=schedule,
+        offline_fixtures=True,
+        fixture_dir=FIXTURE_DIR,
+        evaluation_contract_path=EVAL_CONTRACT,
+        execute=False,
+        lock_path=tmp_path / "dry.lock",
+        remaining_override=10_000,
+    )
+    assert len(dry.coverage.planned) == 4
+    assert all(item.detail == "dry_run_not_requested" for item in dry.coverage.planned)
+    # Planned work must not be labeled absent
+    assert dry.coverage.status_counts["absent"] == 0
+
+
+def test_ledger_sql_rejects_success_without_token(session):
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                "INSERT INTO odds_snapshot_job_runs ("
+                "id, idempotency_key, success_token, job_name, status, provider, "
+                "region, markets, event_id, mode, as_of, estimated_cost, "
+                "started_at, finished_at, created_at"
+                ") VALUES ("
+                "'x1', 'k1', NULL, 'odds-backfill', 'success', 'the_odds_api', "
+                "'us', 'h2h', 'e1', 'historical:t_minus_24h', :as_of, 0, "
+                ":as_of, :as_of, :as_of)"
+            ),
+            {"as_of": datetime(2024, 1, 1, tzinfo=UTC)},
+        )
+        session.flush()
+    session.rollback()
+
+
+def test_coverage_scopes_quotes_to_card_and_alias_pit(session):
+    from mma_model.db.tables.core import CanonicalBout, CanonicalFighter
+    from mma_model.db.tables.odds import OddsEventRow, OddsProviderEventAlias, OddsQuote
+    from mma_model.odds.coverage_report import cells_from_snapshot_quotes
+
+    as_of = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+    session.add(CanonicalFighter(id="f-a", display_name="A"))
+    session.add(CanonicalFighter(id="f-b", display_name="B"))
+    session.add(CanonicalFighter(id="f-c", display_name="C"))
+    session.add(CanonicalFighter(id="f-d", display_name="D"))
+    session.add(
+        CanonicalEvent(
+            id="card-a", name="Card A", series="dwcs", status="completed"
+        )
+    )
+    session.add(
+        CanonicalEvent(
+            id="card-b", name="Card B", series="dwcs", status="completed"
+        )
+    )
+    session.flush()
+    session.add(
+        CanonicalBout(
+            id="bout-a",
+            event_id="card-a",
+            fighter_a_id="f-a",
+            fighter_b_id="f-b",
+            status="completed",
+        )
+    )
+    session.add(
+        CanonicalBout(
+            id="bout-b",
+            event_id="card-b",
+            fighter_a_id="f-c",
+            fighter_b_id="f-d",
+            status="completed",
+        )
+    )
+    session.add(
+        OddsEventRow(
+            id="oe-a",
+            provider="the_odds_api",
+            external_event_id="ext-a",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=as_of,
+            home_team="A",
+            away_team="B",
+        )
+    )
+    session.add(
+        OddsEventRow(
+            id="oe-b",
+            provider="the_odds_api",
+            external_event_id="ext-b",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=as_of,
+            home_team="C",
+            away_team="D",
+        )
+    )
+    # Alias active now for B, but historically (as_of) card-a owns ext-a
+    session.add(
+        OddsProviderEventAlias(
+            id="alias-a1",
+            provider="the_odds_api",
+            external_event_id="ext-a",
+            bout_id="bout-a",
+            alias_version=1,
+            status="superseded",
+            match_rule="provider_id",
+            created_at=as_of - timedelta(days=2),
+            superseded_at=as_of + timedelta(days=1),
+        )
+    )
+    session.add(
+        OddsProviderEventAlias(
+            id="alias-a2",
+            provider="the_odds_api",
+            external_event_id="ext-a",
+            bout_id="bout-b",
+            alias_version=2,
+            status="active",
+            match_rule="provider_id",
+            created_at=as_of + timedelta(days=1),
+            superseded_at=None,
+        )
+    )
+    q1 = OddsQuote(
+        dedupe_key="dq1",
+        dedupe_version=2,
+        provider="the_odds_api",
+        bookmaker_key="draftkings",
+        bookmaker_title="DraftKings",
+        region="us",
+        event_id="oe-a",
+        external_event_id="ext-a",
+        market_family="moneyline",
+        provider_market_key="h2h",
+        outcome_key="fighter_a",
+        outcome_label="A",
+        line_point=None,
+        price_decimal=1.9,
+        availability="available",
+        observed_at=as_of,
+        source_updated_at=as_of,
+        commence_time=as_of,
+        snapshot_at=as_of,
+        raw_ref="r1",
+    )
+    q2 = OddsQuote(
+        dedupe_key="dq2",
+        dedupe_version=2,
+        provider="the_odds_api",
+        bookmaker_key="draftkings",
+        bookmaker_title="DraftKings",
+        region="us",
+        event_id="oe-b",
+        external_event_id="ext-b",
+        market_family="moneyline",
+        provider_market_key="h2h",
+        outcome_key="fighter_a",
+        outcome_label="C",
+        line_point=None,
+        price_decimal=1.8,
+        availability="available",
+        observed_at=as_of + timedelta(days=3),
+        source_updated_at=as_of + timedelta(days=3),
+        commence_time=as_of,
+        snapshot_at=as_of + timedelta(days=3),
+        raw_ref="r2",
+    )
+    session.add(q1)
+    session.add(q2)
+    session.flush()
+
+    # Card A at historical as_of sees only q1 via superseded-but-then-effective alias v1
+    cells_a = cells_from_snapshot_quotes(
+        session,
+        card_id="card-a",
+        time_label="t_minus_24h",
+        market="h2h",
+        provider="the_odds_api",
+        region="us",
+        as_of=as_of,
+        quote_ids=[q1.id, q2.id],
+        snapshot_at=as_of,
+    )
+    assert len(cells_a) == 1
+    assert cells_a[0].status == "observed"
+    assert cells_a[0].matched is True
+    assert q2.id not in cells_a[0].quote_ids
+
+    # Later as_of after replacement: alias v1 superseded, v2 maps to card-b
+    later = as_of + timedelta(days=2)
+    cells_a_later = cells_from_snapshot_quotes(
+        session,
+        card_id="card-a",
+        time_label="t_minus_24h",
+        market="h2h",
+        provider="the_odds_api",
+        region="us",
+        as_of=later,
+        quote_ids=[q1.id],
+        snapshot_at=as_of,
+    )
+    assert cells_a_later[0].status == "absent"

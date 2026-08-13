@@ -68,8 +68,13 @@ def load_upcoming_dwcs_events_from_db(
 ) -> list[dict[str, Any]]:
     """Canonical upcoming/scheduled DWCS events for live due/job paths.
 
-    Uses DB card state (including replacements reflected in bout/event status).
-    Frozen manifest is intentionally not consulted here.
+    Uses DB card state (including replacements / late ``scheduled_start_at``
+    corrections). Frozen manifest is intentionally not consulted here.
+
+    Events with ``scheduled_start_at < as_of`` are excluded on purpose: cadence
+    windows are half-open ending at event start, so post-start ticks are already
+    a deterministic no-op. Late schedule moves must update the canonical row;
+    there is no stale-manifest fallback.
     """
     stamp = ensure_utc(as_of, field="as_of")
     sched = load_default_schedule_contract()

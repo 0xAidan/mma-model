@@ -52,6 +52,14 @@ class OddsSnapshotJobRun(Base):
             name="ck_odds_snapshot_job_runs_status",
         ),
         CheckConstraint(
+            "("
+            "(status = 'success' AND success_token IS NOT NULL AND success_token = 1) "
+            "OR "
+            "(status != 'success' AND success_token IS NULL)"
+            ")",
+            name="ck_odds_snapshot_job_runs_status_success_token",
+        ),
+        CheckConstraint(
             "estimated_cost >= 0 AND (actual_cost IS NULL OR actual_cost >= 0)",
             name="ck_odds_snapshot_job_runs_costs",
         ),
@@ -65,6 +73,17 @@ class OddsSnapshotJobRun(Base):
             "actual_cost_source = 'missing' AND actual_cost IS NULL"
             ")",
             name="ck_odds_snapshot_job_runs_actual_cost_provenance",
+        ),
+        CheckConstraint(
+            "("
+            "snapshot_at IS NULL OR requested_cutoff IS NULL OR "
+            "snapshot_at <= requested_cutoff"
+            ")",
+            name="ck_odds_snapshot_job_runs_snapshot_le_cutoff",
+        ),
+        CheckConstraint(
+            "finished_at IS NULL OR finished_at >= started_at",
+            name="ck_odds_snapshot_job_runs_finished_ge_started",
         ),
         CheckConstraint(
             "length(trim(idempotency_key)) > 0",
@@ -95,6 +114,8 @@ class OddsSnapshotJobRun(Base):
     estimated_cost: Mapped[int] = mapped_column(Integer, default=0)
     actual_cost: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actual_cost_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    remaining_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    snapshot_quote_ids: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

@@ -2,13 +2,14 @@
 
 Uses the provider cost contract plus persisted raw/inferred quota provenance.
 Never assumes unused monthly quota. Never exceeds actual remaining.
+Never pre-authorizes N batches against one unadjusted balance.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from mma_model.db.tables.odds import OddsQuotaObservation
 from mma_model.odds.normalize import ensure_utc
+from mma_model.odds.quota_bootstrap import bootstrap_quota_remaining
 from mma_model.odds.schedule import (
     OddsScheduleContract,
     RequestPurpose,
@@ -63,13 +65,55 @@ def cost_from_quota_headers(quota: QuotaHeaders) -> int | None:
     raise ValueError(f"unsupported requests_last_source: {quota.requests_last_source!r}")
 
 
+def validate_remaining_override(
+    remaining_override: int,
+    *,
+    contract: OddsScheduleContract | None = None,
+) -> tuple[int, str]:
+    """Require ``0 <= override <= monthly_limit``; return value + provenance."""
+    sched = contract or load_default_schedule_contract()
+    value = int(remaining_override)
+    if value < 0:
+        raise ValueError("remaining_override must be nonnegative")
+    if value > int(sched.quota.monthly_limit):
+        raise ValueError(
+            f"remaining_override {value} exceeds monthly_limit "
+            f"{sched.quota.monthly_limit}"
+        )
+    return value, f"override_bounded:{value}"
+
+
+def _observation_freshness(
+    *,
+    observed_at: datetime,
+    as_of: datetime,
+    contract: OddsScheduleContract,
+) -> str | None:
+    """Return None when fresh; otherwise a stale/unknown reason code."""
+    stamp = ensure_utc(as_of, field="as_of")
+    observed = ensure_utc(observed_at, field="observed_at")
+    if observed > stamp:
+        return "future_observation"
+    if contract.quota.billing_cycle == "calendar_month_utc":
+        if (observed.year, observed.month) != (stamp.year, stamp.month):
+            return "stale_billing_cycle"
+    else:
+        return "unsupported_billing_cycle"
+    age = stamp - observed
+    if age > timedelta(seconds=int(contract.quota.remaining_max_age_sec)):
+        return "stale_max_age"
+    return None
+
+
 def latest_remaining_from_observations(
     session: Session,
     *,
     provider: str,
     as_of: datetime,
+    contract: OddsScheduleContract | None = None,
 ) -> tuple[int | None, str]:
-    """Read newest persisted remaining credits at/before ``as_of`` (UTC)."""
+    """Read newest fresh persisted remaining credits at/before ``as_of`` (UTC)."""
+    sched = contract or load_default_schedule_contract()
     stamp = ensure_utc(as_of, field="as_of")
     row = session.scalar(
         select(OddsQuotaObservation)
@@ -82,6 +126,14 @@ def latest_remaining_from_observations(
     )
     if row is None:
         return None, "missing_observation"
+    observed = row.observed_at
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=UTC)
+    stale = _observation_freshness(
+        observed_at=observed, as_of=stamp, contract=sched
+    )
+    if stale is not None:
+        return None, stale
     if row.requests_remaining is None:
         return None, "missing_remaining_header"
     if int(row.requests_remaining) < 0:
@@ -109,8 +161,9 @@ def evaluate_quota_budget(
         raise ValueError(f"purpose {purpose.value!r} not configured in schedule quota")
 
     if remaining is None:
-        if allow_missing_remaining_override and remaining_source.startswith("override"):
-            # Explicit bounded operator override path only.
+        if allow_missing_remaining_override and remaining_source.startswith(
+            "override_bounded"
+        ):
             return QuotaBudgetDecision(
                 state=QuotaBudgetState.ALLOWED,
                 estimated_cost=estimated_cost,
@@ -199,6 +252,54 @@ def evaluate_quota_budget(
     )
 
 
+@dataclass
+class RunningQuotaLedger:
+    """Per-run cumulative quota accounting so batches cannot overspend one balance."""
+
+    remaining: int | None
+    remaining_source: str
+    reserved: int = 0
+    decisions: list[QuotaBudgetDecision] = field(default_factory=list)
+
+    @property
+    def effective_remaining(self) -> int | None:
+        if self.remaining is None:
+            return None
+        return int(self.remaining) - int(self.reserved)
+
+    def evaluate(
+        self,
+        *,
+        estimated_cost: int,
+        purpose: RequestPurpose,
+        contract: OddsScheduleContract | None = None,
+    ) -> QuotaBudgetDecision:
+        allow_override = self.remaining_source.startswith("override_bounded")
+        decision = evaluate_quota_budget(
+            estimated_cost=estimated_cost,
+            remaining=self.effective_remaining,
+            purpose=purpose,
+            contract=contract,
+            remaining_source=self.remaining_source,
+            allow_missing_remaining_override=allow_override and self.remaining is None,
+        )
+        self.decisions.append(decision)
+        return decision
+
+    def reserve(self, estimated_cost: int) -> None:
+        if estimated_cost < 0:
+            raise ValueError("estimated_cost must be nonnegative")
+        self.reserved += int(estimated_cost)
+
+    def apply_provider_remaining(
+        self, remaining: int | None, *, source: str
+    ) -> None:
+        """Replace ledger with newest provider remaining after a paid request."""
+        self.remaining = remaining
+        self.remaining_source = source
+        self.reserved = 0
+
+
 def plan_request_budget(
     session: Session | None,
     *,
@@ -210,8 +311,16 @@ def plan_request_budget(
     purpose: RequestPurpose,
     contract: OddsScheduleContract | None = None,
     remaining_override: int | None = None,
+    ledger: RunningQuotaLedger | None = None,
+    allow_bootstrap: bool = False,
+    offline_fixtures: bool = False,
+    fixture_dir: object | None = None,
 ) -> QuotaBudgetDecision:
-    """Estimate cost and evaluate against persisted (or override) remaining."""
+    """Estimate cost and evaluate against persisted/override/bootstrap remaining.
+
+    When ``ledger`` is provided, evaluation uses cumulative remaining after prior
+    reservations in this run (never N independent authorizations of one balance).
+    """
     sched = contract or load_default_schedule_contract()
     markets_n = None if markets is None else normalize_markets(markets)
     regions_n = None if regions is None else normalize_regions(regions)
@@ -221,27 +330,83 @@ def plan_request_budget(
         regions=regions_n,
         contract=sched,
     )
+    if ledger is not None:
+        return ledger.evaluate(
+            estimated_cost=cost, purpose=purpose, contract=sched
+        )
+
     if remaining_override is not None:
-        if remaining_override < 0:
-            raise ValueError("remaining_override must be nonnegative")
-        remaining, source = int(remaining_override), "override_bounded"
-        allow_missing = True
-    elif session is None:
-        remaining, source = None, "no_session"
-        allow_missing = False
-    else:
-        remaining, source = latest_remaining_from_observations(
-            session, provider=provider, as_of=as_of
+        remaining, source = validate_remaining_override(
+            remaining_override, contract=sched
         )
         allow_missing = False
+        return evaluate_quota_budget(
+            estimated_cost=cost,
+            remaining=remaining,
+            purpose=purpose,
+            contract=sched,
+            remaining_source=source,
+            allow_missing_remaining_override=allow_missing,
+        )
+
+    if session is None:
+        remaining, source = None, "no_session"
+    else:
+        remaining, source = latest_remaining_from_observations(
+            session, provider=provider, as_of=as_of, contract=sched
+        )
+        if remaining is None and allow_bootstrap and sched.quota.bootstrap_enabled:
+            remaining, source = bootstrap_quota_remaining(
+                session,
+                provider=provider,
+                as_of=as_of,
+                contract=sched,
+                offline_fixtures=offline_fixtures,
+                fixture_dir=fixture_dir,  # type: ignore[arg-type]
+            )
     return evaluate_quota_budget(
         estimated_cost=cost,
         remaining=remaining,
         purpose=purpose,
         contract=sched,
         remaining_source=source,
-        allow_missing_remaining_override=allow_missing,
+        allow_missing_remaining_override=False,
     )
+
+
+def open_quota_ledger(
+    session: Session | None,
+    *,
+    provider: str,
+    as_of: datetime,
+    contract: OddsScheduleContract | None = None,
+    remaining_override: int | None = None,
+    allow_bootstrap: bool = True,
+    offline_fixtures: bool = False,
+    fixture_dir: object | None = None,
+) -> RunningQuotaLedger:
+    """Open a run-scoped ledger, bootstrapping zero-cost when needed."""
+    sched = contract or load_default_schedule_contract()
+    if remaining_override is not None:
+        remaining, source = validate_remaining_override(
+            remaining_override, contract=sched
+        )
+        return RunningQuotaLedger(remaining=remaining, remaining_source=source)
+    if session is None:
+        return RunningQuotaLedger(remaining=None, remaining_source="no_session")
+    remaining, source = latest_remaining_from_observations(
+        session, provider=provider, as_of=as_of, contract=sched
+    )
+    if remaining is None and allow_bootstrap and sched.quota.bootstrap_enabled:
+        remaining, source = bootstrap_quota_remaining(
+            session,
+            provider=provider,
+            as_of=as_of,
+            contract=sched,
+            offline_fixtures=offline_fixtures,
+            fixture_dir=fixture_dir,  # type: ignore[arg-type]
+        )
+    return RunningQuotaLedger(remaining=remaining, remaining_source=source)
 
 
 def sum_estimated_costs(costs: Sequence[int]) -> int:
@@ -256,9 +421,12 @@ def sum_estimated_costs(costs: Sequence[int]) -> int:
 __all__ = [
     "QuotaBudgetDecision",
     "QuotaBudgetState",
+    "RunningQuotaLedger",
     "cost_from_quota_headers",
     "evaluate_quota_budget",
     "latest_remaining_from_observations",
+    "open_quota_ledger",
     "plan_request_budget",
     "sum_estimated_costs",
+    "validate_remaining_override",
 ]

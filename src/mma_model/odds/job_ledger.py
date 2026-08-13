@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from sqlalchemy import select
@@ -46,6 +47,8 @@ def record_job_run(
     estimated_cost: int = 0,
     actual_cost: int | None = None,
     actual_cost_source: str | None = None,
+    remaining_source: str | None = None,
+    snapshot_quote_ids: list[int] | tuple[int, ...] | None = None,
     requested_cutoff: datetime | None = None,
     snapshot_at: datetime | None = None,
     window_name: str | None = None,
@@ -87,6 +90,10 @@ def record_job_run(
     if actual_cost is None and source not in {None, "missing"}:
         raise ValueError("missing actual_cost requires source None or 'missing'")
 
+    quote_ids_json = None
+    if snapshot_quote_ids is not None:
+        quote_ids_json = json.dumps([int(x) for x in snapshot_quote_ids])
+
     row = OddsSnapshotJobRun(
         idempotency_key=idempotency_key,
         success_token=success_token,
@@ -104,6 +111,8 @@ def record_job_run(
         estimated_cost=int(estimated_cost),
         actual_cost=actual_cost,
         actual_cost_source=source,
+        remaining_source=remaining_source,
+        snapshot_quote_ids=quote_ids_json,
         error_class=error_class,
         detail=detail,
         started_at=started,

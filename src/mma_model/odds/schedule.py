@@ -21,10 +21,10 @@ import yaml
 
 from mma_model.odds.normalize import ensure_utc
 
-EXPECTED_SCHEDULE_CONTRACT_VERSION = "1.0.0"
+EXPECTED_SCHEDULE_CONTRACT_VERSION = "1.1.0"
 SCHEDULE_CONTRACT_ID = "dwcs_odds_schedule"
 PINNED_SCHEDULE_CONTRACT_HASH: Final[str] = (
-    "d966bdb1f1cbc14806001e2f11d6f273e7f93ceda25f49969e38a42eb3798b75"
+    "1c12251bddaf2004bb0658b5763185a1930d0717b2aa6ed77639ba635a212a01"
 )
 
 # Exact plan cadence offsets/intervals (seconds).
@@ -95,6 +95,11 @@ class QuotaContract:
     preserve_reserve_for: tuple[str, ...]
     may_spend_reserve_for: tuple[str, ...]
     missing_remaining_policy: str
+    remaining_max_age_sec: int
+    billing_cycle: str
+    bootstrap_enabled: bool
+    bootstrap_endpoint: str
+    bootstrap_min_interval_sec: int
 
 
 @dataclass(frozen=True)
@@ -174,17 +179,14 @@ def normalize_csv_tokens(
     field: str,
     allow_empty: bool = False,
 ) -> str:
-    """Deduplicate, strip, lowercase-sort CSV tokens; reject empties/duplicates."""
-    raw_parts = [part.strip() for part in str(value).split(",")]
+    """Lowercase, dedupe, and sort CSV tokens; reject empties/case-insensitive dupes."""
+    raw_parts = [part.strip().lower() for part in str(value).split(",")]
     parts = [part for part in raw_parts if part]
     if not allow_empty and not parts:
         raise ValueError(f"{field} must list at least one non-empty token")
     if len(parts) != len(set(parts)):
         raise ValueError(f"{field} contains duplicate tokens: {value!r}")
-    # Preserve case for market keys (h2h) but normalize region lower; sort stable.
-    # Markets and regions are case-sensitive provider keys; sort casefold for order.
-    ordered = sorted(parts, key=lambda item: item.casefold())
-    return ",".join(ordered)
+    return ",".join(sorted(parts))
 
 
 def normalize_markets(markets: str) -> str:
@@ -344,6 +346,33 @@ def load_schedule_contract(
         raise ScheduleContractError("preserve_reserve_for must include backfill/live_ordinary")
     if "live_final" not in spend:
         raise ScheduleContractError("may_spend_reserve_for must include live_final")
+    remaining_max_age = int(quota_raw.get("remaining_max_age_sec") or 0)
+    if remaining_max_age <= 0:
+        raise ScheduleContractError("quota.remaining_max_age_sec must be positive")
+    billing_cycle = str(quota_raw.get("billing_cycle") or "")
+    if billing_cycle != "calendar_month_utc":
+        raise ScheduleContractError(
+            "quota.billing_cycle must be calendar_month_utc"
+        )
+    bootstrap_raw = quota_raw.get("bootstrap") or {}
+    if not isinstance(bootstrap_raw, dict):
+        raise ScheduleContractError("quota.bootstrap must be a mapping")
+    bootstrap_enabled = bool(bootstrap_raw.get("enabled"))
+    bootstrap_endpoint = str(bootstrap_raw.get("endpoint") or "")
+    bootstrap_min_interval = int(bootstrap_raw.get("min_interval_sec") or 0)
+    if bootstrap_enabled:
+        if bootstrap_endpoint not in cost_fixed:
+            raise ScheduleContractError(
+                "quota.bootstrap.endpoint must be a cost_fixed zero-cost endpoint"
+            )
+        if int(cost_fixed[bootstrap_endpoint]) != 0:
+            raise ScheduleContractError(
+                "quota.bootstrap.endpoint must have fixed cost 0"
+            )
+        if bootstrap_min_interval < 0:
+            raise ScheduleContractError(
+                "quota.bootstrap.min_interval_sec must be nonnegative"
+            )
 
     idem = payload.get("idempotency") or {}
     if not isinstance(idem, dict):
@@ -399,6 +428,11 @@ def load_schedule_contract(
             preserve_reserve_for=preserve,
             may_spend_reserve_for=spend,
             missing_remaining_policy=missing_policy,
+            remaining_max_age_sec=remaining_max_age,
+            billing_cycle=billing_cycle,
+            bootstrap_enabled=bootstrap_enabled,
+            bootstrap_endpoint=bootstrap_endpoint,
+            bootstrap_min_interval_sec=bootstrap_min_interval,
         ),
         coverage_statuses=statuses,
         bestfightodds_archive=MappingProxyType(dict(bfo)),

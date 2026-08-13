@@ -11,7 +11,7 @@
 # Outside [T−72h, T) is a deterministic no-op.
 
 contract_id: dwcs_odds_schedule
-contract_version: "1.0.0"
+contract_version: "1.1.0"
 schema_version: 1
 ticket: DWCS-205
 
@@ -69,8 +69,17 @@ quota:
   may_spend_reserve_for:
     - live_final
   # Paid requests fail closed when remaining provenance is unknown unless an
-  # explicit bounded operator override is supplied at the call site.
+  # explicit bounded operator override (<= monthly_limit) is supplied.
   missing_remaining_policy: defer_fail_closed
+  # Freshness: observations older than max age or outside the UTC calendar
+  # month of as_of are treated as unknown (fail closed → bootstrap/defer).
+  remaining_max_age_sec: 604800
+  billing_cycle: calendar_month_utc
+  # Zero-cost bootstrap via provider events endpoint when remaining unknown.
+  bootstrap:
+    enabled: true
+    endpoint: events
+    min_interval_sec: 300
   # Provider contract (The Odds API v4):
   #   current_odds: 1 × markets × regions
   #   historical_odds: 10 × markets × regions

@@ -69,6 +69,7 @@ class SnapshotResult:
     observed_at: str
     used_fixtures: bool
     claims_bet365: bool = False
+    quote_ids: tuple[int, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -325,6 +326,7 @@ def run_odds_snapshot(
         observed_at=observed.isoformat(),
         used_fixtures=used_fixtures,
         claims_bet365=False,
+        quote_ids=tuple(quote_result.quote_ids),
     )
 
 

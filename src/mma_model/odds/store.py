@@ -42,6 +42,7 @@ class QuoteStoreResult:
     unknown_deduped: int = 0
     manual_inserted: int = 0
     manual_deduped: int = 0
+    quote_ids: tuple[int, ...] = ()
 
 
 class OddsQuoteStore:
@@ -123,6 +124,7 @@ class OddsQuoteStore:
         inserted = 0
         deduped = 0
         event_upserts = 0
+        quote_ids: list[int] = []
 
         for quote in quotes:
             assert_supported_provider_market_pair(
@@ -149,32 +151,40 @@ class OddsQuoteStore:
 
             if self._quote_already_persisted(quote):
                 deduped += 1
+                existing = self._session.scalar(
+                    select(OddsQuote.id).where(
+                        OddsQuote.dedupe_key == quote.dedupe_key
+                    )
+                )
+                if existing is not None:
+                    quote_ids.append(int(existing))
                 continue
 
-            self._session.add(
-                OddsQuote(
-                    dedupe_key=quote.dedupe_key,
-                    dedupe_version=QUOTE_DEDUPE_VERSION,
-                    provider=quote.provider,
-                    bookmaker_key=quote.bookmaker_key,
-                    bookmaker_title=quote.bookmaker_title,
-                    region=quote.region,
-                    event_id=event_row.id,
-                    external_event_id=quote.event_id,
-                    market_family=quote.market_family.value,
-                    provider_market_key=quote.provider_market_key,
-                    outcome_key=quote.outcome_key.value,
-                    outcome_label=quote.outcome_label,
-                    line_point=quote.line_point,
-                    price_decimal=quote.price_decimal,
-                    availability=quote.availability.value,
-                    observed_at=quote.observed_at,
-                    source_updated_at=quote.source_updated_at,
-                    commence_time=quote.commence_time,
-                    snapshot_at=quote.snapshot_at,
-                    raw_ref=quote.raw_ref,
-                )
+            row = OddsQuote(
+                dedupe_key=quote.dedupe_key,
+                dedupe_version=QUOTE_DEDUPE_VERSION,
+                provider=quote.provider,
+                bookmaker_key=quote.bookmaker_key,
+                bookmaker_title=quote.bookmaker_title,
+                region=quote.region,
+                event_id=event_row.id,
+                external_event_id=quote.event_id,
+                market_family=quote.market_family.value,
+                provider_market_key=quote.provider_market_key,
+                outcome_key=quote.outcome_key.value,
+                outcome_label=quote.outcome_label,
+                line_point=quote.line_point,
+                price_decimal=quote.price_decimal,
+                availability=quote.availability.value,
+                observed_at=quote.observed_at,
+                source_updated_at=quote.source_updated_at,
+                commence_time=quote.commence_time,
+                snapshot_at=quote.snapshot_at,
+                raw_ref=quote.raw_ref,
             )
+            self._session.add(row)
+            self._session.flush()
+            quote_ids.append(int(row.id))
             inserted += 1
 
         self._session.flush()
@@ -182,6 +192,7 @@ class OddsQuoteStore:
             inserted=inserted,
             deduped=deduped,
             event_upserts=event_upserts,
+            quote_ids=tuple(quote_ids),
         )
 
     def _quote_already_persisted(self, quote: NormalizedQuote) -> bool:

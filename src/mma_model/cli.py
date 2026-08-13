@@ -54,6 +54,7 @@ from mma_model.odds.job_ledger import slot_succeeded
 from mma_model.odds.quota_budget import (
     QuotaBudgetState,
     plan_request_budget,
+    validate_remaining_override,
 )
 from mma_model.odds.schedule import (
     DueAction,
@@ -351,7 +352,12 @@ def main(argv: list[str] | None = None) -> int:
         "--remaining-override",
         type=int,
         default=None,
-        help="Explicit bounded remaining-credits override when provenance is unknown",
+        help="Explicit override 0..monthly_limit (prefer --quota-bootstrap)",
+    )
+    p_odds_backfill.add_argument(
+        "--quota-bootstrap",
+        action="store_true",
+        help="Allow zero-cost events bootstrap when remaining provenance is missing/stale",
     )
 
     p_odds_due = odds_sub.add_parser(
@@ -382,7 +388,13 @@ def main(argv: list[str] | None = None) -> int:
         "--remaining-override",
         type=int,
         default=None,
-        help="Explicit bounded remaining-credits override when provenance is unknown",
+        help="Explicit override 0..monthly_limit (prefer --quota-bootstrap)",
+    )
+    p_odds_due.add_argument(
+        "--quota-bootstrap",
+        action="store_true",
+        default=True,
+        help="Allow zero-cost events bootstrap (default on for due)",
     )
 
     p_jobs = sub.add_parser("jobs", help="Host-scheduled job entrypoints (DWCS-205)")
@@ -405,7 +417,13 @@ def main(argv: list[str] | None = None) -> int:
         "--remaining-override",
         type=int,
         default=None,
-        help="Explicit bounded remaining-credits override when provenance is unknown",
+        help="Explicit override 0..monthly_limit (prefer --quota-bootstrap)",
+    )
+    p_jobs_snap.add_argument(
+        "--quota-bootstrap",
+        action="store_true",
+        default=True,
+        help="Allow zero-cost events bootstrap when remaining is missing/stale",
     )
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
@@ -918,7 +936,12 @@ def main(argv: list[str] | None = None) -> int:
                     fixture_dir=fixture_dir,
                     evaluation_contract_path=Path(args.contract),
                     execute=not bool(getattr(args, "dry_run", False)),
-                    remaining_override=getattr(args, "remaining_override", None),
+                    remaining_override=(
+                        None
+                        if getattr(args, "remaining_override", None) is None
+                        else validate_remaining_override(args.remaining_override)[0]
+                    ),
+                    allow_bootstrap=bool(getattr(args, "quota_bootstrap", True)),
                 )
                 session.commit()
             engine.dispose()
@@ -1255,7 +1278,12 @@ def main(argv: list[str] | None = None) -> int:
                     offline_fixtures=offline,
                     fixture_dir=fixture_dir,
                     execute=not bool(getattr(args, "dry_run", False)),
-                    remaining_override=getattr(args, "remaining_override", None),
+                    remaining_override=(
+                        None
+                        if getattr(args, "remaining_override", None) is None
+                        else validate_remaining_override(args.remaining_override)[0]
+                    ),
+                    allow_bootstrap=bool(getattr(args, "quota_bootstrap", True)),
                 )
                 session.commit()
             engine.dispose()
