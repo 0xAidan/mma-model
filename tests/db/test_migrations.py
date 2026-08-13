@@ -61,6 +61,16 @@ ODDS_TABLES = {
     "odds_quota_observations",
     "odds_availability_observations",
 }
+GRADE_LEDGER_TABLES = {
+    "model_runs",
+    "predictions",
+    "price_targets",
+    "official_publications",
+    "recommendation_state_events",
+    "observed_prices",
+    "prediction_grades",
+    "recommendation_settlements",
+}
 
 
 def _alembic_config(db_path: Path) -> Config:
@@ -97,6 +107,7 @@ def test_clean_upgrade_creates_baseline_and_canonical_tables(tmp_path: Path) -> 
     assert IDENTITY_TABLES.issubset(names)
     assert HISTORY_TABLES.issubset(names)
     assert ODDS_TABLES.issubset(names)
+    assert GRADE_LEDGER_TABLES.issubset(names)
 
 
 def _seed_legacy_schema(db_path: Path) -> None:

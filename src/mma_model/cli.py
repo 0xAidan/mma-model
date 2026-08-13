@@ -90,6 +90,7 @@ from mma_model.recommend.policy import (
     RecommendationPolicyError,
 )
 from mma_model.recommend.replay import RecommendReplayError, execute_recommend_replay
+from mma_model.grade.service import GradeLedgerError, audit_series
 from mma_model.markets.derive import UnsupportedScheduleError
 from mma_model.modeling.artifacts import (
     ArtifactError,
@@ -649,6 +650,38 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional path to write the recommendation JSON report",
+    )
+
+    p_grade = sub.add_parser(
+        "grade",
+        help=(
+            "Append-only prediction / recommendation grading ledgers (DWCS-400). "
+            "`grade audit` prints qualified/paper/experimental/model-version views."
+        ),
+    )
+    grade_sub = p_grade.add_subparsers(dest="grade_cmd", required=True)
+    p_grade_audit = grade_sub.add_parser(
+        "audit",
+        help="Audit series ledger counts and performance views (read-only)",
+    )
+    p_grade_audit.add_argument(
+        "--series",
+        default="dwcs",
+        choices=["dwcs"],
+        help="Series to audit (default: dwcs)",
+    )
+    p_grade_audit.add_argument(
+        "--database-url",
+        default=None,
+        help=(
+            "Explicit disposable SQLite URL (required when settings would resolve "
+            "to live data/mma.db; never opens the live DB)"
+        ),
+    )
+    p_grade_audit.add_argument(
+        "--json",
+        action="store_true",
+        help="Print deterministic JSON audit (sorted keys)",
     )
 
     p_source = sub.add_parser("source", help="Source adapter utilities")
@@ -1795,6 +1828,58 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8",
             )
         print(json.dumps(payload, indent=2, sort_keys=True))
+        return EXIT_OK
+
+    if args.cmd == "grade":
+        if getattr(args, "grade_cmd", None) != "audit":
+            print(f"unsupported grade command: {getattr(args, 'grade_cmd', None)}")
+            return EXIT_INTERNAL
+        database_url = getattr(args, "database_url", None)
+        default_url = get_settings().mma_database_url
+        if database_url is None:
+            db_url = str(default_url).strip()
+            live = (
+                db_url in LIVE_DB_URLS
+                or db_url.endswith("/data/mma.db")
+                or db_url.endswith("data/mma.db")
+                or is_prohibited_live_url(db_url)
+            )
+        else:
+            db_url = str(database_url).strip()
+            live = (
+                db_url in LIVE_DB_URLS
+                or db_url.endswith("/data/mma.db")
+                or db_url.endswith("data/mma.db")
+                or is_prohibited_live_url(db_url, default_url=default_url)
+            )
+        if not db_url:
+            print("grade audit error: empty database url")
+            return EXIT_INTERNAL
+        if live:
+            print(
+                "refusing default live data/mma.db; pass an explicit disposable "
+                "--database-url for grade audit"
+            )
+            return EXIT_INTERNAL
+        engine = None
+        try:
+            engine = create_engine(db_url, future=True)
+            _attach_sqlite_listeners(engine)
+            Session = sessionmaker(
+                bind=engine, autoflush=False, autocommit=False, future=True
+            )
+            with Session() as session:
+                audit = audit_series(session, series=str(args.series))
+        except GradeLedgerError as exc:
+            print(f"grade audit error: {exc}")
+            return EXIT_INTERNAL
+        except Exception as exc:
+            print(f"grade audit error: {exc}")
+            return EXIT_INTERNAL
+        finally:
+            if engine is not None:
+                engine.dispose()
+        print(json.dumps(audit.as_dict(), indent=2, sort_keys=True))
         return EXIT_OK
 
     if args.cmd == "source" and args.source_cmd == "audit":
