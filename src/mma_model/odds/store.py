@@ -13,9 +13,11 @@ from mma_model.db.odds_guards import install_odds_sqlite_guards
 from mma_model.db.tables.odds import (
     OddsAvailabilityObservation,
     OddsEventRow,
+    OddsManualPriceObservation,
     OddsQuotaObservation,
     OddsQuote,
 )
+from mma_model.odds.manual_price import MANUAL_SOURCE_LABEL, ObservedPrice, PriceSourceKind
 from mma_model.odds.types import (
     REQUESTS_LAST_SOURCE_INFERRED_EMPTY,
     NormalizedQuote,
@@ -33,6 +35,8 @@ class QuoteStoreResult:
     event_upserts: int
     unknown_inserted: int = 0
     unknown_deduped: int = 0
+    manual_inserted: int = 0
+    manual_deduped: int = 0
 
 
 class OddsQuoteStore:
@@ -243,4 +247,57 @@ class OddsQuoteStore:
             event_upserts=event_upserts,
             unknown_inserted=inserted,
             unknown_deduped=deduped,
+        )
+
+    def append_manual_prices(
+        self,
+        observations: Sequence[ObservedPrice],
+    ) -> QuoteStoreResult:
+        """Persist user_observed price/lifecycle rows (append-only dedupe)."""
+        inserted = 0
+        deduped = 0
+        for obs in observations:
+            if obs.source_kind is not PriceSourceKind.USER_OBSERVED:
+                raise ValueError(
+                    "append_manual_prices accepts only user_observed rows "
+                    f"(got {obs.source_kind!r})"
+                )
+            if obs.automated:
+                raise ValueError("manual price rows must set automated=False")
+            existing = self._session.scalar(
+                select(OddsManualPriceObservation.id).where(
+                    OddsManualPriceObservation.dedupe_key == obs.dedupe_key
+                )
+            )
+            if existing is not None:
+                deduped += 1
+                continue
+            self._session.add(
+                OddsManualPriceObservation(
+                    dedupe_key=obs.dedupe_key,
+                    source_kind=MANUAL_SOURCE_LABEL,
+                    automated=0,
+                    bookmaker_key=obs.bookmaker_key,
+                    bookmaker_title=obs.bookmaker_title,
+                    region=obs.region,
+                    market_family=obs.market_family.value,
+                    outcome_key=obs.outcome_key.value,
+                    line_point=obs.line_point,
+                    price_decimal=obs.price_decimal,
+                    lifecycle=obs.lifecycle.value,
+                    observed_at=obs.observed_at,
+                    source_updated_at=obs.source_updated_at,
+                    event_external_id=obs.event_external_id,
+                    settlement_identity=obs.settlement_identity,
+                    detail=obs.detail,
+                )
+            )
+            inserted += 1
+        self._session.flush()
+        return QuoteStoreResult(
+            inserted=inserted,
+            deduped=deduped,
+            event_upserts=0,
+            manual_inserted=inserted,
+            manual_deduped=deduped,
         )

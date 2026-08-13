@@ -251,6 +251,21 @@ Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 
 Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-requests-last`, plus `requests_last_inferred` and `requests_last_source` (`provider` | `missing` | `inferred_empty_zero`). Empty responses with a missing last header keep `requests_last=NULL` and record inferred cost `0` separately; provider-reported `0` stays `requests_last=0` with source `provider`.
 
+## Optional bookmaker enrichment + price fallback (DWCS-202)
+
+| Field | Value |
+|-------|--------|
+| **Phase 0 gate** | Committed `output/research/odds-coverage-summary.json` → `decision.path=the_odds_api_reference_fallback` |
+| **Licensed adapter** | **Not authorized.** Bet365×DWCS was `scoped_absent`; OpticOdds / SportsGameOdds / SportsDataIO were `not_configured`. Do not invent automated bookmaker adapters. |
+| **Config** | `config/sources/odds.yaml` |
+| **Manual prices** | `user_observed` (non-automated); `mma_model.odds.manual_price` |
+| **Guidance** | `mma_model.odds.price_guidance` — fair / actionable / strong-value always for qualified unpriced selections |
+| **Exact EV** | Only when an available observed price exists (`compute_exact_ev`); never synthetic ROI/CLV |
+| **Lifecycle** | Explicit `available` / `unknown` / `suspended` / `locked` / `removed` / `entitlement_failed` — no forward-fill |
+| **Storage** | `odds_manual_price_observations` (append-only); migration `0013_odds_manual_prices` |
+| **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance …`; `mma-model odds record-manual-price …` |
+| **Prohibited** | Sportsbook website scraping, credential/cookie storage, Bet365 claims for reference consensus |
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core

@@ -68,3 +68,7 @@ select = ["E4", "E7", "E9", "F"]
 #   ruff check src/mma_model/odds src/mma_model/db/tables/odds.py \
 #              src/mma_model/db/odds_guards.py tests/odds \
 #              --select E,F,I,UP,B,SIM
+# Focused stricter lint for DWCS-202 price fallback / manual observation:
+#   ruff check src/mma_model/odds src/mma_model/db/tables/odds.py \
+#              src/mma_model/db/odds_guards.py tests/odds \
+#              --select E,F,I,UP,B,SIM
