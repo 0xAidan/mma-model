@@ -275,16 +275,17 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 
 | Field | Value |
 |-------|--------|
-| **Contract** | Packaged `mma_model/odds/matching_v1.yaml` (`config/odds/matching_v1.yaml` symlink) |
-| **Matcher** | `mma_model.odds.matching.match_provider_event` — exact stored provider IDs first, then exact canonical participant pair within `match_window_minutes` (default 30) |
+| **Contract** | Packaged `mma_model/odds/matching_v1.yaml` (`config/odds/matching_v1.yaml` symlink); pinned content hash + frozen load |
+| **Matcher** | Stored provider IDs are a strong candidate only after active-DWCS / participant / time-window verification; then exact participant pair within `match_window_minutes` (default 30). `stale_after_minutes` uses latest quote timestamps on the active alias version |
 | **Ordering** | Provider home/away ignored; both canonical fighters required |
-| **Ambiguity** | Routes to identity review (`ambiguous_blocked` / `review_blocked`); affected quotes are not value-eligible |
-| **Aliases** | Versioned `odds_provider_event_aliases`; replacements supersede prior versions and point at a new bout identity |
-| **Lifecycle** | Explicit `active` / `stale` / `missing_unknown` / `locked` / `cancelled` / `replaced` / `review_blocked` via append-only `odds_bout_lifecycle_observations` |
-| **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations`; migration `0014_odds_matching` |
-| **CLI** | `mma-model odds reconcile --next-dwcs --strict [--golden-card PATH]` |
-| **Golden** | Committed fixtures under `tests/fixtures/odds/golden/` must achieve 100% exact active-bout matches |
-| **Prohibited** | Home/away guess, fuzzy auto-merge, silent replacement quote inheritance, forward-fill, inferred lock/suspension without evidence |
+| **Ambiguity** | Dedicated `odds_bout_match_reviews` queue (not fighter identity); approve activates alias after version CAS; reject stays blocked; no fighter mapping writes |
+| **Aliases / source IDs** | Immutable `BoutSourceId` + versioned `odds_provider_event_aliases`; exactly one active alias per provider/external ID (partial unique index). Same-ID replacements supersede history and do not expose prior quotes under the new active alias |
+| **Lifecycle** | Latest explicit lifecycle wins; bare match→ACTIVE cannot override locked/cancelled/replaced/review_blocked without explicit transition evidence |
+| **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations`, `odds_bout_match_reviews`; migrations `0014_odds_matching` + `0015_odds_matching_integrity` |
+| **Next DWCS** | `--next-dwcs --as-of <UTC>` selects nearest upcoming DWCS card (fight-night cluster), scopes provider events, fail-closed on zero bouts/events |
+| **CLI** | `mma-model odds reconcile --next-dwcs --strict [--as-of …]`; golden seeding only with `--golden-card` + `--offline-fixtures` + disposable `--database-url` |
+| **Golden** | Offline/disposable-DB only; committed fixtures under `tests/fixtures/odds/golden/` must achieve 100% exact active-bout matches |
+| **Prohibited** | Home/away guess, fuzzy auto-merge, silent replacement quote inheritance, forward-fill, inferred lock/suspension without evidence, live-DB golden seeding |
 
 Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exact bookmaker lines remain optional enrichment; sportsbook-agnostic actionable price guidance remains the mandatory fallback. Snapshot/reference rows stay `provider_unmatched` until proven by this matcher.
 

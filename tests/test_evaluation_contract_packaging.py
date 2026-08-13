@@ -39,11 +39,18 @@ def test_contract_loads_from_non_editable_wheel_install(tmp_path: Path) -> None:
 
     venv_dir = tmp_path / "venv"
     venv.create(venv_dir, with_pip=True)
-    pip = venv_dir / ("Scripts" if os.name == "nt" else "bin") / "pip"
     python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / "python"
 
     install = subprocess.run(
-        [str(pip), "install", str(wheels[0])],
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "--force-reinstall",
+            str(wheels[0]),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -53,6 +60,7 @@ def test_contract_loads_from_non_editable_wheel_install(tmp_path: Path) -> None:
     # Ensure the subprocess cannot import from the checkout src/ tree.
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    env.pop("__PYVENV_LAUNCHER__", None)
     env["PYTHONNOUSERSITE"] = "1"
 
     probe = subprocess.run(

@@ -91,7 +91,12 @@ Match provider events to canonical bouts (exact provider IDs, then participant
 pair within the configured window):
 
 ```bash
-mma-model odds reconcile --next-dwcs --strict \
+# Production / live DB: read/append match+lifecycle only (no golden seeding)
+mma-model odds reconcile --next-dwcs --strict --as-of 2026-08-11T12:00:00Z
+
+# Offline golden fixtures require --offline-fixtures + disposable DB
+mma-model odds reconcile --next-dwcs --strict --offline-fixtures \
+  --as-of 2026-08-11T12:00:00Z \
   --golden-card tests/fixtures/odds/golden/card_active_bouts.json \
   --database-url sqlite:////tmp/odds-reconcile.db
 ```

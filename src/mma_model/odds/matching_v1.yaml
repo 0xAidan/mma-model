@@ -38,7 +38,9 @@ prohibited:
   - labeling_reference_as_bet365
 
 notes: >
-  Exact stored provider IDs match first. Otherwise require both canonical
-  fighters (order-independent) within match_window_minutes of scheduled start.
-  Ambiguity routes to review_blocked. Replacements version aliases and never
-  inherit old-opponent quotes. Quotes remain append-only through cancellation.
+  Stored provider IDs are a strong candidate only after verifying the linked bout
+  exists, is active DWCS, matches both participants order-independently, and lies
+  inside match_window_minutes. Ambiguity uses the dedicated odds-bout review queue.
+  Replacements version aliases (immutable BoutSourceId) and never inherit old quotes.
+  stale_after_minutes is computed from latest quote timestamps. Golden seeding is
+  offline/disposable-DB only.

@@ -112,6 +112,25 @@ def _run_sqlite_statements(bind: Connectable | Engine, statements: tuple[str, ..
     _execute(bind)  # type: ignore[arg-type]
 
 
+_PARTIAL_UNIQUE_INDEXES = (
+    (
+        "uq_odds_provider_event_alias_active",
+        "odds_provider_event_aliases",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_odds_provider_event_alias_active "
+        "ON odds_provider_event_aliases (provider, external_event_id) "
+        "WHERE status = 'active'",
+    ),
+    (
+        "uq_odds_bout_match_reviews_pending_provider_ext",
+        "odds_bout_match_reviews",
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "uq_odds_bout_match_reviews_pending_provider_ext "
+        "ON odds_bout_match_reviews (provider, external_event_id) "
+        "WHERE status = 'pending'",
+    ),
+)
+
+
 def install_odds_sqlite_guards(bind: Connectable | Engine) -> None:
     """Install UPDATE/DELETE abort triggers when owned tables exist."""
     dialect = getattr(getattr(bind, "dialect", None), "name", None)
@@ -122,6 +141,9 @@ def install_odds_sqlite_guards(bind: Connectable | Engine) -> None:
         for name, table, action, message in _TRIGGER_SPECS:
             if _table_exists(connection, table):
                 connection.exec_driver_sql(_trigger_sql(name, table, action, message).strip())
+        for _index_name, table, ddl in _PARTIAL_UNIQUE_INDEXES:
+            if _table_exists(connection, table):
+                connection.exec_driver_sql(ddl)
 
     if isinstance(bind, Engine):
         with bind.begin() as conn:

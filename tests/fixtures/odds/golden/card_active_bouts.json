@@ -35,7 +35,7 @@
       "bout_id": "golden-bout-mulumba-pagliarulo",
       "fighter_a": "Ananias Mulumba",
       "fighter_b": "Tom Pagliarulo",
-      "scheduled_start": "2026-08-11T23:40:00Z",
+      "scheduled_start": "2026-08-12T00:05:00Z",
       "status": "scheduled"
     }
   ],
@@ -71,7 +71,7 @@
     {
       "id": "prov-mulumba-pagliarulo",
       "sport_key": "mma_mixed_martial_arts",
-      "commence_time": "2026-08-11T23:40:00Z",
+      "commence_time": "2026-08-12T00:05:00Z",
       "home_team": "Tom Pagliarulo",
       "away_team": "Ananias Mulumba"
     }

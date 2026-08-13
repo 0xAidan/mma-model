@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from alembic import command
@@ -38,12 +39,12 @@ from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.manual_price import parse_manual_price_observation
-from mma_model.odds.reconcile import run_odds_reconcile
 from mma_model.odds.normalize import parse_single_region
 from mma_model.odds.price_guidance import (
     PriceGuidanceSelectionError,
     build_price_guidance,
 )
+from mma_model.odds.reconcile import OddsReconcileError, run_odds_reconcile
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
@@ -242,7 +243,20 @@ def main(argv: list[str] | None = None) -> int:
         "--golden-card",
         type=Path,
         default=None,
-        help="Optional committed golden-card fixture to seed and reconcile",
+        help=(
+            "Offline/test golden-card fixture only "
+            "(requires --offline-fixtures + disposable --database-url)"
+        ),
+    )
+    p_odds_reconcile.add_argument(
+        "--offline-fixtures",
+        action="store_true",
+        help="Enable offline golden-card seeding (disposable DB required)",
+    )
+    p_odds_reconcile.add_argument(
+        "--as-of",
+        default=None,
+        help="UTC ISO timestamp for next-DWCS card selection (default: now)",
     )
     p_odds_reconcile.add_argument(
         "--provider",
@@ -607,14 +621,37 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             database_url = getattr(args, "database_url", None)
             golden = getattr(args, "golden_card", None)
+            offline = bool(getattr(args, "offline_fixtures", False))
             strict = bool(getattr(args, "strict", False))
             next_dwcs = bool(getattr(args, "next_dwcs", False))
+            as_of_raw = getattr(args, "as_of", None)
             try:
-                if database_url:
+                as_of = None
+                if as_of_raw:
+                    text = str(as_of_raw).strip()
+                    if text.endswith("Z"):
+                        text = text[:-1] + "+00:00"
+                    as_of_dt = datetime.fromisoformat(text)
+                    if as_of_dt.tzinfo is None:
+                        raise ValueError("--as-of must be timezone-aware UTC")
+                    as_of = as_of_dt
+
+                if golden is not None:
+                    if not offline:
+                        raise OddsReconcileError(
+                            "--golden-card requires --offline-fixtures and a "
+                            "disposable --database-url"
+                        )
+                    db_url = require_disposable_database_url(database_url)
+                elif database_url:
                     db_url = str(database_url).strip()
                     if not db_url:
                         print("refusing empty --database-url")
                         return 2
+                else:
+                    db_url = None
+
+                if db_url is not None:
                     engine = create_engine(db_url, future=True)
                     _attach_sqlite_listeners(engine)
                     root = get_settings().project_root
@@ -630,20 +667,38 @@ def main(argv: list[str] | None = None) -> int:
                             strict=strict,
                             golden_card_path=golden,
                             provider=provider,
+                            as_of=as_of,
+                            offline_fixtures=offline,
+                            database_url=db_url,
+                            allow_golden_seed=bool(golden is not None and offline),
                         )
                         session.commit()
                     engine.dispose()
                 else:
+                    if golden is not None:
+                        raise OddsReconcileError(
+                            "--golden-card refuses the default/live database"
+                        )
                     init_db()
                     with session_scope() as session:
                         report = run_odds_reconcile(
                             session,
                             next_dwcs=next_dwcs,
                             strict=strict,
-                            golden_card_path=golden,
+                            golden_card_path=None,
                             provider=provider,
+                            as_of=as_of,
+                            offline_fixtures=False,
+                            database_url=None,
+                            allow_golden_seed=False,
                         )
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                OddsReconcileError,
+                OddsOfflineModeError,
+            ) as exc:
                 print(str(exc))
                 return 2
             print(json.dumps(report, indent=2))

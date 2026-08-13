@@ -345,12 +345,76 @@ _BOUT_LIFECYCLE_SQL = (
     "'active', 'stale', 'missing_unknown', 'locked', "
     "'cancelled', 'replaced', 'review_blocked'"
 )
+_REVIEW_STATUS_SQL = "'pending', 'approved', 'rejected', 'reversed'"
+_ALIAS_STATUS_SUPERSEDED_SQL = (
+    "("
+    "status = 'active' AND superseded_at IS NULL"
+    ") OR ("
+    "status = 'superseded' AND superseded_at IS NOT NULL"
+    ")"
+)
+_MATCH_RELATIONAL_SQL = (
+    "("
+    "match_status = 'matched' AND bout_id IS NOT NULL AND match_rule IS NOT NULL "
+    "AND eligible_for_value IN (0, 1)"
+    ") OR ("
+    "match_status IN ('unmatched', 'ambiguous_blocked') AND bout_id IS NULL "
+    "AND match_rule IS NULL AND eligible_for_value = 0"
+    ")"
+)
+
+
+class OddsBoutMatchReview(Base):
+    """Dedicated odds-bout match review queue (not fighter identity)."""
+
+    __tablename__ = "odds_bout_match_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({_REVIEW_STATUS_SQL})",
+            name="ck_odds_bout_match_reviews_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_odds_bout_match_reviews_version"),
+        CheckConstraint(
+            "("
+            "status = 'approved' AND decision_bout_id IS NOT NULL"
+            ") OR ("
+            "status != 'approved'"
+            ")",
+            name="ck_odds_bout_match_reviews_decision",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="pending")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    external_event_id: Mapped[str] = mapped_column(String(128), index=True)
+    home_team: Mapped[str] = mapped_column(String(200))
+    away_team: Mapped[str] = mapped_column(String(200))
+    commence_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    candidate_bout_ids_json: Mapped[str] = mapped_column(String(2000), default="[]")
+    reason: Mapped[str] = mapped_column(String(500))
+    rule_id: Mapped[str] = mapped_column(String(128), default="")
+    evidence_json: Mapped[str] = mapped_column(String(2000), default="{}")
+    decision_bout_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("canonical_bouts.id"), nullable=True, index=True
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, onupdate=_utc_now
+    )
 
 
 class OddsProviderEventAlias(Base):
     """Versioned provider event ↔ canonical bout alias (DWCS-203).
 
     Replacements supersede prior alias versions and never rewrite quote rows.
+    Exactly one active alias per (provider, external_event_id) is enforced by a
+    partial unique index (see migration 0015).
     """
 
     __tablename__ = "odds_provider_event_aliases"
@@ -370,6 +434,10 @@ class OddsProviderEventAlias(Base):
             name="ck_odds_provider_event_alias_match_rule",
         ),
         CheckConstraint("alias_version >= 1", name="ck_odds_provider_event_alias_version"),
+        CheckConstraint(
+            _ALIAS_STATUS_SUPERSEDED_SQL,
+            name="ck_odds_provider_event_alias_superseded_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
@@ -405,17 +473,32 @@ class OddsMatchObservation(Base):
             ")",
             name="ck_odds_match_observations_rule",
         ),
+        CheckConstraint(
+            "eligible_for_value IN (0, 1)",
+            name="ck_odds_match_observations_eligible",
+        ),
+        CheckConstraint(
+            _MATCH_RELATIONAL_SQL,
+            name="ck_odds_match_observations_relational",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     dedupe_key: Mapped[str] = mapped_column(String(64), index=True)
     provider: Mapped[str] = mapped_column(String(64), index=True)
     external_event_id: Mapped[str] = mapped_column(String(128), index=True)
-    bout_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    bout_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("canonical_bouts.id"), nullable=True, index=True
+    )
     match_status: Mapped[str] = mapped_column(String(32), index=True)
     match_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason: Mapped[str] = mapped_column(String(500))
-    review_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    review_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("odds_bout_match_reviews.id"),
+        nullable=True,
+        index=True,
+    )
     eligible_for_value: Mapped[int] = mapped_column(Integer, default=0)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
@@ -446,7 +529,9 @@ class OddsBoutLifecycleObservation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     dedupe_key: Mapped[str] = mapped_column(String(64), index=True)
-    bout_id: Mapped[str] = mapped_column(String(36), index=True)
+    bout_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("canonical_bouts.id"), index=True
+    )
     provider: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     external_event_id: Mapped[str | None] = mapped_column(
         String(128), nullable=True, index=True

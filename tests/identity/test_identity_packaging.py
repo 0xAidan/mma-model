@@ -65,10 +65,17 @@ def test_identity_audit_and_import_from_wheel_install(tmp_path: Path) -> None:
         text=True,
     )
     assert created.returncode == 0, created.stdout + created.stderr
-    pip = venv_dir / ("Scripts" if os.name == "nt" else "bin") / "pip"
     python = venv_dir / ("Scripts" if os.name == "nt" else "bin") / "python"
     install = subprocess.run(
-        [str(pip), "install", str(wheels[0])],
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "--force-reinstall",
+            str(wheels[0]),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -77,6 +84,7 @@ def test_identity_audit_and_import_from_wheel_install(tmp_path: Path) -> None:
 
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    env.pop("__PYVENV_LAUNCHER__", None)
     env["PYTHONNOUSERSITE"] = "1"
 
     policy_probe = subprocess.run(
