@@ -1,6 +1,7 @@
 """Leakage-safe outcome labels and result-version clocks (DWCS-300)."""
 
 from mma_model.labels.outcomes import (
+    CONTRACT_SETTLEMENT_ONLY_LABELS,
     EXACT_METHOD_TOKENS,
     SETTLEMENT_ONLY_RESULT_CLASSES,
     MethodLabel,
@@ -9,6 +10,7 @@ from mma_model.labels.outcomes import (
     OutcomeLabelError,
     ResultClass,
     ResultVersion,
+    SettlementOnlyLabel,
     TerminalAtom,
     TokenMapping,
     VersionKind,
@@ -25,6 +27,7 @@ from mma_model.labels.outcomes import (
 )
 
 __all__ = [
+    "CONTRACT_SETTLEMENT_ONLY_LABELS",
     "EXACT_METHOD_TOKENS",
     "SETTLEMENT_ONLY_RESULT_CLASSES",
     "MethodLabel",
@@ -33,6 +36,7 @@ __all__ = [
     "OutcomeLabelError",
     "ResultClass",
     "ResultVersion",
+    "SettlementOnlyLabel",
     "TerminalAtom",
     "TokenMapping",
     "VersionKind",

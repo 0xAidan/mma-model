@@ -75,6 +75,56 @@ class EventFightRow:
     time_str: Optional[str]
 
 
+_WEIGHT_CLASS_HINTS = (
+    "weight",
+    "fly",
+    "bantam",
+    "feather",
+    "light",
+    "welter",
+    "middle",
+    "light heavy",
+    "heavy",
+    "women",
+    "catch",
+)
+
+
+def _looks_like_weight_class(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in _WEIGHT_CLASS_HINTS)
+
+
+def _method_cell_from_texts(texts: list[str], fighter_tokens: set[str]) -> str:
+    """Exact method token if present; otherwise raw non-name method-column text.
+
+    Fighter names are never selected. Empty/absent method cells stay blank
+    (missing). A present but unrecognized cell is kept so normalization is
+    UNKNOWN rather than PENDING.
+    """
+    exact: str | None = None
+    malformed: str | None = None
+    for raw in texts:
+        if not raw:
+            continue
+        canonical = canonicalize_method_text(raw)
+        if canonical in fighter_tokens:
+            continue
+        if match_exact_method_token(raw) is not None:
+            if exact is None:
+                exact = raw
+            continue
+        if canonical == "W":
+            continue
+        if _looks_like_weight_class(raw):
+            continue
+        if malformed is None:
+            malformed = raw
+    if exact is not None:
+        return exact
+    return malformed or ""
+
+
 def parse_event_fights(html: str) -> list[EventFightRow]:
     soup = BeautifulSoup(html, "lxml")
     out: list[EventFightRow] = []
@@ -93,29 +143,19 @@ def parse_event_fights(html: str) -> list[EventFightRow]:
         win_flag = tr.select_one("a.b-flag_style_green")
         winner_id: Optional[str] = fa_id if win_flag else None
         wc = ""
-        for p in tr.select("td.l-page_align_left p.b-fight-details__table-text"):
-            t = p.get_text(" ", strip=True)
-            if t and any(x in t.lower() for x in ("weight", "fly", "bantam", "feather", "light", "welter", "middle", "light heavy", "heavy", "women", "catch")):
-                wc = t.replace("\n", " ").strip()
-                break
-        methods = [
+        left_texts = [
             p.get_text(" ", strip=True)
             for p in tr.select("td.l-page_align_left p.b-fight-details__table-text")
         ]
+        for t in left_texts:
+            if t and _looks_like_weight_class(t):
+                wc = t.replace("\n", " ").strip()
+                break
         fighter_tokens = {
             canonicalize_method_text(fa.get_text(strip=True)),
             canonicalize_method_text(fb.get_text(strip=True)),
         }
-        method = ""
-        for m in methods:
-            if not m:
-                continue
-            canonical = canonicalize_method_text(m)
-            if canonical in fighter_tokens:
-                continue
-            if match_exact_method_token(m) is not None:
-                method = m
-                break
+        method = _method_cell_from_texts(left_texts, fighter_tokens)
         fight_round: Optional[int] = None
         time_str: Optional[str] = None
         cols = tr.select("td.b-fight-details__table-col")

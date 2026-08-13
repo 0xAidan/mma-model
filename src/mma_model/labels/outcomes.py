@@ -24,7 +24,11 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final, Never
 
-from mma_model.evaluation.contract import mutable_fact_allowed_at_cutoff
+from mma_model.evaluation.contract import (
+    SettlementOnlyLabel,
+    TerminalAtom,
+    mutable_fact_allowed_at_cutoff,
+)
 
 
 class OutcomeLabelError(ValueError):
@@ -57,20 +61,6 @@ class MethodLabel(StrEnum):
     OTHER_STOPPAGE = "other_stoppage"
     TECHNICAL_DECISION = "technical_decision"
     TECHNICAL_DRAW = "technical_draw"
-
-
-class TerminalAtom(StrEnum):
-    """Frozen evaluation-contract terminal atoms (win-fitting set)."""
-
-    A_KO_TKO = "a_ko_tko"
-    A_SUBMISSION = "a_submission"
-    A_OTHER_STOPPAGE = "a_other_stoppage"
-    A_DECISION = "a_decision"
-    B_KO_TKO = "b_ko_tko"
-    B_SUBMISSION = "b_submission"
-    B_OTHER_STOPPAGE = "b_other_stoppage"
-    B_DECISION = "b_decision"
-    DRAW = "draw"
 
 
 class NormalizationStatus(StrEnum):
@@ -116,6 +106,12 @@ _METHOD_TOKEN_MAP: Final[dict[str, TokenMapping]] = {
 }
 
 EXACT_METHOD_TOKENS: Final[frozenset[str]] = frozenset(_METHOD_TOKEN_MAP)
+CONTRACT_SETTLEMENT_ONLY_LABELS: Final[frozenset[SettlementOnlyLabel]] = frozenset(
+    SettlementOnlyLabel
+)
+# Result classes excluded from win-fitting atoms. Contract settlement-only
+# labels are ``no_contest`` and ``void`` (SettlementOnlyLabel); there is no
+# UFCStats void method token. Overturned/pending/unknown are also excluded.
 SETTLEMENT_ONLY_RESULT_CLASSES: Final[frozenset[ResultClass]] = frozenset(
     {ResultClass.NO_CONTEST, ResultClass.OVERTURNED, ResultClass.PENDING, ResultClass.UNKNOWN}
 )
@@ -227,18 +223,38 @@ def binary_winner_label(
     raise OutcomeLabelError(f"unhandled result class: {never_class!r}")
 
 
-def _atom_suffix_for_method(method: MethodLabel) -> str | None:
-    """Joint-atom suffix. Technical decision pools with decision; technical draw has none."""
+def _side_atom(
+    winner_side: WinnerSide,
+    a_atom: TerminalAtom,
+    b_atom: TerminalAtom,
+) -> TerminalAtom:
+    if winner_side is WinnerSide.A:
+        return a_atom
+    if winner_side is WinnerSide.B:
+        return b_atom
+    never_side: Never = winner_side
+    raise OutcomeLabelError(f"unhandled winner side: {never_side!r}")
+
+
+def _decisive_terminal_atom(
+    method: MethodLabel,
+    winner_side: WinnerSide,
+) -> TerminalAtom | None:
+    """Map a decisive method onto a contract TerminalAtom member."""
     if method is MethodLabel.KO_TKO:
-        return "ko_tko"
+        return _side_atom(winner_side, TerminalAtom.A_KO_TKO, TerminalAtom.B_KO_TKO)
     if method is MethodLabel.SUBMISSION:
-        return "submission"
+        return _side_atom(
+            winner_side, TerminalAtom.A_SUBMISSION, TerminalAtom.B_SUBMISSION
+        )
     if method is MethodLabel.DECISION:
-        return "decision"
+        return _side_atom(winner_side, TerminalAtom.A_DECISION, TerminalAtom.B_DECISION)
     if method is MethodLabel.OTHER_STOPPAGE:
-        return "other_stoppage"
+        return _side_atom(
+            winner_side, TerminalAtom.A_OTHER_STOPPAGE, TerminalAtom.B_OTHER_STOPPAGE
+        )
     if method is MethodLabel.TECHNICAL_DECISION:
-        return "decision"
+        return _side_atom(winner_side, TerminalAtom.A_DECISION, TerminalAtom.B_DECISION)
     if method is MethodLabel.TECHNICAL_DRAW:
         return None
     never_method: Never = method
@@ -250,7 +266,11 @@ def terminal_atom(
     method: MethodLabel | None,
     winner_side: WinnerSide | None,
 ) -> TerminalAtom | None:
-    """Map decisive+draw outcomes onto contract atoms. NC/void/pending excluded."""
+    """Map decisive+draw outcomes onto contract atoms.
+
+    ``SettlementOnlyLabel`` (``no_contest``, ``void``) and overturned/pending/
+    unknown are excluded from win fitting. Void has no UFCStats method token.
+    """
     if result_class is ResultClass.DRAW:
         return TerminalAtom.DRAW
     if result_class in SETTLEMENT_ONLY_RESULT_CLASSES:
@@ -258,15 +278,7 @@ def terminal_atom(
     if result_class is ResultClass.DECISIVE:
         if winner_side is None or method is None:
             return None
-        suffix = _atom_suffix_for_method(method)
-        if suffix is None:
-            return None
-        if winner_side is WinnerSide.A:
-            return TerminalAtom(f"a_{suffix}")
-        if winner_side is WinnerSide.B:
-            return TerminalAtom(f"b_{suffix}")
-        never_side: Never = winner_side
-        raise OutcomeLabelError(f"unhandled winner side: {never_side!r}")
+        return _decisive_terminal_atom(method, winner_side)
     never_class: Never = result_class
     raise OutcomeLabelError(f"unhandled result class: {never_class!r}")
 
@@ -332,13 +344,21 @@ def label_from_facts(
         else:
             status = NormalizationStatus.VALID
             resolved_method = None
-    else:
+    elif normalized.status is NormalizationStatus.PENDING:
+        if resolved_class is None:
+            resolved_class = ResultClass.PENDING
+        resolved_method = None
+        status = NormalizationStatus.PENDING
+    elif normalized.status is NormalizationStatus.UNKNOWN:
         # Malformed method: never guess KO/sub/decision from a substring.
         resolved_method = None
         if resolved_class is None:
             resolved_class = ResultClass.UNKNOWN
         elif resolved_class is ResultClass.DECISIVE:
             resolved_class = ResultClass.UNKNOWN
+    else:
+        never_status: Never = normalized.status
+        raise OutcomeLabelError(f"unhandled normalization status: {never_status!r}")
 
     binary = binary_winner_label(resolved_class, winner_side)
     atom = terminal_atom(resolved_class, resolved_method, winner_side)

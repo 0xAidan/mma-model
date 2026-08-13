@@ -6,7 +6,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from mma_model.evaluation.contract import (
+    SettlementOnlyLabel,
+    TerminalAtom as ContractTerminalAtom,
+)
 from mma_model.labels.outcomes import (
+    CONTRACT_SETTLEMENT_ONLY_LABELS,
     EXACT_METHOD_TOKENS,
     MethodLabel,
     NormalizationStatus,
@@ -77,6 +82,20 @@ def test_malformed_method_fail_closed() -> None:
     assert match_exact_method_token("Nicole Decker") is None
     assert match_exact_method_token("Kona Diaz") is None
     assert match_exact_method_token("Nick Diaz") is None
+    unknown_label = label_from_facts(
+        method_raw="maybe a KO?", result_class=None, winner_side=None
+    )
+    assert unknown_label.status is NormalizationStatus.UNKNOWN
+    assert unknown_label.result_class is ResultClass.UNKNOWN
+
+
+def test_labels_reuse_contract_terminal_atoms() -> None:
+    assert TerminalAtom is ContractTerminalAtom
+    assert SettlementOnlyLabel.NO_CONTEST in CONTRACT_SETTLEMENT_ONLY_LABELS
+    assert SettlementOnlyLabel.VOID in CONTRACT_SETTLEMENT_ONLY_LABELS
+    assert match_exact_method_token("void") is None
+    assert match_exact_method_token("VOID") is None
+    assert terminal_atom(ResultClass.NO_CONTEST, None, None) is None
 
 
 def test_missing_method_is_pending() -> None:

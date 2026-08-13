@@ -64,9 +64,13 @@ def half_round_duration(
     """Elapsed seconds and finishing half-round index, or missing/invalid.
 
     Three-round bouts have 6 intervals; five-round bouts have 10. Interval
-    length is ``round_seconds / 2`` (150s for 300s rounds). A full-distance
-    3x5:00 decision (900s) maps to the last interval (index 5). Round 1 at
-    1:10 (70s) → 0; round 1 at 3:00 (180s) → 1.
+    length is ``round_seconds / 2`` (150s for 300s rounds). Bins are
+    right-closed so they match settlement round-boundary equivalence
+    (end of round ``r`` at 300s ≡ start of round ``r+1`` at 0s):
+    ``index = (elapsed - 1) // interval_seconds`` for ``elapsed > 0``,
+    and ``elapsed == 0`` → 0. A full-distance 3x5:00 decision (900s) maps
+    to the last interval (index 5). Round 1 at 1:10 (70s) → 0; round 1 at
+    5:00 (300s) → 1, not 2.
 
     Scheduled rounds outside {3, 5} fail closed as invalid for modeling bins.
     Ingest ``derive_elapsed_seconds`` still accepts other positive schedules;
@@ -93,15 +97,13 @@ def half_round_duration(
         return _invalid(reason="elapsed_missing_after_valid", interval_count=interval_count)
 
     interval_seconds = round_seconds // 2
-    raw_index = elapsed // interval_seconds
     max_index = interval_count - 1
-    max_elapsed = scheduled_rounds * round_seconds
-    if elapsed == max_elapsed:
-        index = max_index
-    elif raw_index > max_index:
-        return _invalid(reason="interval_index_out_of_range", interval_count=interval_count)
+    if elapsed == 0:
+        index = 0
     else:
-        index = raw_index
+        index = (elapsed - 1) // interval_seconds
+    if index < 0 or index > max_index:
+        return _invalid(reason="interval_index_out_of_range", interval_count=interval_count)
 
     return HalfRoundDuration(
         status=DurationStatus.VALID,

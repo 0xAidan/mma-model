@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mma_model.labels.outcomes import normalize_outcome_from_method
+from mma_model.labels.outcomes import NormalizationStatus, normalize_outcome_from_method
 from mma_model.ufcstats.parsers import (
     EventFightRow,
     parse_completed_events,
@@ -85,13 +85,31 @@ def test_parse_event_fights_draw_nc_technical_decision_early_malformed() -> None
     assert early.time_str == "1:10"
 
     malformed = by_id["malformed001"]
-    assert malformed.method == ""
+    assert malformed.method == "maybe a KO?"
+    malformed_norm = normalize_outcome_from_method(malformed.method)
+    assert malformed_norm.status is NormalizationStatus.UNKNOWN
+    assert malformed_norm.result_class.value == "unknown"
     assert "KO" in malformed.fighter_b_name.upper()
+
+    empty = by_id["empty001"]
+    assert empty.method == ""
+    empty_norm = normalize_outcome_from_method(empty.method)
+    assert empty_norm.status is NormalizationStatus.MISSING
+    assert empty_norm.result_class.value == "pending"
 
     simple = by_id["simple001"]
     assert simple.method == "KO/TKO"
     assert simple.fight_round == 3
     assert simple.time_str == "2:15"
+
+
+def test_parse_malformed_method_feeds_unknown_not_pending() -> None:
+    row = _fights_by_id()["malformed001"]
+    assert row.method == "maybe a KO?"
+    got = normalize_outcome_from_method(row.method)
+    assert got.status is NormalizationStatus.UNKNOWN
+    assert got.status is not NormalizationStatus.MISSING
+    assert got.result_class.value == "unknown"
 
 
 def test_existing_event_details_sample_still_parses_method() -> None:
