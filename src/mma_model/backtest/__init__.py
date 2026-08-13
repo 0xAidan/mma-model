@@ -1,4 +1,4 @@
-"""Frozen backtest evaluator gates (DWCS-302)."""
+"""Event-grouped walk-forward backtest (DWCS-302 hashes + DWCS-306 engine)."""
 
 from mma_model.backtest.contract import (
     PINNED_FEATURE_SPEC_HASH,
@@ -11,15 +11,79 @@ from mma_model.backtest.contract import (
     splits_config_payload,
     verify_evaluator_hashes,
 )
+from mma_model.backtest.engine import (
+    AttemptStatus,
+    BoutAttempt,
+    BoutPrediction,
+    CardScore,
+    ExclusionReason,
+    ManifestExclusionScorer,
+    PrecomputedScorer,
+    ProtocolWalkForwardScorer,
+    QuoteCandidate,
+    WalkForwardDeprecatedError,
+    execute_backtest_run,
+    legacy_deprecation_record,
+    run_walk_forward,
+)
+from mma_model.backtest.gates import (
+    BacktestGateError,
+    DatabaseMutationError,
+    EvidenceOverwriteError,
+    EvidenceTamperError,
+    HoldoutTrainError,
+    PricedScopeError,
+)
+from mma_model.backtest.metrics import (
+    DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
+    DEFAULT_BACKTEST_BOOTSTRAP_SEED,
+    PricedBet,
+    event_blocks,
+    resample_event_blocks,
+)
+from mma_model.backtest.report import (
+    compute_evidence_hash,
+    load_evidence,
+    verify_evidence_payload,
+    write_evidence_files,
+)
 
 __all__ = [
     "PINNED_FEATURE_SPEC_HASH",
     "PINNED_SPLITS_CONFIG_HASH",
+    "AttemptStatus",
+    "BacktestGateError",
+    "BoutAttempt",
+    "BoutPrediction",
+    "CardScore",
+    "DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES",
+    "DEFAULT_BACKTEST_BOOTSTRAP_SEED",
+    "DatabaseMutationError",
     "EvaluatorHashMismatchError",
+    "EvidenceOverwriteError",
+    "EvidenceTamperError",
+    "ExclusionReason",
     "HashKind",
+    "HoldoutTrainError",
+    "ManifestExclusionScorer",
+    "PrecomputedScorer",
+    "PricedBet",
+    "PricedScopeError",
+    "ProtocolWalkForwardScorer",
+    "QuoteCandidate",
+    "WalkForwardDeprecatedError",
     "compute_data_hash",
+    "compute_evidence_hash",
     "compute_splits_config_hash",
     "current_feature_spec_hash",
+    "event_blocks",
+    "execute_backtest_run",
+    "legacy_deprecation_record",
+    "load_evidence",
+    "resample_event_blocks",
+    "run_walk_forward",
     "splits_config_payload",
     "verify_evaluator_hashes",
+    "verify_evidence_payload",
+    "write_evidence_files",
 ]

@@ -61,5 +61,12 @@ jobs:
           tests/modeling/test_joint.py
           tests/modeling/test_calibration.py
           --select E,F,I,UP,B,SIM
+      - name: Ruff backtest (strict)
+        run: >
+          ruff check
+          src/mma_model/backtest
+          src/mma_model/predict/backtest.py
+          tests/backtest
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q

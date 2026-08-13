@@ -24,7 +24,10 @@ from mma_model.value.errors import (
 )
 from mma_model.value.ev import (
     CLV_UNIT,
+    closing_ev_with_void,
+    conditional_win_probability,
     expected_value,
+    expected_value_with_void,
     flat_unit_profit,
     same_selection_closing_ev,
     same_selection_probability_clv,
@@ -43,6 +46,7 @@ from mma_model.value.evidence import (
 from mma_model.value.kelly import (
     DEFAULT_BANKROLL_CAP_FRACTION,
     quarter_kelly_fraction,
+    quarter_kelly_fraction_with_void,
 )
 from mma_model.value.odds import VALUE_MATH_METHOD, VALUE_MATH_VERSION, validate_probability
 from mma_model.value.portfolio import capped_stake_fraction
@@ -120,6 +124,7 @@ class PricedValueRequest:
     closing_evidence: ClosingPriceEvidence | None = None
     settlement: SettlementResult | None = None
     bankroll_cap_fraction: float = DEFAULT_BANKROLL_CAP_FRACTION
+    p_void: float | None = None
 
     def __post_init__(self) -> None:
         if self.valuation_cutoff.tzinfo is None:
@@ -167,6 +172,10 @@ class PricedValueMetrics:
     model_probability_unit: str = MODEL_PROBABILITY_UNIT
     bankroll_cap_fraction: float | None = None
     valuation_cutoff: str | None = None
+    p_win_unconditional: float | None = None
+    p_void: float | None = None
+    p_win_conditional: float | None = None
+    void_adjusted: bool = False
 
     def require_available(self) -> PricedValueMetrics:
         if self.available and self.expected_value is not None:
@@ -627,12 +636,27 @@ def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetr
     opening, _source, opening_prov = resolved
 
     offered = opening.price_decimal
-    ev = expected_value(model_prob, offered)
-    qk = quarter_kelly_fraction(
-        model_prob,
-        offered,
-        cap=request.bankroll_cap_fraction,
-    )
+    p_void = 0.0 if request.p_void is None else float(request.p_void)
+    void_adjusted = p_void > 0.0
+    p_conditional = None
+    if void_adjusted:
+        ev = expected_value_with_void(
+            p_win=model_prob, p_void=p_void, offered_decimal=offered
+        )
+        qk = quarter_kelly_fraction_with_void(
+            p_win=model_prob,
+            p_void=p_void,
+            offered_decimal=offered,
+            cap=request.bankroll_cap_fraction,
+        )
+        p_conditional = conditional_win_probability(model_prob, p_void)
+    else:
+        ev = expected_value(model_prob, offered)
+        qk = quarter_kelly_fraction(
+            model_prob,
+            offered,
+            cap=request.bankroll_cap_fraction,
+        )
     stake = capped_stake_fraction(qk, cap_fraction=request.bankroll_cap_fraction)
 
     close_ev: float | None = None
@@ -657,11 +681,18 @@ def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetr
                 clv_reason = MetricsUnavailableReason.EVIDENCE_MISMATCH
             else:
                 try:
-                    close_ev = same_selection_closing_ev(
-                        model_prob=model_prob,
-                        opening=opening,
-                        closing=closing_obs,
-                    )
+                    if void_adjusted:
+                        close_ev = closing_ev_with_void(
+                            p_win=model_prob,
+                            p_void=p_void,
+                            closing_decimal=closing_obs.price_decimal,
+                        )
+                    else:
+                        close_ev = same_selection_closing_ev(
+                            model_prob=model_prob,
+                            opening=opening,
+                            closing=closing_obs,
+                        )
                     clv = same_selection_probability_clv(
                         opening=opening,
                         closing=closing_obs,
@@ -723,4 +754,8 @@ def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetr
         model_probability_unit=MODEL_PROBABILITY_UNIT,
         bankroll_cap_fraction=request.bankroll_cap_fraction,
         valuation_cutoff=_iso(request.valuation_cutoff),
+        p_win_unconditional=model_prob,
+        p_void=p_void,
+        p_win_conditional=p_conditional if void_adjusted else model_prob,
+        void_adjusted=void_adjusted,
     )

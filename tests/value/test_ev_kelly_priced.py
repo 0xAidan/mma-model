@@ -6,9 +6,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from mma_model.domain.markets import MarketFamily
+from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
-from mma_model.markets.settlement import SettlementResult
+from mma_model.markets.settlement import (
+    BoutSettlementFacts,
+    MarketSelection,
+    SettlementResult,
+    settle,
+)
 from mma_model.value.errors import (
     IneligiblePriceError,
     InvalidOddsError,
@@ -19,7 +24,9 @@ from mma_model.value.errors import (
 from mma_model.value.ev import (
     CLV_UNIT,
     closing_ev,
+    conditional_win_probability,
     expected_value,
+    expected_value_with_void,
     flat_unit_profit,
     same_selection_probability_clv,
     unsafe_same_line_probability_clv,
@@ -865,3 +872,22 @@ def test_opening_before_closing_required_for_clv() -> None:
     assert row.available is True
     assert row.probability_clv is None
     assert row.probability_clv_reason is MetricsUnavailableReason.EVIDENCE_MISMATCH
+
+
+def test_void_aware_ev_and_conditional_prob_hand_numbers() -> None:
+    """pA=0.45, pB=0.45, pDraw=0.10, odds 2.2 → EV=0.09, conditional p=0.5."""
+    p_win = 0.45
+    p_void = 0.10
+    odds = 2.2
+    ev = expected_value_with_void(p_win=p_win, p_void=p_void, offered_decimal=odds)
+    assert abs(ev - 0.09) < 1e-12
+    assert abs(ev - (p_win * (odds - 1.0) - 0.45)) < 1e-12
+    assert abs(expected_value(p_win, odds) - (0.45 * 2.2 - 1.0)) < 1e-12
+    assert abs(conditional_win_probability(p_win, p_void) - 0.5) < 1e-12
+    draw = BoutSettlementFacts(scheduled_rounds=3, result_class="draw", ending_round=3)
+    decision = settle(
+        MarketSelection(family=MarketFamily.MONEYLINE, outcome=OutcomeKey.FIGHTER_A),
+        draw,
+    )
+    assert decision.result is SettlementResult.PUSH or decision.result is SettlementResult.VOID
+    assert flat_unit_profit(settlement=decision.result, offered_decimal=odds) == 0.0

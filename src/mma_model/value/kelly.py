@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from mma_model.value.ev import conditional_win_probability
 from mma_model.value.odds import (
     american_to_decimal,
     validate_decimal_odds,
@@ -33,6 +34,18 @@ def kelly_fraction(model_prob: float, offered_decimal: float) -> float:
         return 0.0
     q = 1.0 - model_prob
     return (model_prob * b - q) / b
+
+
+def kelly_fraction_with_void(
+    *,
+    p_win: float,
+    p_void: float,
+    offered_decimal: float,
+) -> float:
+    """Full Kelly using conditional win/loss among non-void outcomes."""
+    offered_decimal = validate_decimal_odds(offered_decimal, field="offered_decimal")
+    conditional = conditional_win_probability(p_win, p_void)
+    return kelly_fraction(conditional, offered_decimal)
 
 
 def fractional_kelly(
@@ -66,6 +79,23 @@ def quarter_kelly_fraction(
     """
     cap = _validate_cap(cap)
     k = kelly_fraction(model_prob, offered_decimal) * QUARTER_KELLY_FRACTION
+    if k < 0.0:
+        return 0.0
+    return min(k, cap)
+
+
+def quarter_kelly_fraction_with_void(
+    *,
+    p_win: float,
+    p_void: float,
+    offered_decimal: float,
+    cap: float = DEFAULT_BANKROLL_CAP_FRACTION,
+) -> float:
+    """Quarter-Kelly with void-aware conditional probabilities; cap remains 1%."""
+    cap = _validate_cap(cap)
+    k = kelly_fraction_with_void(
+        p_win=p_win, p_void=p_void, offered_decimal=offered_decimal
+    ) * QUARTER_KELLY_FRACTION
     if k < 0.0:
         return 0.0
     return min(k, cap)

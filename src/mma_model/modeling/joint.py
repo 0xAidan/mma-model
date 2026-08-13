@@ -1051,8 +1051,13 @@ def joint_samples_from_snapshot(
     allowed_roles: frozenset[FoldRole] | None = None,
     allow_holdout: bool = False,
     contract: EvaluationContract | None = None,
+    label_at: datetime | None = None,
 ) -> tuple[JointBoutSample, ...]:
-    """Build PIT features after dropping locked holdout cards."""
+    """Build PIT features after dropping locked holdout cards.
+
+    ``label_at`` overrides the default event-start+LABEL_LAG cutoff used to
+    resolve training labels (walk-forward uses the current test cutoff).
+    """
     roles = allowed_roles if allowed_roles is not None else ORDINARY_TRAIN_ROLES
     if FoldRole.HOLDOUT in roles and not allow_holdout:
         raise HoldoutLockedError(
@@ -1068,7 +1073,9 @@ def joint_samples_from_snapshot(
     samples: list[JointBoutSample] = []
     for card in eligible:
         cutoff = cutoff_for_event(card)
-        label_at = implied_event_start(cutoff) + LABEL_LAG
+        resolved_label_at = (
+            label_at if label_at is not None else implied_event_start(cutoff) + LABEL_LAG
+        )
         for bout_id in card.bout_ids:
             bout = snapshot.bout_by_id(bout_id)
             if bout is None:
@@ -1079,7 +1086,7 @@ def joint_samples_from_snapshot(
                 card,
                 bout,
                 cutoff=cutoff,
-                label_at=label_at,
+                label_at=resolved_label_at,
                 spec=spec,
             )
             if sample is not None:
