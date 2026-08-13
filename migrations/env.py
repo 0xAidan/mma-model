@@ -15,6 +15,7 @@ from mma_model.db.session import sqlite_connect_pragmas
 import mma_model.db.tables.core  # noqa: F401
 import mma_model.db.tables.history  # noqa: F401
 import mma_model.db.tables.identity  # noqa: F401
+import mma_model.db.tables.model_registry  # noqa: F401
 import mma_model.db.tables.odds  # noqa: F401
 import mma_model.db.tables.odds_jobs  # noqa: F401
 import mma_model.db.tables.pipeline_jobs  # noqa: F401
