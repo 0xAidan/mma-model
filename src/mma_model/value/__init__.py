@@ -34,11 +34,15 @@ from mma_model.value.ev import (
     unsafe_same_line_probability_clv,
 )
 from mma_model.value.evidence import (
+    ClosingPriceEvidence,
     ManualObservedPriceEvidence,
+    PriceObservationRole,
     PriceProvenanceKind,
     ProviderQuoteEvidence,
     QuoteEligibilityEvidence,
     SelectionPriceObservation,
+    ValueSelectionContext,
+    validate_catalog_selection,
 )
 from mma_model.value.kelly import (
     DEFAULT_BANKROLL_CAP_FRACTION,
@@ -67,6 +71,7 @@ from mma_model.value.portfolio import capped_stake_fraction, stake_amount
 from mma_model.value.priced import (
     PRICED_METRICS_METHOD,
     PRICED_METRICS_VERSION,
+    ROI_UNIT,
     MetricsUnavailableReason,
     PricedValueMetrics,
     PricedValueRequest,
@@ -90,8 +95,10 @@ __all__ = [
     "PRICED_METRICS_METHOD",
     "PRICED_METRICS_VERSION",
     "QUARTER_KELLY_FRACTION",
+    "ROI_UNIT",
     "VALUE_MATH_METHOD",
     "VALUE_MATH_VERSION",
+    "ClosingPriceEvidence",
     "DevigResult",
     "IncompleteMarketSet",
     "IncompleteMarketSetError",
@@ -102,6 +109,7 @@ __all__ = [
     "ManualObservedPriceEvidence",
     "MetricsUnavailableReason",
     "OddsMathError",
+    "PriceObservationRole",
     "PriceProvenanceKind",
     "PriceSourceKind",
     "PricedValueMetrics",
@@ -112,6 +120,7 @@ __all__ = [
     "SelectionPriceObservation",
     "UnpricedMetricsError",
     "ValuePriceThresholds",
+    "ValueSelectionContext",
     "actionable_ev_target_for_family",
     "american_to_decimal",
     "american_to_implied_prob",
@@ -141,6 +150,7 @@ __all__ = [
     "try_proportional_devig",
     "unsafe_same_line_probability_clv",
     "validate_american_odds",
+    "validate_catalog_selection",
     "validate_decimal_odds",
     "validate_probability",
 ]

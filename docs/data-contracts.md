@@ -301,9 +301,11 @@ Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exa
 | **Odds interface** | Validated finite decimal (`> 1`) and American (`<= -100` or `>= +100`); reject `0` American; calibrated probs strictly `(0, 1)` |
 | **De-vig** | Canonical completeness requires DWCS-200 family (+ `scheduled_rounds` / totals `line_point`) and the exact catalog outcome-key set; invalid odds raise `InvalidOddsError`; incomplete sets return `IncompleteMarketSet`. Totals lines are separate over/under sets. Generic API requires explicit `expected_outcome_keys` and never claims canonical completeness without a family. Overround unit = probability mass (`sum(implied) - 1`). |
 | **Thresholds** | Fair `1/p50`, p25 break-even, actionable `max(1/p25,(1+target)/p50)`, strong-value at 10% (exact-round actionable 10%) — pinned to DWCS-001 formulas |
-| **Priced metrics** | Require typed provenance evidence (DWCS-202 `ManualObservedPriceEvidence` or quote + DWCS-203 `QuoteEligibilityEvidence`). Booleans alone cannot grant metrics. EV / quarter-Kelly / stake; same-selection CLV + closing EV only with identity-matched closing observation; flat profit only when settled. |
-| **CLV unit** | Probability points (`implied(close) - implied(bet)`), not percent and not a price ratio |
-| **Partial availability** | Unresolved settlement suppresses realized profit only; missing close suppresses CLV/closing EV only (`MISSING_CLOSING_PRICE`) |
+| **Value selection** | Fight-unique `ValueSelectionContext`: `bout_id|family:outcome[:line]`. Target context is required on every priced request. |
+| **Priced metrics** | Require typed provenance evidence (DWCS-202 `ManualObservedPriceEvidence` bound to target bout, or quote + DWCS-203 `QuoteEligibilityEvidence` whose resolved bout equals target). Booleans alone cannot grant metrics. Closing prices use `ClosingPriceEvidence` with the same provenance gates (provider close needs quote+eligible decision). |
+| **CLV unit** | Probability points (`implied(close) - implied(bet)`), not percent and not a price ratio. Closing timestamp must be strictly after bet; equal timestamps are non-closing and suppress CLV. |
+| **ROI** | Per-bet realized ROI = flat 1-unit profit / 1-unit stake (numerically equal to flat-unit profit); unit `unit_profit_per_unit_stake`. Push/void ROI=0; unresolved/unpriced/ineligible → unavailable. |
+| **Partial availability** | Unresolved settlement suppresses realized profit/ROI only; missing close suppresses CLV/closing EV only (`MISSING_CLOSING_PRICE`) |
 | **Kelly** | Production quarter fraction fixed at 0.25; hard max bankroll cap `0.01` (cannot raise) |
 | **Normalize** | Known `odds_format='american'` rejects `(-100, 100)`; decimal pass-through only via `coerce_unknown_odds_price_to_decimal` / `unknown|legacy|auto` |
 | **Unpriced** | Price-target rows never receive EV / ROI / CLV / realized profit / stake |
