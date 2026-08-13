@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from mma_model.observability.logging import redact_secrets, redact_value
+from mma_model.observability.schema import (
+    HEALTH_SCHEMA_PATH,
+    validate_health_payload,
+)
 from mma_model.quality.constants import EXIT_OK, EXIT_STRICT_BLOCKERS
 from mma_model.quality.models import GateAssessment, GateResult
 
@@ -45,9 +49,6 @@ HEALTH_SCHEMA_VERSION = 1
 HEALTH_CONTRACT_ID = "dwcs_health"
 HEALTH_CONTRACT_VERSION = "1.0.0"
 HEALTH_TICKET = "DWCS-403"
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-HEALTH_SCHEMA_PATH = REPO_ROOT / "output" / "contracts" / "health.schema.json"
 
 
 class HealthStatus(StrEnum):
@@ -307,8 +308,6 @@ def validate_health_json(
     schema: Mapping[str, Any] | None = None,
 ) -> None:
     """Validate against ``output/contracts/health.schema.json``."""
-    from mma_model.observability.schema import validate_health_payload
-
     validate_health_payload(payload, schema=schema)
 
 

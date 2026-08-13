@@ -1,8 +1,8 @@
 """Filesystem-backed last-known-good publish pointer (DWCS-403).
 
-Failed or partial publication must not replace the ``current`` release pointer.
-In-memory ``PublishPointer`` remains for orchestrator unit tests; this module
-is the production/filesystem seam for 404/500.
+Failed or partial publication must not replace the ``current`` release pointer
+or destroy the files it points at. Unvalidated payloads are written only to a
+staging directory; promotion happens after validation succeeds.
 """
 
 from __future__ import annotations
@@ -32,8 +32,10 @@ class PublishOutcome:
 class FilesystemPublishPointer:
     """Versioned releases under ``root/releases/<id>/`` with atomic ``current``.
 
-    ``current`` is a plain text pointer file (release id) updated via
-    ``os.replace`` so validation failure never swaps the live pointer.
+    Candidates land in ``releases/<id>.candidate`` (or ``.staging/<id>`` fallback
+    naming). Validation never mutates ``releases/<id>`` or ``current``. On
+    success the staging dir is promoted into ``releases/<id>``, then ``current``
+    is updated via ``os.replace``.
     """
 
     def __init__(self, root: Path | str) -> None:
@@ -52,28 +54,43 @@ class FilesystemPublishPointer:
     def release_path(self, release_id: str) -> Path:
         return self.releases_dir / release_id
 
+    def staging_path(self, release_id: str) -> Path:
+        """Unvalidated payload directory (never the live release path)."""
+        return self.releases_dir / f"{release_id}.candidate"
+
+    def _assert_safe_release_id(self, release_id: str) -> None:
+        if (
+            not release_id
+            or "/" in release_id
+            or "\\" in release_id
+            or release_id.endswith(".candidate")
+            or release_id.endswith(".old")
+            or ".." in release_id
+        ):
+            raise PublishValidationError(f"invalid release_id: {release_id!r}")
+
     def write_candidate(
         self,
         release_id: str,
         files: Mapping[str, str | bytes],
     ) -> Path:
-        """Write files into a candidate release directory (does not promote)."""
-        if not release_id or "/" in release_id or "\\" in release_id:
-            raise PublishValidationError(f"invalid release_id: {release_id!r}")
-        target = self.release_path(release_id)
-        if target.exists():
-            shutil.rmtree(target)
-        target.mkdir(parents=True, exist_ok=True)
+        """Write files into a staging directory (does not touch live release)."""
+        self._assert_safe_release_id(release_id)
+        staging = self.staging_path(release_id)
+        # Never rmtree the live release path — only (re)create staging.
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True, exist_ok=True)
         for name, body in files.items():
             if not name or name.startswith("/") or ".." in Path(name).parts:
                 raise PublishValidationError(f"invalid release file name: {name!r}")
-            dest = target / name
+            dest = staging / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(body, bytes):
                 dest.write_bytes(body)
             else:
                 dest.write_text(str(body), encoding="utf-8")
-        return target
+        return staging
 
     def validate_candidate(
         self,
@@ -99,8 +116,33 @@ class FilesystemPublishPointer:
         if validator is not None:
             validator(release_dir)
 
+    def _promote_staging(self, release_id: str, staging: Path) -> Path:
+        """Move validated staging into ``releases/<id>`` without losing LKG.
+
+        If a live release already exists (including the current LKG), it is
+        renamed aside only after staging is validated, then restored if the
+        staging→final rename fails. Current LKG files are never deleted first.
+        """
+        final = self.release_path(release_id)
+        backup: Path | None = None
+        if final.exists():
+            backup = self.releases_dir / f"{release_id}.old"
+            if backup.exists():
+                shutil.rmtree(backup)
+            os.replace(final, backup)
+        try:
+            os.replace(staging, final)
+        except OSError:
+            if backup is not None and backup.exists() and not final.exists():
+                os.replace(backup, final)
+            raise
+        if backup is not None and backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        return final
+
     def promote(self, release_id: str) -> PublishOutcome:
-        """Atomically point ``current`` at a validated release."""
+        """Atomically point ``current`` at an already-present release directory."""
+        self._assert_safe_release_id(release_id)
         release_dir = self.release_path(release_id)
         if not release_dir.is_dir():
             raise PublishValidationError(f"release directory missing: {release_id}")
@@ -123,24 +165,21 @@ class FilesystemPublishPointer:
         required_files: Sequence[str] = ("release.json",),
         validator: Callable[[Path], None] | None = None,
     ) -> PublishOutcome:
-        """Write → validate → promote. On validation failure, keep prior current."""
-        prior = self.current_release_id
-        candidate = self.write_candidate(release_id, files)
+        """Stage → validate → promote. Validation failure keeps prior LKG files."""
+        staging = self.write_candidate(release_id, files)
         try:
             self.validate_candidate(
-                candidate,
+                staging,
                 required_files=required_files,
                 validator=validator,
             )
         except PublishValidationError:
-            # Leave prior current intact; drop broken candidate.
-            if candidate.exists():
-                shutil.rmtree(candidate, ignore_errors=True)
+            # Delete only staging. Live release + current pointer stay intact.
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
             raise
-        outcome = self.promote(release_id)
-        if prior is not None and prior == outcome.current_release_id:
-            return outcome
-        return outcome
+        self._promote_staging(release_id, staging)
+        return self.promote(release_id)
 
     def as_dict(self) -> dict[str, Any]:
         return {

@@ -7,7 +7,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from mma_model.observability.health import HEALTH_SCHEMA_PATH
+REPO_ROOT = Path(__file__).resolve().parents[3]
+HEALTH_SCHEMA_PATH = REPO_ROOT / "output" / "contracts" / "health.schema.json"
 
 
 class HealthSchemaError(ValueError):
@@ -146,6 +147,7 @@ _MISSING = object()
 
 
 __all__ = [
+    "HEALTH_SCHEMA_PATH",
     "HealthSchemaError",
     "load_health_schema",
     "validate_health_payload",

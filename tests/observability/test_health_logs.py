@@ -255,6 +255,7 @@ def test_atomic_publish_keeps_lkg_on_validation_failure(tmp_path: Path) -> None:
         )
     assert pointer.current_release_id == "release-good-1"
     assert not (root / "releases" / "release-bad-2").exists()
+    assert not (root / "releases" / "release-bad-2.candidate").exists()
 
     with pytest.raises(PublishValidationError):
         pointer.publish_release(
@@ -274,6 +275,40 @@ def test_atomic_publish_keeps_lkg_on_validation_failure(tmp_path: Path) -> None:
     )
     assert second.current_release_id == "release-good-4"
     assert pointer.current_release_id == "release-good-4"
+
+
+def test_same_id_invalid_republish_keeps_lkg_files(tmp_path: Path) -> None:
+    """Same release_id invalid retry must not delete the live LKG files."""
+    root = tmp_path / "releases-root"
+    pointer = FilesystemPublishPointer(root)
+    original = json.dumps({"ok": True, "version": 1}, sort_keys=True)
+    pointer.publish_release(
+        "release-good-1",
+        {
+            "release.json": original,
+            "manifest.json": json.dumps({"files": ["release.json"]}, sort_keys=True),
+        },
+        required_files=("release.json", "manifest.json"),
+    )
+    live = root / "releases" / "release-good-1" / "release.json"
+    assert live.is_file()
+    assert live.read_text(encoding="utf-8") == original
+
+    with pytest.raises(PublishValidationError):
+        pointer.publish_release(
+            "release-good-1",
+            {
+                "release.json": "{not-valid-json",
+                "manifest.json": json.dumps({"files": ["release.json"]}, sort_keys=True),
+            },
+            required_files=("release.json", "manifest.json"),
+        )
+
+    assert pointer.current_release_id == "release-good-1"
+    assert live.is_file()
+    assert live.read_text(encoding="utf-8") == original
+    assert json.loads(live.read_text(encoding="utf-8")) == {"ok": True, "version": 1}
+    assert not (root / "releases" / "release-good-1.candidate").exists()
 
 
 def test_auth_and_schema_non_retryable_transient_retryable() -> None:
