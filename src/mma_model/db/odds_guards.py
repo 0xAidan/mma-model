@@ -1,4 +1,4 @@
-"""SQLite guards for append-only odds quotes and availability (DWCS-201)."""
+"""SQLite guards for append-only odds quotes, availability, and manual prices."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ ODDS_QUOTES_NO_UPDATE_TRIGGER = "odds_quotes_no_update"
 ODDS_QUOTES_NO_DELETE_TRIGGER = "odds_quotes_no_delete"
 ODDS_AVAIL_NO_UPDATE_TRIGGER = "odds_availability_observations_no_update"
 ODDS_AVAIL_NO_DELETE_TRIGGER = "odds_availability_observations_no_delete"
+ODDS_MANUAL_NO_UPDATE_TRIGGER = "odds_manual_price_observations_no_update"
+ODDS_MANUAL_NO_DELETE_TRIGGER = "odds_manual_price_observations_no_delete"
 
 _TRIGGER_SPECS = (
     (ODDS_QUOTES_NO_UPDATE_TRIGGER, "odds_quotes", "UPDATE", "odds_quotes is append-only"),
@@ -23,6 +25,18 @@ _TRIGGER_SPECS = (
         "odds_availability_observations",
         "DELETE",
         "odds_availability_observations is append-only",
+    ),
+    (
+        ODDS_MANUAL_NO_UPDATE_TRIGGER,
+        "odds_manual_price_observations",
+        "UPDATE",
+        "odds_manual_price_observations is append-only",
+    ),
+    (
+        ODDS_MANUAL_NO_DELETE_TRIGGER,
+        "odds_manual_price_observations",
+        "DELETE",
+        "odds_manual_price_observations is append-only",
     ),
 )
 
@@ -89,5 +103,5 @@ def install_odds_sqlite_guards(bind: Connectable | Engine) -> None:
 
 
 def drop_odds_sqlite_guards(bind: Connectable | Engine) -> None:
-    """Drop only DWCS-201 owned odds quote/availability triggers."""
+    """Drop owned odds quote/availability/manual-price triggers."""
     _run_sqlite_statements(bind, _DROP_STATEMENTS)

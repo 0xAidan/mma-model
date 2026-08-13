@@ -93,8 +93,11 @@ here in DWCS-001.
 5. **Odds limitations** — The Odds API integration historically was live `h2h`
    pass-through without durable bout-matched snapshots. DWCS-201 adds typed
    events/markets/current/historical normalization, quota persistence, and
-   append-only quote storage. Missing Bet365 must not block sportsbook-agnostic
-   price targets; reference quotes are never labeled as Bet365.
+   append-only quote storage. DWCS-202 records that Phase 0 did not authorize a
+   licensed bookmaker adapter and implements sportsbook-agnostic price targets
+   plus optional `user_observed` prices for exact EV. Missing Bet365 must not
+   block sportsbook-agnostic price targets; reference quotes are never labeled
+   as Bet365.
 
 ## Consequences
 

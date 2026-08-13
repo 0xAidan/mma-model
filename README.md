@@ -87,6 +87,21 @@ DWCS-203 canonical bout matching. Exact bookmaker lines are optional enrichment.
 Missing Bet365 does not block sportsbook-agnostic actionable price guidance.
 Reference odds are never labeled as Bet365.
 
+Phase 0 did **not** authorize a licensed bookmaker adapter. Use the mandatory
+fallback and optional manual confirmation:
+
+```bash
+# Phase 0 honesty + sportsbook-agnostic sample targets
+mma-model odds audit-bookmakers --next-dwcs
+
+# Fair / actionable / strong-value for a calibrated selection (no exact EV yet)
+mma-model odds price-guidance --family moneyline --outcome fighter_a --p50 0.55 --p25 0.50
+
+# Optional user_observed price for exact EV confirmation (non-automated)
+mma-model odds record-manual-price --observation-json path/to/observation.json \
+  --database-url sqlite:////tmp/odds-manual.db
+```
+
 ## What I need from you
 
 | Item | Required? | Notes |

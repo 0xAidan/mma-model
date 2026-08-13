@@ -251,6 +251,26 @@ Out of scope for DWCS-200: odds HTTP ingestion (DWCS-201+).
 
 Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-requests-last`, plus `requests_last_inferred` and `requests_last_source` (`provider` | `missing` | `inferred_empty_zero`). Empty responses with a missing last header keep `requests_last=NULL` and record inferred cost `0` separately; provider-reported `0` stays `requests_last=0` with source `provider`.
 
+## Optional bookmaker enrichment + price fallback (DWCS-202)
+
+| Field | Value |
+|-------|--------|
+| **Authoritative contract** | Packaged `mma_model/odds/odds_decision_v1.yaml` (`PINNED_ODDS_DECISION_HASH`) |
+| **Plan-visible path** | `config/sources/odds.yaml` (symlink to packaged file) |
+| **Phase 0 gate** | Packaged decision + optional checkout cross-check of `output/research/odds-coverage-summary.json` → `decision.path=the_odds_api_reference_fallback` |
+| **Licensed adapter** | **Not authorized.** Bet365×DWCS was `scoped_absent`; OpticOdds / SportsGameOdds / SportsDataIO were `not_configured`. Do not invent automated bookmaker adapters. |
+| **Manual prices** | `user_observed` (non-automated); `mma_model.odds.manual_price` |
+| **Guidance** | `mma_model.odds.price_guidance` — catalog-validated selection; observation must match family/outcome/line; fair / actionable / strong-value for qualified unpriced rows |
+| **Exact EV** | Only when an available observed price exists on a qualified + gates-pass selection (`compute_exact_ev`); never synthetic ROI/CLV |
+| **Lifecycle** | Explicit `available` / `unknown` / `suspended` / `locked` / `removed` / `entitlement_failed` — no forward-fill; `attempted_provider` required for entitlement failures |
+| **Selection identity** | Canonical `selection_identity` = `family:outcome` or `family:outcome:line` from DWCS-200 catalog; computed when omitted, rejected on mismatch. Not the settlement rule-set content hash. |
+| **Manual provenance** | Parser always sets `user_observed` / non-automated; rejects caller `source_kind` / `automated` / non-entitlement `provider` (no silent relabel). |
+| **Clocks** | When both exist, `source_updated_at <= observed_at` (UTC-normalized). |
+| **Storage** | `odds_manual_price_observations` (append-only); migration `0013_odds_manual_prices` (final integrity CHECKs + `attempted_provider` + `selection_identity`) |
+| **Bet365 identity** | Explicit aliases only (`bet365`, `bet365_au`); automated/reference observations reject those keys while fallback is active; only non-automated `user_observed` may claim Bet365 |
+| **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance … [--line-point]`; `mma-model odds record-manual-price …` |
+| **Prohibited** | Sportsbook website scraping, credential/cookie storage, Bet365 claims for reference consensus |
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core

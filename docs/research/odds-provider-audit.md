@@ -221,6 +221,20 @@ enrichment and actionable price thresholds as the required fallback.
 Out of scope for this ticket: production ingestion, betting recommendations,
 orchestration prompts, and scraping fallbacks.
 
+### DWCS-202 implementation status
+
+DWCS-202 reads the packaged immutable contract
+(`mma_model/odds/odds_decision_v1.yaml`, plan-visible via
+`config/sources/odds.yaml`). Because
+`decision.path=the_odds_api_reference_fallback` and no licensed trial provider
+passed, DWCS-202 does **not** ship an automated bookmaker adapter. It ships:
+
+- sportsbook-agnostic fair / actionable / strong-value guidance
+- optional `user_observed` numeric price/book/time for exact EV confirmation
+- explicit lock / removal / entitlement-failed lifecycle states (no forward-fill)
+- Bet365 identity via explicit aliases only; automated/reference paths reject them
+- `mma-model odds audit-bookmakers --next-dwcs`
+
 ### Downstream handoff policy: actionable prices (not implemented by DWCS-000)
 
 DWCS-000 records evidence and decision-path semantics only. The formulas below

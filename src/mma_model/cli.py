@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 
 from mma_model.config import get_settings
 from mma_model.db.session import _attach_sqlite_listeners, init_db, session_scope
+from mma_model.domain.markets import MarketFamily, MarketMaturity, OutcomeKey
 from mma_model.dwcs.ingest import sync_dwcs_history
 from mma_model.history.audit import (
     coverage_gates_ok,
@@ -35,7 +36,13 @@ from mma_model.identity.review import (
 )
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
+from mma_model.odds.bookmaker_audit import run_bookmaker_audit
+from mma_model.odds.manual_price import parse_manual_price_observation
 from mma_model.odds.normalize import parse_single_region
+from mma_model.odds.price_guidance import (
+    PriceGuidanceSelectionError,
+    build_price_guidance,
+)
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
@@ -45,6 +52,7 @@ from mma_model.odds.snapshot import (
     run_odds_snapshot,
     validate_requested_series,
 )
+from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import OddsApiError, fetch_mma_odds
 from mma_model.quality.constants import EXIT_INTERNAL
 from mma_model.quality.coverage import compute_coverage_report
@@ -189,6 +197,55 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_odds_audit.add_argument("--fixture-dir", type=Path, default=None)
     p_odds_audit.add_argument("--database-url", default=None)
+    p_odds_books = odds_sub.add_parser(
+        "audit-bookmakers",
+        help=(
+            "DWCS-202 Phase 0 honesty + sportsbook-agnostic fallback report "
+            "(no licensed adapter invention)"
+        ),
+    )
+    p_odds_books.add_argument(
+        "--next-dwcs",
+        action="store_true",
+        help="Mark audit as next-DWCS readiness (bout match remains DWCS-203)",
+    )
+    p_odds_manual = odds_sub.add_parser(
+        "record-manual-price",
+        help="Append a user_observed (non-automated) price or lifecycle row",
+    )
+    p_odds_manual.add_argument(
+        "--observation-json",
+        type=Path,
+        required=True,
+        help="JSON file with book/region/market/outcome/price_or_lifecycle/time",
+    )
+    p_odds_manual.add_argument("--database-url", default=None)
+    p_odds_guide = odds_sub.add_parser(
+        "price-guidance",
+        help="Emit fair/actionable/strong-value guidance (exact EV only if priced)",
+    )
+    p_odds_guide.add_argument("--family", default="moneyline")
+    p_odds_guide.add_argument("--outcome", default="fighter_a")
+    p_odds_guide.add_argument(
+        "--line-point",
+        type=float,
+        default=None,
+        help="Required for totals (1.5 or 2.5); rejected for non-line markets",
+    )
+    p_odds_guide.add_argument("--p50", type=float, required=True)
+    p_odds_guide.add_argument("--p25", type=float, required=True)
+    p_odds_guide.add_argument(
+        "--maturity",
+        default="qualified",
+        help="qualified|experimental|blocked",
+    )
+    p_odds_guide.add_argument(
+        "--observation-json",
+        type=Path,
+        default=None,
+        help="Optional user_observed price JSON for exact EV confirmation",
+    )
+    p_odds_guide.add_argument("--prob-ev-positive", type=float, default=None)
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
     p_train.add_argument(
@@ -504,6 +561,99 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(data, indent=2))
             else:
                 print(f"Events with odds: {len(data)}")
+            return 0
+
+        if odds_cmd == "audit-bookmakers":
+            report = run_bookmaker_audit(next_dwcs=bool(getattr(args, "next_dwcs", False)))
+            print(json.dumps(report, indent=2))
+            return 0 if not report.get("scraper_paths_present") else 2
+
+        if odds_cmd == "price-guidance":
+            try:
+                family = MarketFamily(args.family)
+                line_point = getattr(args, "line_point", None)
+                if family is MarketFamily.TOTALS and line_point is None:
+                    raise ValueError("--line-point is required for totals")
+                if family is not MarketFamily.TOTALS and line_point is not None:
+                    raise ValueError("--line-point is only valid for totals")
+                observed = None
+                obs_path = getattr(args, "observation_json", None)
+                if obs_path is not None:
+                    payload = json.loads(Path(obs_path).read_text(encoding="utf-8"))
+                    observed = parse_manual_price_observation(payload)
+                row = build_price_guidance(
+                    family=family,
+                    outcome_key=OutcomeKey(args.outcome),
+                    maturity=MarketMaturity(args.maturity),
+                    p50=float(args.p50),
+                    p25=float(args.p25),
+                    gates_pass=True,
+                    observed=observed,
+                    line_point=line_point,
+                    prob_ev_positive=getattr(args, "prob_ev_positive", None),
+                )
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                PriceGuidanceSelectionError,
+            ) as exc:
+                print(str(exc))
+                return 2
+            print(json.dumps(row.as_dict(), indent=2))
+            return 0
+
+        if odds_cmd == "record-manual-price":
+            try:
+                payload = json.loads(
+                    Path(args.observation_json).read_text(encoding="utf-8")
+                )
+                observed = parse_manual_price_observation(payload)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                print(str(exc))
+                return 2
+            database_url = getattr(args, "database_url", None)
+            if database_url:
+                db_url = str(database_url).strip()
+                if not db_url:
+                    print("refusing empty --database-url")
+                    return 2
+                engine = create_engine(db_url, future=True)
+                _attach_sqlite_listeners(engine)
+                root = get_settings().project_root
+                cfg = Config(str(root / "alembic.ini"))
+                cfg.set_main_option("script_location", str(root / "migrations"))
+                cfg.set_main_option("sqlalchemy.url", db_url)
+                command.upgrade(cfg, "head")
+                Session = sessionmaker(bind=engine, future=True)
+                with Session() as session:
+                    result = OddsQuoteStore(session).append_manual_prices([observed])
+                    session.commit()
+                    print(
+                        json.dumps(
+                            {
+                                "inserted": result.inserted,
+                                "deduped": result.deduped,
+                                "observation": observed.as_identity_dict(),
+                            },
+                            indent=2,
+                        )
+                    )
+                engine.dispose()
+                return 0
+            init_db()
+            with session_scope() as session:
+                result = OddsQuoteStore(session).append_manual_prices([observed])
+                print(
+                    json.dumps(
+                        {
+                            "inserted": result.inserted,
+                            "deduped": result.deduped,
+                            "observation": observed.as_identity_dict(),
+                        },
+                        indent=2,
+                    )
+                )
             return 0
 
         offline = bool(getattr(args, "offline_fixtures", False))
