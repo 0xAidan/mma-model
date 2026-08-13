@@ -51,6 +51,16 @@ from mma_model.db.tables.odds import (
     OddsQuotaObservation,
     OddsQuote,
 )
+from mma_model.db.tables.recommendations import (
+    ModelRun,
+    ObservedPrice,
+    OfficialPublication,
+    Prediction,
+    PredictionGrade,
+    PriceTarget,
+    RecommendationSettlement,
+    RecommendationStateEvent,
+)
 
 
 def _utc_now() -> datetime:
@@ -204,11 +214,19 @@ __all__ = [
     "IdentityScoringBlock",
     "IngestCursor",
     "IngestRun",
+    "ModelRun",
+    "ObservedPrice",
     "OddsAvailabilityObservation",
     "OddsEventRow",
     "OddsQuotaObservation",
     "OddsQuote",
     "OddsSnapshot",
+    "OfficialPublication",
+    "Prediction",
+    "PredictionGrade",
+    "PriceTarget",
     "RawObservation",
+    "RecommendationSettlement",
+    "RecommendationStateEvent",
     "SourceCheckpoint",
 ]

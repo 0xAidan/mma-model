@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from mma_model.config import get_settings
+from mma_model.db.grade_guards import install_grade_sqlite_guards
 from mma_model.db.identity_guards import install_identity_sqlite_guards
 from mma_model.db.models import Base
 from mma_model.db.odds_guards import install_odds_sqlite_guards
@@ -88,6 +89,7 @@ def init_db() -> None:
     import mma_model.db.tables.odds  # noqa: F401
     import mma_model.db.tables.odds_jobs  # noqa: F401
     import mma_model.db.tables.provenance  # noqa: F401
+    import mma_model.db.tables.recommendations  # noqa: F401
 
     command.upgrade(_alembic_config(), "head")
 
@@ -99,6 +101,7 @@ def create_all_for_tests(bind: Engine | None = None) -> None:
     Base.metadata.create_all(bind=target)
     install_identity_sqlite_guards(target)
     install_odds_sqlite_guards(target)
+    install_grade_sqlite_guards(target)
 
 
 @contextmanager

@@ -74,5 +74,13 @@ jobs:
           src/mma_model/recommend
           tests/recommend
           --select E,F,I,UP,B,SIM
+      - name: Ruff grade (strict)
+        run: >
+          ruff check
+          src/mma_model/db/tables/recommendations.py
+          src/mma_model/grade
+          src/mma_model/db/grade_guards.py
+          tests/grade
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q
