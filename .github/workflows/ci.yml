@@ -51,8 +51,11 @@ jobs:
           ruff check
           src/mma_model/modeling/artifacts.py
           src/mma_model/modeling/baselines.py
+          src/mma_model/modeling/joint.py
           src/mma_model/modeling/__init__.py
+          src/mma_model/markets/derive.py
           tests/modeling/test_baselines.py
+          tests/modeling/test_joint.py
           --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q

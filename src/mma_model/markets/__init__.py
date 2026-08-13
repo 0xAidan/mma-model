@@ -1,5 +1,18 @@
 """DWCS-200 market contracts: outcomes, price targets, and settlement."""
 
+from mma_model.markets.derive import (
+    ATOM_SUM_ATOL,
+    METHOD_DRAW_TREATMENT,
+    DerivedMarketError,
+    DerivedMarketProbabilities,
+    UnsupportedScheduleError,
+    aggregate_frozen_atoms,
+    derive_markets,
+    fine_atom_keys,
+    finish_atom_key,
+    interval_count_for_schedule,
+    swap_fine_atoms,
+)
 from mma_model.markets.price_targets import (
     CONFIRMED_VALUE_MIN_PROB_EV_POSITIVE,
     EXACT_ROUND_ACTIONABLE_EV_TARGET,
@@ -51,6 +64,7 @@ from mma_model.markets.settlement import (
 )
 
 __all__ = [
+    "ATOM_SUM_ATOL",
     "CONFIRMED_VALUE_MIN_PROB_EV_POSITIVE",
     "CONTRACT_ID",
     "DEFAULT_ROUND_SECONDS",
@@ -59,11 +73,14 @@ __all__ = [
     "EXACT_ROUND_MIN_PROB_EV_POSITIVE",
     "EXPECTED_CONTRACT_VERSION",
     "EXPECTED_SCHEMA_VERSION",
+    "METHOD_DRAW_TREATMENT",
     "PINNED_SETTLEMENT_HASH",
     "STANDARD_ACTIONABLE_EV_TARGET",
     "STANDARD_STRONG_VALUE_EV_TARGET",
     "SUPPORTED_SCHEDULED_ROUNDS",
     "BoutSettlementFacts",
+    "DerivedMarketError",
+    "DerivedMarketProbabilities",
     "MarketSelection",
     "PriceThresholds",
     "ProvisionalRuleSetError",
@@ -77,7 +94,9 @@ __all__ = [
     "SettlementRulesError",
     "SettlementRulesHashMismatch",
     "UnknownRuleSetError",
+    "UnsupportedScheduleError",
     "actionable_ev_target_for_family",
+    "aggregate_frozen_atoms",
     "american_or_better_meets_threshold",
     "classify_recommendation",
     "clock_pairs_for_total",
@@ -86,12 +105,17 @@ __all__ = [
     "confirmed_value_min_prob_ev_positive",
     "decimal_to_american",
     "default_settlement_rules",
+    "derive_markets",
+    "fine_atom_keys",
+    "finish_atom_key",
     "get_rule_set",
+    "interval_count_for_schedule",
     "load_settlement_rules",
     "offered_meets_actionable",
     "package_settlement_resource_path",
     "resolve_total_elapsed_seconds",
     "settle",
+    "swap_fine_atoms",
     "validate_settlement_facts",
     "visible_settlement_path",
 ]

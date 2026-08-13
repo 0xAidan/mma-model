@@ -1,0 +1,48 @@
+schema_version: 1
+contract_id: dwcs_model_spec
+spec_id: joint_v1
+spec_version: "1.1.0"
+model_id: M2
+model_family: competing_risks
+feature_spec_version: dwcs_pit_v1.1
+estimator:
+  penalty: l2
+  C: 0.1
+  max_iter: 400
+  solver: lbfgs
+standardize: true
+swap_augment: false
+tied_ab_parameters: true
+folds:
+  ordinary_allow_holdout: false
+  final_refit: development_and_validation
+cutoff_policy: scheduled_minus_60m
+missing_classes: fail
+early_technical: fail
+class_pooling: {}
+supported_scheduled_rounds: [3, 5]
+probability_clip_tolerance: 1.0e-12
+atom_sum_tolerance: 1.0e-10
+notes:
+  solver: >
+    Spec token lbfgs maps to scipy.optimize.minimize method L-BFGS-B.
+    The estimator.solver field is the token that training actually uses.
+  swap_augment: >
+    false because tied A/B parameters already guarantee raw swap
+    equivariance. Duplicating swapped orientations would silently
+    double NLL relative to C.
+  missing_classes: >
+    fail raises MissingJointClassError listing absent required hazard
+    and decision classes. Do not rely on sklearn omitting classes.
+    Structural tied pooling (missing_classes=pool / non-empty
+    class_pooling) is unsupported in v1.
+  early_technical: >
+    Technical decision pools into the decision terminal atom only after
+    surviving the scheduled distance (DWCS-300). Early technical
+    decision/draw default to fail. pool_other_stoppage treats an early
+    technical decision as other_stoppage at the observed interval
+    (winner-defined). pool_as_distance is rejected; it pretends
+    survival through later intervals.
+  totals_boundary: >
+    Right-closed half-round bins; exact 1.5/2.5 rounds count as UNDER to
+    match settlement exact_half_result=under.
