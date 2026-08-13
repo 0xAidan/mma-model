@@ -82,5 +82,12 @@ jobs:
           src/mma_model/db/grade_guards.py
           tests/grade
           --select E,F,I,UP,B,SIM
+      - name: Ruff jobs (strict)
+        run: >
+          ruff check
+          src/mma_model/jobs
+          src/mma_model/db/tables/pipeline_jobs.py
+          tests/jobs
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q

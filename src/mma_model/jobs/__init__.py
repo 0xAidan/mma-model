@@ -1,4 +1,8 @@
-"""Host-scheduled job helpers (DWCS-205)."""
+"""Host-scheduled job helpers (DWCS-205 + DWCS-401).
+
+Orchestrator entrypoints live in ``mma_model.jobs.orchestrator`` and are imported
+directly by the CLI/tests to avoid an import cycle through odds → locking.
+"""
 
 from mma_model.jobs.locking import (
     FileFlockLock,

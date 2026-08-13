@@ -1,15 +1,61 @@
-# DWCS-205 job definitions (host systemd + flock compatible).
+# DWCS-205 + DWCS-401 job definitions (host systemd + flock compatible).
 # Overlap: one writer via flock. Jobs are idempotent by durable key.
 
-schema_version: 1
-ticket: DWCS-205
+schema_version: 2
+ticket: DWCS-401
 
 defaults:
   overlap_strategy: flock_one_writer
   lock_dir: /run
   timezone: UTC
 
+# Event-relative orchestrator cadence (DWCS-401).
+# All due calculation uses explicit --now / as_of UTC — no hidden wall clock.
+orchestrator:
+  series: dwcs
+  cadence:
+    # Nightly SQLite snapshot seam (restic/offsite is out of scope for DWCS-401).
+    backup_hour_utc: 6
+    # Official recommendation snapshot at T−60m; score ready from T−61m.
+    official_offset_minutes: 60
+    score_ready_offset_minutes: 61
+    # Odds live window opens at T−72h (slot cadence reused from DWCS-205).
+    odds_open_hours_before_start: 72
+    # Results every 10 minutes from event start through event +4h.
+    results_interval_minutes: 10
+    results_window_hours_after_start: 4
+    # Reconciliation windows.
+    reconcile_24h_hours: 24
+    reconcile_7d_days: 7
+  job_types:
+    - discover
+    - ingest-history
+    - identity
+    - snapshot-odds
+    - score
+    - recommend
+    - publish
+    - results
+    - grade
+    - reconcile-24h
+    - reconcile-7d
+    - retrain
+    - backup
+  notes:
+    - "discover / ingest-history are series-daily (UTC date bucket)."
+    - "snapshot-odds wraps run_snapshot_odds_job; schedule.py unchanged."
+    - "official T−60m recommend calls publish_official_t60; never overwrite."
+    - "retrain is a seam after +24h reconcile; does not promote a champion."
+    - "backup is a seam; integrity check weekly is host-side (DWCS-403+)."
+
 jobs:
+  tick:
+    description: Idempotent event-relative scheduler tick (discover-to-grade)
+    command: mma-model jobs tick
+    lock_file: mma-jobs-tick.lock
+    requires_now: true
+    dry_run_supported: true
+
   snapshot-odds:
     description: Collect due live odds quotes within event-relative cadence windows
     command: mma-model jobs snapshot-odds
