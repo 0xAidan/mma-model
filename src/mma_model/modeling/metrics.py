@@ -243,8 +243,10 @@ class EceReport:
     n_bins: int
     min_reliable_bin_count: int
     n_total: int
-    n_used: int
-    n_suppressed: int
+    n_reliable: int
+    n_weak: int
+    n_ece_used: int
+    n_suppressed_display: int
     n_events: int
     n_empty_bins: int
     n_reliable_bins: int
@@ -256,12 +258,14 @@ class EceReport:
             "ece": self.ece,
             "min_reliable_bin_count": self.min_reliable_bin_count,
             "n_bins": self.n_bins,
+            "n_ece_used": self.n_ece_used,
             "n_empty_bins": self.n_empty_bins,
             "n_events": self.n_events,
+            "n_reliable": self.n_reliable,
             "n_reliable_bins": self.n_reliable_bins,
-            "n_suppressed": self.n_suppressed,
+            "n_suppressed_display": self.n_suppressed_display,
             "n_total": self.n_total,
-            "n_used": self.n_used,
+            "n_weak": self.n_weak,
             "n_weak_bins": self.n_weak_bins,
             "rows": [row.to_dict() for row in self.rows],
         }
@@ -276,7 +280,12 @@ def expected_calibration_error(
     min_reliable_bin_count: int = MIN_RELIABLE_BIN_COUNT,
     omit_empty: bool = True,
 ) -> EceReport:
-    """Equal-width ECE. Weak bins are labeled and never treated as reliable."""
+    """Equal-width ECE over all samples in nonempty bins.
+
+    Weak bins stay ``status=weak`` and omit ``observed_frequency`` from the
+    public row, but their ``n_b * |obs - pred|`` term still enters ECE.
+    ECE is ``None`` only for an empty sample, never because every bin is weak.
+    """
     if n_bins < 1:
         raise MetricsError("n_bins must be >= 1")
     if min_reliable_bin_count < 1:
@@ -289,13 +298,29 @@ def expected_calibration_error(
         if len(event_ids) != n_total:
             raise MetricsError("event_ids must match the prediction count")
         n_events = len(set(event_ids))
+    if n_total == 0:
+        return EceReport(
+            ece=None,
+            n_bins=n_bins,
+            min_reliable_bin_count=min_reliable_bin_count,
+            n_total=0,
+            n_reliable=0,
+            n_weak=0,
+            n_ece_used=0,
+            n_suppressed_display=0,
+            n_events=n_events,
+            n_empty_bins=n_bins if omit_empty else n_bins,
+            n_reliable_bins=0,
+            n_weak_bins=0,
+            rows=(),
+        )
     edges = np.linspace(0.0, 1.0, n_bins + 1)
     rows: list[ReliabilityRow] = []
     n_empty = 0
-    n_weak = 0
+    n_weak_bins = 0
+    n_reliable_bins = 0
     n_reliable = 0
-    n_used = 0
-    n_suppressed = 0
+    n_weak = 0
     weighted = 0.0
     for idx in range(n_bins):
         lower = float(edges[idx])
@@ -320,9 +345,11 @@ def expected_calibration_error(
                 )
             continue
         mean_predicted = float(np.mean(p_arr[mask]))
+        observed = float(np.mean(y_arr[mask]))
+        weighted += count * abs(observed - mean_predicted)
         if count < min_reliable_bin_count:
-            n_weak += 1
-            n_suppressed += count
+            n_weak_bins += 1
+            n_weak += count
             rows.append(
                 ReliabilityRow(
                     lower=lower,
@@ -334,10 +361,8 @@ def expected_calibration_error(
                 )
             )
             continue
-        observed = float(np.mean(y_arr[mask]))
-        n_reliable += 1
-        n_used += count
-        weighted += count * abs(observed - mean_predicted)
+        n_reliable_bins += 1
+        n_reliable += count
         rows.append(
             ReliabilityRow(
                 lower=lower,
@@ -348,25 +373,27 @@ def expected_calibration_error(
                 status=ReliabilityStatus.RELIABLE,
             )
         )
-    ece = None if n_used == 0 else float(weighted / n_used)
-    if ece is not None and not math.isfinite(ece):
-        raise MetricsError("ECE is not finite")
-    if n_used + n_suppressed != n_total:
+    if n_reliable + n_weak != n_total:
         raise MetricsError(
             "reliability counts do not reconcile: "
-            f"n_total={n_total} n_used={n_used} n_suppressed={n_suppressed}"
+            f"n_total={n_total} n_reliable={n_reliable} n_weak={n_weak}"
         )
+    ece = float(weighted / n_total)
+    if not math.isfinite(ece):
+        raise MetricsError("ECE is not finite")
     return EceReport(
         ece=ece,
         n_bins=n_bins,
         min_reliable_bin_count=min_reliable_bin_count,
         n_total=n_total,
-        n_used=n_used,
-        n_suppressed=n_suppressed,
+        n_reliable=n_reliable,
+        n_weak=n_weak,
+        n_ece_used=n_total,
+        n_suppressed_display=n_weak,
         n_events=n_events,
         n_empty_bins=n_empty,
-        n_reliable_bins=n_reliable,
-        n_weak_bins=n_weak,
+        n_reliable_bins=n_reliable_bins,
+        n_weak_bins=n_weak_bins,
         rows=tuple(rows),
     )
 
@@ -374,8 +401,10 @@ def expected_calibration_error(
 @dataclass(frozen=True)
 class BinaryCalibrationReport:
     n_total: int
-    n_used: int
-    n_suppressed: int
+    n_reliable: int
+    n_weak: int
+    n_ece_used: int
+    n_suppressed_display: int
     n_events: int
     log_loss: float | None
     brier: float | None
@@ -387,10 +416,12 @@ class BinaryCalibrationReport:
             "brier": self.brier,
             "ece": self.ece.to_dict(),
             "log_loss": self.log_loss,
+            "n_ece_used": self.n_ece_used,
             "n_events": self.n_events,
-            "n_suppressed": self.n_suppressed,
+            "n_reliable": self.n_reliable,
+            "n_suppressed_display": self.n_suppressed_display,
             "n_total": self.n_total,
-            "n_used": self.n_used,
+            "n_weak": self.n_weak,
             "slope": self.slope.to_dict(),
         }
 
@@ -416,8 +447,10 @@ def binary_calibration_report(
     brier = None if y_arr.size == 0 else binary_brier(y_arr, p_arr)
     return BinaryCalibrationReport(
         n_total=ece.n_total,
-        n_used=ece.n_used,
-        n_suppressed=ece.n_suppressed,
+        n_reliable=ece.n_reliable,
+        n_weak=ece.n_weak,
+        n_ece_used=ece.n_ece_used,
+        n_suppressed_display=ece.n_suppressed_display,
         n_events=ece.n_events,
         log_loss=log_loss,
         brier=brier,
@@ -429,8 +462,8 @@ def binary_calibration_report(
 @dataclass(frozen=True)
 class JointCalibrationReport:
     n_total: int
-    n_used: int
-    n_suppressed: int
+    n_ece_used: int
+    n_suppressed_display: int
     n_events: int
     terminal_nll: float | None
     n_draw: int
@@ -438,18 +471,20 @@ class JointCalibrationReport:
     n_decisive: int
     moneyline: BinaryCalibrationReport | None
     draw_nc_note: str
+    moneyline_probability: str = "conditional_pA_given_decisive"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "draw_nc_note": self.draw_nc_note,
             "moneyline": None if self.moneyline is None else self.moneyline.to_dict(),
+            "moneyline_probability": self.moneyline_probability,
             "n_decisive": self.n_decisive,
             "n_draw": self.n_draw,
+            "n_ece_used": self.n_ece_used,
             "n_events": self.n_events,
             "n_no_contest": self.n_no_contest,
-            "n_suppressed": self.n_suppressed,
+            "n_suppressed_display": self.n_suppressed_display,
             "n_total": self.n_total,
-            "n_used": self.n_used,
             "terminal_nll": self.terminal_nll,
         }
 
@@ -491,15 +526,35 @@ def _moneyline_side(atom: str) -> str | None:
     return None
 
 
+def _side_mass(dist: Mapping[str, float], prefix: str) -> float:
+    return float(sum(float(value) for key, value in dist.items() if str(key).startswith(prefix)))
+
+
+def conditional_fighter_a_given_decisive(dist: Mapping[str, float]) -> float:
+    """Bernoulli probability of A among decisive outcomes: ``pA / (pA + pB)``."""
+    p_a = _side_mass(dist, "a_")
+    p_b = _side_mass(dist, "b_")
+    denom = p_a + p_b
+    if not math.isfinite(denom) or denom <= 0.0:
+        raise MetricsError("decisive moneyline requires finite pA+pB > 0")
+    p_cond = p_a / denom
+    if not math.isfinite(p_cond) or p_cond <= 0.0 or p_cond >= 1.0:
+        raise MetricsError("conditional pA_decisive must be in (0, 1)")
+    return p_cond
+
+
 def joint_calibration_report(
     probabilities: Sequence[Mapping[str, float]],
     observed_atoms: Sequence[str],
     *,
     event_ids: Sequence[str] | None = None,
-    p_fighter_a: Sequence[float] | None = None,
     min_reliable_bin_count: int = MIN_RELIABLE_BIN_COUNT,
 ) -> JointCalibrationReport:
-    """Terminal NLL plus decisive-moneyline metrics. Draws/NC are explicit."""
+    """Terminal NLL on the full fine distribution plus decisive A-vs-B metrics.
+
+    Draws are excluded from the Bernoulli outcome and from ``pA+pB``. Slope and
+    ECE use ``pA / (pA + pB)``, never unconditional ``pA``.
+    """
     if len(probabilities) != len(observed_atoms):
         raise MetricsError("joint probabilities and observed atoms must align")
     n_total = len(observed_atoms)
@@ -519,17 +574,9 @@ def joint_calibration_report(
         side = _moneyline_side(atom)
         if side is None:
             raise MetricsError(f"unhandled observed atom {atom!r}")
-        dist = probabilities[idx]
-        if p_fighter_a is not None:
-            p_a = float(p_fighter_a[idx])
-        else:
-            p_a = float(
-                sum(float(value) for key, value in dist.items() if str(key).startswith("a_"))
-            )
-        if not math.isfinite(p_a) or p_a <= 0.0 or p_a >= 1.0:
-            raise MetricsError("decisive moneyline p_fighter_a must be in (0, 1)")
+        p_cond = conditional_fighter_a_given_decisive(probabilities[idx])
         decisive_y.append(1 if side == "a" else 0)
-        decisive_p.append(p_a)
+        decisive_p.append(p_cond)
         if event_ids is not None:
             decisive_events.append(event_ids[idx])
     n_decisive = len(decisive_y)
@@ -542,15 +589,13 @@ def joint_calibration_report(
             event_ids=None if event_ids is None else decisive_events,
             min_reliable_bin_count=min_reliable_bin_count,
         )
-    n_events = 0 if event_ids is None else len(set(event_ids))
-    if event_ids is None:
-        n_events = n_total
-    n_used = 0 if moneyline is None else moneyline.n_used
-    n_suppressed = 0 if moneyline is None else moneyline.n_suppressed
+    n_events = n_total if event_ids is None else len(set(event_ids))
+    n_ece_used = 0 if moneyline is None else moneyline.n_ece_used
+    n_suppressed_display = 0 if moneyline is None else moneyline.n_suppressed_display
     return JointCalibrationReport(
         n_total=n_total,
-        n_used=n_used,
-        n_suppressed=n_suppressed,
+        n_ece_used=n_ece_used,
+        n_suppressed_display=n_suppressed_display,
         n_events=n_events,
         terminal_nll=nll,
         n_draw=n_draw,
@@ -558,7 +603,8 @@ def joint_calibration_report(
         n_decisive=n_decisive,
         moneyline=moneyline,
         draw_nc_note=(
-            "Draws are excluded from decisive-moneyline calibration; "
-            "no-contest/void rows are counted separately and never scored as wins"
+            "Draws are excluded from the decisive Bernoulli outcome and from "
+            "pA+pB; no-contest/void rows are counted separately and never "
+            "scored as wins. Slope/ECE use pA/(pA+pB)."
         ),
     )

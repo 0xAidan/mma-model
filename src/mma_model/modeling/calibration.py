@@ -20,13 +20,13 @@ import numpy as np
 from scipy.optimize import minimize
 from sqlalchemy.orm import Session
 
-from mma_model.domain.markets import OutcomeKey
 from mma_model.evaluation.contract import EvaluationContract
 from mma_model.features.as_of import ensure_utc
 from mma_model.features.snapshot import snapshot_from_session
 from mma_model.markets.derive import ATOM_SUM_ATOL, derive_markets
 from mma_model.modeling.artifacts import (
     CALIBRATED_ARTIFACT_SCHEMA_VERSION,
+    CALIBRATION_EVALUATION_SCOPE,
     CALIBRATION_SCHEMA_VERSION,
     ArtifactManifest,
     LoadedArtifact,
@@ -63,7 +63,6 @@ from mma_model.modeling.metrics import (
     BinaryCalibrationReport,
     JointCalibrationReport,
     binary_calibration_report,
-    fit_logistic_recalibration,
     joint_calibration_report,
     stable_logit,
     stable_sigmoid,
@@ -80,6 +79,8 @@ ALLOWED_FOLD_KINDS: Final = frozenset({"inner", "outer", "tuning", "validation"}
 HOLDOUT_YEAR: Final = 2025
 MIN_TEMPERATURE: Final = 1e-6
 MAX_TEMPERATURE: Final = 1e6
+SIGMOID_L2: Final = 1e-4
+SIGMOID_PARAM_ABS_BOUND: Final = 50.0
 ModelFamily = Literal["ridge", "joint"]
 
 
@@ -428,17 +429,54 @@ def load_oof_bundle(
 
 
 def fit_sigmoid_calibrator(bundle: OofBundle) -> SigmoidCalibrator:
+    """Fit Platt scaling on prior-time OOF only.
+
+    Objective: mean Bernoulli NLL of ``sigmoid(a * raw_logit + b)`` plus
+    ``(λ/2) * (a² + b²)`` with ``λ = 1e-4``. Parameters are bounded to
+    ``[-50, 50]``; a bound hit is a failure, not a silent clip.
+    """
     if bundle.family != "ridge":
         raise CalibrationError("sigmoid calibration is M1/ridge only")
     if not bundle.rows:
         raise CalibrationError("no prior-time OOF rows to fit a sigmoid calibrator")
-    logits = [float(row.raw_logit) for row in bundle.rows if row.raw_logit is not None]
-    y = [int(row.y) for row in bundle.rows if row.y is not None]
-    if len(logits) != len(bundle.rows) or len(y) != len(bundle.rows):
+    logits = np.asarray(
+        [float(row.raw_logit) for row in bundle.rows if row.raw_logit is not None],
+        dtype=np.float64,
+    )
+    y_arr = np.asarray(
+        [int(row.y) for row in bundle.rows if row.y is not None],
+        dtype=np.int64,
+    )
+    if logits.size != len(bundle.rows) or y_arr.size != len(bundle.rows):
         raise CalibrationError("ridge OOF rows are missing y or raw_logit")
-    a, b = fit_logistic_recalibration(logits, y)
+    bound = SIGMOID_PARAM_ABS_BOUND
+
+    def objective(params: np.ndarray) -> float:
+        a = float(params[0])
+        b = float(params[1])
+        z = a * logits + b
+        p = np.asarray(stable_sigmoid(z), dtype=np.float64)
+        p = np.clip(p, PROBABILITY_EPS, 1.0 - PROBABILITY_EPS)
+        nll = float(-np.mean(y_arr * np.log(p) + (1.0 - y_arr) * np.log(1.0 - p)))
+        return nll + 0.5 * SIGMOID_L2 * (a * a + b * b)
+
+    result = minimize(
+        objective,
+        x0=np.array([1.0, 0.0], dtype=np.float64),
+        method="L-BFGS-B",
+        bounds=((-bound, bound), (-bound, bound)),
+    )
+    if not bool(result.success):
+        raise CalibrationError(f"sigmoid fit failed: {result.message}")
+    a = float(result.x[0])
+    b = float(result.x[1])
     if not math.isfinite(a) or not math.isfinite(b):
         raise CalibrationError("sigmoid parameters must be finite")
+    margin = 1e-8
+    if abs(a) >= bound - margin or abs(b) >= bound - margin:
+        raise CalibrationError(
+            "sigmoid parameters hit numerical bounds; OOF may be separable"
+        )
     return SigmoidCalibrator(a=a, b=b)
 
 
@@ -530,8 +568,6 @@ def joint_pre_post_metrics(
     raw_dists: list[dict[str, float]] = []
     cal_dists: list[dict[str, float]] = []
     atoms: list[str] = []
-    p_a_raw: list[float] = []
-    p_a_cal: list[float] = []
     events: list[str] = []
     for row in bundle.rows:
         if (
@@ -554,20 +590,14 @@ def joint_pre_post_metrics(
         )
         if abs(sum(cal.values()) - 1.0) > ATOM_SUM_ATOL:
             raise CalibrationError("calibrated joint distribution is not normalized")
-        raw_markets = derive_markets(raw, scheduled_rounds=row.scheduled_rounds)
-        cal_markets = derive_markets(cal, scheduled_rounds=row.scheduled_rounds)
+        derive_markets(raw, scheduled_rounds=row.scheduled_rounds)
+        derive_markets(cal, scheduled_rounds=row.scheduled_rounds)
         raw_dists.append(raw)
         cal_dists.append(cal)
         atoms.append(row.observed_fine_atom)
-        p_a_raw.append(float(raw_markets.moneyline[OutcomeKey.FIGHTER_A]))
-        p_a_cal.append(float(cal_markets.moneyline[OutcomeKey.FIGHTER_A]))
         events.append(row.event_id)
-    pre = joint_calibration_report(
-        raw_dists, atoms, event_ids=events, p_fighter_a=p_a_raw
-    )
-    post = joint_calibration_report(
-        cal_dists, atoms, event_ids=events, p_fighter_a=p_a_cal
-    )
+    pre = joint_calibration_report(raw_dists, atoms, event_ids=events)
+    post = joint_calibration_report(cal_dists, atoms, event_ids=events)
     return pre, post
 
 
@@ -582,6 +612,7 @@ def _calibration_record(
     bundle: OofBundle,
     metrics_pre: Mapping[str, Any],
     metrics_post: Mapping[str, Any],
+    contract_hash: str,
     a: float | None = None,
     b: float | None = None,
     temperature: float | None = None,
@@ -590,14 +621,18 @@ def _calibration_record(
     sample_ids = [row.bout_id for row in bundle.rows]
     cutoff_min, cutoff_max = _cutoff_range(bundle.rows)
     payload: dict[str, Any] = {
+        "contract_hash": contract_hash,
+        "evaluation_scope": CALIBRATION_EVALUATION_SCOPE,
         "fitting_cutoff_max": cutoff_max,
         "fitting_cutoff_min": cutoff_min,
         "fitting_event_ids": event_ids,
         "fitting_event_ids_hash": sha256_canonical({"fitting_event_ids": event_ids}),
         "fitting_sample_ids": sample_ids,
         "fitting_sample_ids_hash": sha256_canonical({"fitting_sample_ids": sample_ids}),
+        "independent_post_calibration_evaluation": False,
         "metrics_post": dict(metrics_post),
         "metrics_pre": dict(metrics_pre),
+        "n_fitting_events": len(event_ids),
         "n_fitting_oof": len(bundle.rows),
         "oof_exclusions": list(bundle.exclusions),
         "oof_n_emitted": bundle.n_emitted,
@@ -772,22 +807,29 @@ def exclude_locked_samples_joint(
     return tuple(kept)
 
 
-def reconstruct_protocol_ridge() -> tuple[tuple[SplitCard, ...], tuple[LabeledSample, ...]]:
+def reconstruct_protocol_ridge(
+    contract: EvaluationContract | None = None,
+) -> tuple[tuple[SplitCard, ...], tuple[LabeledSample, ...]]:
     cards, snapshot, odds = protocol_training_universe()
     samples = labeled_samples_from_snapshot(
         snapshot,
         cards,
         odds_by_bout=odds,
         allow_holdout=False,
+        contract=contract,
     )
-    return cards, exclude_locked_samples_ridge(samples, cards)
+    return cards, exclude_locked_samples_ridge(samples, cards, contract)
 
 
-def reconstruct_protocol_joint() -> tuple[tuple[SplitCard, ...], tuple[JointBoutSample, ...]]:
+def reconstruct_protocol_joint(
+    contract: EvaluationContract | None = None,
+) -> tuple[tuple[SplitCard, ...], tuple[JointBoutSample, ...]]:
     spec = load_joint_spec()
     cards, snapshot = joint_protocol_training_universe()
-    samples = joint_samples_from_snapshot(snapshot, cards, spec, allow_holdout=False)
-    return cards, exclude_locked_samples_joint(samples, cards)
+    samples = joint_samples_from_snapshot(
+        snapshot, cards, spec, allow_holdout=False, contract=contract
+    )
+    return cards, exclude_locked_samples_joint(samples, cards, contract)
 
 
 def reconstruct_session_ridge(
@@ -852,6 +894,8 @@ class CalibrationReport:
 
 def calibrate_ridge_bundle(
     bundle: OofBundle,
+    *,
+    contract_hash: str,
 ) -> tuple[SigmoidCalibrator, dict[str, Any], dict[str, Any], dict[str, Any]]:
     calibrator = fit_sigmoid_calibrator(bundle)
     pre, post = ridge_pre_post_metrics(bundle, calibrator)
@@ -860,6 +904,7 @@ def calibrate_ridge_bundle(
         bundle=bundle,
         metrics_pre=pre.to_dict(),
         metrics_post=post.to_dict(),
+        contract_hash=contract_hash,
         a=calibrator.a,
         b=calibrator.b,
     )
@@ -868,6 +913,8 @@ def calibrate_ridge_bundle(
 
 def calibrate_joint_bundle(
     bundle: OofBundle,
+    *,
+    contract_hash: str,
 ) -> tuple[TemperatureCalibrator, dict[str, Any], dict[str, Any], dict[str, Any]]:
     calibrator = fit_temperature_calibrator(bundle)
     pre, post = joint_pre_post_metrics(bundle, calibrator)
@@ -876,6 +923,7 @@ def calibrate_joint_bundle(
         bundle=bundle,
         metrics_pre=pre.to_dict(),
         metrics_post=post.to_dict(),
+        contract_hash=contract_hash,
         temperature=calibrator.temperature,
     )
     return calibrator, record, pre.to_dict(), post.to_dict()

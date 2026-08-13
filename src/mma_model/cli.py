@@ -2295,7 +2295,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.model_cmd == "calibrate":
             try:
-                load_evaluation_contract(path=Path(args.contract))
+                contract = load_evaluation_contract(path=Path(args.contract))
             except EvaluationContractError as exc:
                 print(f"model configuration error: {exc}")
                 return EXIT_INTERNAL
@@ -2332,6 +2332,7 @@ def main(argv: list[str] | None = None) -> int:
                             session=session,
                             n_replicates=n_replicates,
                             seed=seed,
+                            contract=contract,
                         )
                 elif args.fixture == "protocol":
                     report = run_model_calibrate(
@@ -2340,6 +2341,7 @@ def main(argv: list[str] | None = None) -> int:
                         fixture="protocol",
                         n_replicates=n_replicates,
                         seed=seed,
+                        contract=contract,
                     )
                 else:
                     print(

@@ -40,6 +40,12 @@ ACCEPTED_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset(
 PAYLOAD_KIND: Final = "standardized_ridge_logistic_v1"
 ESTIMATOR_KIND: Final = "standardized_ridge_logistic"
 PRODUCTION_BOOTSTRAP_REPLICATES: Final = 200
+CALIBRATION_EVALUATION_SCOPE: Final = "calibration_fit_oof_apparent"
+CALIBRATOR_SOURCE_FIXED_OOF: Final = "prior_time_oof_fixed"
+BOOTSTRAP_PREDICTION_SCOPE: Final = "fixed_target_refit_distribution"
+EV_SEMANTICS_BINARY_MONEYLINE: Final = "exhaustive_binary_moneyline"
+EV_SEMANTICS_JOINT_VOID: Final = "joint_void_mass"
+JOINT_EV_OMISSION_REASON: Final = "joint_void_mass_requires_settlement_aware_ev"
 RIDGE_SPEC_ID: Final = "ridge_v1"
 RIDGE_CONTRACT_ID: Final = "dwcs_model_spec"
 EXPECTED_RIDGE_SCHEMA_VERSION: Final = 1
@@ -595,6 +601,20 @@ def _require_string_list(value: object, *, field: str) -> list[str]:
     return [str(item) for item in value]
 
 
+def _require_matching_id_hash(
+    ids: Sequence[str],
+    stored: object,
+    *,
+    field: str,
+    key: str,
+) -> str:
+    digest = _require_sha256(stored, field=field, kind=ArtifactKind.DATA)
+    expected = sha256_canonical({key: list(ids)})
+    if digest != expected:
+        raise UntrustedArtifactError(f"{field} does not match {key}")
+    return digest
+
+
 def _require_schema_version(value: object) -> str:
     text = str(value or "")
     if text not in ACCEPTED_ARTIFACT_SCHEMA_VERSIONS:
@@ -641,16 +661,37 @@ def verify_calibration_metadata(payload: Mapping[str, Any] | None) -> dict[str, 
     )
     if n_fit != len(sample_ids):
         raise UntrustedArtifactError("n_fitting_oof must equal len(fitting_sample_ids)")
-    _require_sha256(
+    n_events = _require_int(
+        payload.get("n_fitting_events"), field="n_fitting_events", minimum=1
+    )
+    if n_events != len(event_ids):
+        raise UntrustedArtifactError("n_fitting_events must equal len(fitting_event_ids)")
+    _require_matching_id_hash(
+        event_ids,
         payload.get("fitting_event_ids_hash"),
         field="fitting_event_ids_hash",
-        kind=ArtifactKind.DATA,
+        key="fitting_event_ids",
     )
-    _require_sha256(
+    _require_matching_id_hash(
+        sample_ids,
         payload.get("fitting_sample_ids_hash"),
         field="fitting_sample_ids_hash",
-        kind=ArtifactKind.DATA,
+        key="fitting_sample_ids",
     )
+    contract_hash = _require_sha256(
+        payload.get("contract_hash"), field="contract_hash", kind=ArtifactKind.CONTRACT
+    )
+    if contract_hash != PINNED_CONTRACT_HASH:
+        raise UntrustedArtifactError("calibration contract_hash must match the frozen digest")
+    if str(payload.get("evaluation_scope", "")) != CALIBRATION_EVALUATION_SCOPE:
+        raise UntrustedArtifactError(
+            f"calibration evaluation_scope must be {CALIBRATION_EVALUATION_SCOPE}"
+        )
+    if payload.get("independent_post_calibration_evaluation") is not False:
+        raise UntrustedArtifactError(
+            "independent_post_calibration_evaluation must be false; "
+            "pre/post metrics are fitting diagnostics"
+        )
     expected = _require_int(payload.get("oof_n_expected"), field="oof_n_expected", minimum=0)
     emitted = _require_int(payload.get("oof_n_emitted"), field="oof_n_emitted", minimum=0)
     excluded = _require_int(payload.get("oof_n_excluded"), field="oof_n_excluded", minimum=0)
@@ -702,6 +743,28 @@ def verify_bootstrap_metadata(
         raise UntrustedArtifactError("bootstrap n_attempts must be >= n_successful")
     if n_rejected != n_attempts - n_successful:
         raise UntrustedArtifactError("bootstrap n_rejected must equal attempts minus successes")
+    max_attempts = _require_int(payload.get("max_attempts"), field="max_attempts", minimum=1)
+    if max_attempts < n_successful:
+        raise UntrustedArtifactError("bootstrap max_attempts must be >= n_successful")
+    if n_attempts > max_attempts:
+        raise UntrustedArtifactError("bootstrap n_attempts must be <= max_attempts")
+    reasons = payload.get("rejection_reasons")
+    if not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons):
+        raise UntrustedArtifactError("bootstrap rejection_reasons must be a list of strings")
+    if len(reasons) != n_rejected:
+        raise UntrustedArtifactError("bootstrap rejection_reasons length must equal n_rejected")
+    if payload.get("calibrator_refit_per_replicate") is not False:
+        raise UntrustedArtifactError("calibrator_refit_per_replicate must be false")
+    if str(payload.get("calibrator_source", "")) != CALIBRATOR_SOURCE_FIXED_OOF:
+        raise UntrustedArtifactError(
+            f"calibrator_source must be {CALIBRATOR_SOURCE_FIXED_OOF}"
+        )
+    if str(payload.get("prediction_scope", "")) != BOOTSTRAP_PREDICTION_SCOPE:
+        raise UntrustedArtifactError(
+            f"prediction_scope must be {BOOTSTRAP_PREDICTION_SCOPE}"
+        )
+    if payload.get("oob") is not False:
+        raise UntrustedArtifactError("bootstrap oob must be false")
     production = payload.get("production_qualified", False)
     if production is not True and production is not False:
         raise UntrustedArtifactError("bootstrap production_qualified must be a boolean")
@@ -719,15 +782,66 @@ def verify_bootstrap_metadata(
     event_ids = _require_string_list(payload.get("event_ids"), field="event_ids")
     if not event_ids:
         raise UntrustedArtifactError("bootstrap event_ids must be non-empty")
-    _require_sha256(payload.get("event_ids_hash"), field="event_ids_hash", kind=ArtifactKind.DATA)
+    n_events = payload.get("n_events")
+    if n_events is None:
+        n_events = len(event_ids)
+    n_events = _require_int(n_events, field="n_events", minimum=1)
+    if n_events != len(event_ids):
+        raise UntrustedArtifactError("bootstrap n_events must equal len(event_ids)")
+    _require_matching_id_hash(
+        event_ids,
+        payload.get("event_ids_hash"),
+        field="event_ids_hash",
+        key="event_ids",
+    )
+    cal_event_ids = _require_string_list(
+        payload.get("calibrator_fitting_event_ids"),
+        field="calibrator_fitting_event_ids",
+    )
+    cal_sample_ids = _require_string_list(
+        payload.get("calibrator_fitting_sample_ids"),
+        field="calibrator_fitting_sample_ids",
+    )
+    if not cal_event_ids or not cal_sample_ids:
+        raise UntrustedArtifactError("bootstrap calibrator fitting ids must be non-empty")
+    _require_matching_id_hash(
+        cal_event_ids,
+        payload.get("calibrator_fitting_event_ids_hash"),
+        field="calibrator_fitting_event_ids_hash",
+        key="fitting_event_ids",
+    )
+    _require_matching_id_hash(
+        cal_sample_ids,
+        payload.get("calibrator_fitting_sample_ids_hash"),
+        field="calibrator_fitting_sample_ids_hash",
+        key="fitting_sample_ids",
+    )
+    contract_hash = _require_sha256(
+        payload.get("contract_hash"), field="contract_hash", kind=ArtifactKind.CONTRACT
+    )
+    if contract_hash != PINNED_CONTRACT_HASH:
+        raise UntrustedArtifactError("bootstrap contract_hash must match the frozen digest")
     _require_sha256(
         payload.get("estimator_hash"), field="estimator_hash", kind=ArtifactKind.CONFIG
     )
     _require_sha256(payload.get("config_hash"), field="config_hash", kind=ArtifactKind.CONFIG)
     _require_sha256(payload.get("data_hash"), field="data_hash", kind=ArtifactKind.DATA)
+    ev_semantics = str(payload.get("ev_semantics", ""))
+    if ev_semantics not in {EV_SEMANTICS_BINARY_MONEYLINE, EV_SEMANTICS_JOINT_VOID}:
+        raise UntrustedArtifactError("bootstrap ev_semantics is unknown")
+    ev_reason = payload.get("ev_omission_reason")
+    if ev_semantics == EV_SEMANTICS_JOINT_VOID:
+        if ev_reason != JOINT_EV_OMISSION_REASON:
+            raise UntrustedArtifactError(
+                "joint bootstrap must omit EV with "
+                f"{JOINT_EV_OMISSION_REASON}"
+            )
+    elif ev_reason not in (None,):
+        raise UntrustedArtifactError("binary moneyline bootstrap must not set ev_omission_reason")
     targets = payload.get("targets")
     if not isinstance(targets, dict) or not targets:
         raise UntrustedArtifactError("bootstrap targets must be a non-empty object")
+    ev_keys = ("ev05", "ev25", "ev50", "ev75", "ev95")
     for target_id, summary in targets.items():
         if not isinstance(target_id, str) or not target_id:
             raise UntrustedArtifactError("bootstrap target ids must be non-empty strings")
@@ -736,7 +850,14 @@ def verify_bootstrap_metadata(
         for key in ("p05", "p25", "p50", "p75", "p95"):
             _require_finite_number(summary.get(key), field=f"bootstrap.{target_id}.{key}")
         price = summary.get("observed_price")
-        ev_keys = ("ev05", "ev25", "ev50", "ev75", "ev95")
+        if ev_semantics == EV_SEMANTICS_JOINT_VOID:
+            for key in ev_keys:
+                if key in summary and summary[key] is not None:
+                    raise UntrustedArtifactError(
+                        f"bootstrap target {target_id!r} must not emit "
+                        "price*p-1 EV for joint void mass"
+                    )
+            continue
         if price is None:
             for key in ev_keys:
                 if key in summary and summary[key] is not None:
@@ -744,7 +865,13 @@ def verify_bootstrap_metadata(
                         f"bootstrap target {target_id!r} must not invent EV without a price"
                     )
             continue
-        _require_finite_number(price, field=f"bootstrap.{target_id}.observed_price")
+        price_value = _require_finite_number(
+            price, field=f"bootstrap.{target_id}.observed_price"
+        )
+        if price_value <= 1.0:
+            raise UntrustedArtifactError(
+                f"bootstrap target {target_id!r} decimal price must be > 1.0"
+            )
         for key in ev_keys:
             _require_finite_number(summary.get(key), field=f"bootstrap.{target_id}.{key}")
     return dict(payload)
