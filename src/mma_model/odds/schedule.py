@@ -21,10 +21,10 @@ import yaml
 
 from mma_model.odds.normalize import ensure_utc
 
-EXPECTED_SCHEDULE_CONTRACT_VERSION = "1.1.1"
+EXPECTED_SCHEDULE_CONTRACT_VERSION = "1.1.2"
 SCHEDULE_CONTRACT_ID = "dwcs_odds_schedule"
 PINNED_SCHEDULE_CONTRACT_HASH: Final[str] = (
-    "46a83ee81c1568200c5b3646962f394ef7dd20037dcd52927de8838b486038af"
+    "60ffdd7c0f941ac01111b829b8d0e32d463238593fc19593544e93c405cffa43"
 )
 
 # Exact plan cadence offsets/intervals (seconds).
@@ -100,6 +100,9 @@ class QuotaContract:
     bootstrap_enabled: bool
     bootstrap_endpoint: str
     bootstrap_min_interval_sec: int
+    # Operational assumption: this worker exclusively owns the Odds API key for
+    # the freshness window. Without it, remaining cannot guarantee no overspend.
+    exclusive_api_key_for_worker: bool
 
 
 @dataclass(frozen=True)
@@ -378,6 +381,15 @@ def load_schedule_contract(
                 "quota.remaining_max_age_sec must be <= bootstrap.min_interval_sec "
                 "(fail closed on stale account-wide remaining)"
             )
+    if "exclusive_api_key_for_worker" not in quota_raw:
+        raise ScheduleContractError(
+            "quota.exclusive_api_key_for_worker must be explicitly configured"
+        )
+    exclusive_api_key = quota_raw.get("exclusive_api_key_for_worker")
+    if not isinstance(exclusive_api_key, bool):
+        raise ScheduleContractError(
+            "quota.exclusive_api_key_for_worker must be a boolean"
+        )
 
     idem = payload.get("idempotency") or {}
     if not isinstance(idem, dict):
@@ -438,6 +450,7 @@ def load_schedule_contract(
             bootstrap_enabled=bootstrap_enabled,
             bootstrap_endpoint=bootstrap_endpoint,
             bootstrap_min_interval_sec=bootstrap_min_interval,
+            exclusive_api_key_for_worker=exclusive_api_key,
         ),
         coverage_statuses=statuses,
         bestfightodds_archive=MappingProxyType(dict(bfo)),
@@ -579,8 +592,8 @@ def compute_batch_key(
             stamp.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         ]
     )
-    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-    return f"odds_batch:{digest}"
+    # Raw digest only — callers wrap once via batch_idempotency_key().
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def estimate_endpoint_cost(

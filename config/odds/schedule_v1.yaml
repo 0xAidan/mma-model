@@ -11,7 +11,7 @@
 # Outside [T−72h, T) is a deterministic no-op.
 
 contract_id: dwcs_odds_schedule
-contract_version: "1.1.1"
+contract_version: "1.1.2"
 schema_version: 1
 ticket: DWCS-205
 
@@ -77,6 +77,11 @@ quota:
   # as_of are unknown (fail closed → bootstrap/defer).
   remaining_max_age_sec: 300
   billing_cycle: calendar_month_utc
+  # Operational assumption required for freshness-window spend planning.
+  # true  => worker exclusively owns the API key for remaining_max_age_sec.
+  # false => no absolute never-exceed claim; force zero-cost bootstrap (or
+  #          fail closed when bootstrap is unavailable).
+  exclusive_api_key_for_worker: true
   # Zero-cost bootstrap via provider events endpoint when remaining unknown.
   # min_interval_sec bounds bootstrap spam; remaining_max_age_sec <= this.
   bootstrap:

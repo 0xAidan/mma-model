@@ -40,7 +40,29 @@ ALLOWED_COVERAGE_STATUSES = frozenset(
 )
 
 MatchClockKind = Literal["retrospective_reconciliation", "pit_at_checkpoint"]
+CardCoverageState = Literal[
+    "attributed",
+    "incomplete_attribution",
+    "absent_proven",
+    "no_snapshot_quotes",
+]
 UNASSIGNED_CARD_ID = "__unassigned__"
+
+
+def _response_evidence_key(
+    *,
+    external_event_id: str,
+    bookmaker_key: str | None,
+    region: str,
+    market: str,
+) -> tuple[str, str, str, str]:
+    """Identity for quote/availability evidence within one provider response."""
+    return (
+        str(external_event_id),
+        str(bookmaker_key or ""),
+        str(region),
+        str(market),
+    )
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -73,6 +95,7 @@ class CoverageCell:
     match_reconciliation_as_of: str | None = None
     pit_match_as_of: str | None = None
     match_clock_kind: MatchClockKind | None = None
+    card_coverage_state: CardCoverageState | None = None
 
     def __post_init__(self) -> None:
         if self.status not in ALLOWED_COVERAGE_STATUSES:
@@ -98,6 +121,13 @@ class CoverageCell:
         ):
             raise ValueError(
                 "retrospective_reconciliation must not set pit_match_as_of"
+            )
+        if (
+            self.card_coverage_state == "incomplete_attribution"
+            and self.status in {"observed", "absent"}
+        ):
+            raise ValueError(
+                "incomplete_attribution must not claim observed/absent completeness"
             )
 
 
@@ -347,6 +377,7 @@ def cells_from_snapshot_quotes(
 
     attributed: dict[str, list[OddsQuote]] = {}
     unassigned: dict[str, list[OddsQuote]] = {}
+    attributed_evidence: set[tuple[str, str, str, str]] = set()
     for quote in in_scope:
         alias = alias_effective_at(
             session,
@@ -354,13 +385,18 @@ def cells_from_snapshot_quotes(
             external_event_id=quote.external_event_id,
             as_of=match_as_of,
         )
-        if alias is None:
-            unassigned.setdefault(quote.bookmaker_key, []).append(quote)
-            continue
-        if alias.bout_id not in bout_ids:
+        if alias is None or alias.bout_id not in bout_ids:
             unassigned.setdefault(quote.bookmaker_key, []).append(quote)
             continue
         attributed.setdefault(quote.bookmaker_key, []).append(quote)
+        attributed_evidence.add(
+            _response_evidence_key(
+                external_event_id=quote.external_event_id,
+                bookmaker_key=quote.bookmaker_key,
+                region=quote.region,
+                market=quote.provider_market_key,
+            )
+        )
 
     cells: list[CoverageCell] = []
     for bookmaker_key in sorted(attributed):
@@ -392,11 +428,13 @@ def cells_from_snapshot_quotes(
             detail = "ambiguous_card_attribution"
             match_reason = "alias_ambiguous"
             matched = False
+            coverage_state: CardCoverageState = "incomplete_attribution"
         else:
             status = "observed"
             detail = "collection_observed_not_value_ready"
             match_reason = "alias_effective_maps_to_card_bout"
             matched = True
+            coverage_state = "attributed"
         cells.append(
             CoverageCell(
                 card_id=card_id,
@@ -410,11 +448,15 @@ def cells_from_snapshot_quotes(
                 quote_eligible_count=eligible,
                 match_reason=match_reason,
                 quote_ids=tuple(int(q.id) for q in book_quotes),
+                card_coverage_state=coverage_state,
                 **clocks,
             )
         )
 
-    # Per-book absence/unknown only when response inventory proves it.
+    # Per-book absence/unknown only when response inventory proves it for this
+    # card's attributed provider event. Another card's same-bookmaker quote must
+    # not suppress absence for a different external_event_id.
+    absent_proven = False
     if avail_ids:
         observations = list(
             session.scalars(
@@ -423,13 +465,10 @@ def cells_from_snapshot_quotes(
                 )
             ).all()
         )
-        books_with_quotes = set(attributed) | set(unassigned)
         for obs in observations:
             if obs.provider != provider or obs.region != region:
                 continue
             if obs.provider_market_key != market:
-                continue
-            if obs.bookmaker_key in books_with_quotes:
                 continue
             alias = alias_effective_at(
                 session,
@@ -439,16 +478,26 @@ def cells_from_snapshot_quotes(
             )
             if alias is None or alias.bout_id not in bout_ids:
                 continue
+            evidence = _response_evidence_key(
+                external_event_id=obs.external_event_id,
+                bookmaker_key=obs.bookmaker_key,
+                region=obs.region,
+                market=obs.provider_market_key,
+            )
+            if evidence in attributed_evidence:
+                continue
+            absent_proven = True
             cells.append(
                 CoverageCell(
                     card_id=card_id,
-                    bookmaker_key=obs.bookmaker_key,
+                    bookmaker_key=obs.bookmaker_key or "*",
                     market=market,
                     time_label=time_label,
                     status="absent",
                     detail="provider_availability_unknown",
                     match_reason="availability_unknown_no_quote",
                     availability_observation_ids=(int(obs.id),),
+                    card_coverage_state="absent_proven",
                     **clocks,
                 )
             )
@@ -469,17 +518,42 @@ def cells_from_snapshot_quotes(
                     quote_eligible_count=0,
                     match_reason="alias_missing_or_wrong_card",
                     quote_ids=tuple(int(q.id) for q in book_quotes),
+                    card_coverage_state="incomplete_attribution",
                     **clocks,
                 )
             )
 
-    if cells:
+    card_cells = [cell for cell in cells if cell.card_id == card_id]
+    if card_cells:
         return cells
 
-    # No attributable cells. Only mark card absent when the snapshot truly
-    # had no in-scope quotes (unmatched quotes must not become card-absent).
+    # In-scope quotes exist but none attribute to this card: emit explicit
+    # incomplete metadata (not observed, not absent) so emptiness is not
+    # mistaken for complete coverage. Unassigned cells above are batch-level.
     if in_scope:
-        return []
+        incomplete = CoverageCell(
+            card_id=card_id,
+            bookmaker_key="*",
+            market=market,
+            time_label=time_label,
+            status="unmatched",
+            detail="incomplete_attribution_unassigned_only",
+            matched=False,
+            quote_count=len(in_scope),
+            quote_eligible_count=0,
+            match_reason="quotes_exist_but_not_linked_to_card",
+            quote_ids=tuple(int(q.id) for q in in_scope),
+            availability_observation_ids=avail_ids,
+            card_coverage_state="incomplete_attribution",
+            **clocks,
+        )
+        # Keep __unassigned__ first when present so batch emitters stay stable.
+        if include_unassigned and any(c.card_id == UNASSIGNED_CARD_ID for c in cells):
+            return [incomplete, *cells]
+        return [incomplete, *cells]
+
+    if absent_proven:
+        return cells
 
     return [
         CoverageCell(
@@ -492,6 +566,7 @@ def cells_from_snapshot_quotes(
             match_reason="no_quotes_in_snapshot",
             quote_ids=ids,
             availability_observation_ids=avail_ids,
+            card_coverage_state="no_snapshot_quotes",
             **clocks,
         )
     ]
@@ -579,6 +654,7 @@ __all__ = [
     "ALLOWED_COVERAGE_STATUSES",
     "UNASSIGNED_CARD_ID",
     "BatchCostRecord",
+    "CardCoverageState",
     "CoverageCell",
     "OddsCoverageReport",
     "PlannedWorkItem",

@@ -14,6 +14,10 @@ ODDS_MATCH_NO_UPDATE_TRIGGER = "odds_match_observations_no_update"
 ODDS_MATCH_NO_DELETE_TRIGGER = "odds_match_observations_no_delete"
 ODDS_LIFECYCLE_NO_UPDATE_TRIGGER = "odds_bout_lifecycle_observations_no_update"
 ODDS_LIFECYCLE_NO_DELETE_TRIGGER = "odds_bout_lifecycle_observations_no_delete"
+ODDS_JOB_QUOTE_IDS_INSERT_TRIGGER = "odds_snapshot_job_runs_quote_ids_insert"
+ODDS_JOB_QUOTE_IDS_UPDATE_TRIGGER = "odds_snapshot_job_runs_quote_ids_update"
+ODDS_JOB_AVAIL_IDS_INSERT_TRIGGER = "odds_snapshot_job_runs_availability_ids_insert"
+ODDS_JOB_AVAIL_IDS_UPDATE_TRIGGER = "odds_snapshot_job_runs_availability_ids_update"
 
 _TRIGGER_SPECS = (
     (ODDS_QUOTES_NO_UPDATE_TRIGGER, "odds_quotes", "UPDATE", "odds_quotes is append-only"),
@@ -79,12 +83,43 @@ def _trigger_sql(name: str, table: str, action: str, message: str) -> str:
     """
 
 
+def _id_array_trigger_sql(name: str, action: str, column: str) -> str:
+    """Reject non-array / non-positive / duplicate JSON integer ID lists."""
+    return f"""
+    CREATE TRIGGER IF NOT EXISTS {name}
+    BEFORE {action} ON odds_snapshot_job_runs
+    WHEN NEW.{column} IS NOT NULL
+    BEGIN
+      SELECT RAISE(ABORT, '{column} must be a JSON array of positive unique integers')
+      WHERE NOT json_valid(NEW.{column})
+         OR json_type(NEW.{column}) != 'array'
+         OR EXISTS (
+              SELECT 1 FROM json_each(NEW.{column}) AS j
+              WHERE typeof(j.value) != 'integer' OR j.value <= 0
+         )
+         OR (
+              SELECT COUNT(*) FROM json_each(NEW.{column})
+         ) != (
+              SELECT COUNT(DISTINCT j.value) FROM json_each(NEW.{column}) AS j
+         );
+    END
+    """
+
+
+_ID_ARRAY_TRIGGER_SPECS = (
+    (ODDS_JOB_QUOTE_IDS_INSERT_TRIGGER, "INSERT", "snapshot_quote_ids"),
+    (ODDS_JOB_QUOTE_IDS_UPDATE_TRIGGER, "UPDATE", "snapshot_quote_ids"),
+    (ODDS_JOB_AVAIL_IDS_INSERT_TRIGGER, "INSERT", "snapshot_availability_ids"),
+    (ODDS_JOB_AVAIL_IDS_UPDATE_TRIGGER, "UPDATE", "snapshot_availability_ids"),
+)
+
 _TRIGGER_STATEMENTS = tuple(
     _trigger_sql(name, table, action, message)
     for name, table, action, message in _TRIGGER_SPECS
 )
 _DROP_STATEMENTS = tuple(
-    f"DROP TRIGGER IF EXISTS {name}" for name, *_rest in _TRIGGER_SPECS
+    [f"DROP TRIGGER IF EXISTS {name}" for name, *_rest in _TRIGGER_SPECS]
+    + [f"DROP TRIGGER IF EXISTS {name}" for name, *_rest in _ID_ARRAY_TRIGGER_SPECS]
 )
 
 
@@ -141,6 +176,11 @@ def install_odds_sqlite_guards(bind: Connectable | Engine) -> None:
         for name, table, action, message in _TRIGGER_SPECS:
             if _table_exists(connection, table):
                 connection.exec_driver_sql(_trigger_sql(name, table, action, message).strip())
+        if _table_exists(connection, "odds_snapshot_job_runs"):
+            for name, action, column in _ID_ARRAY_TRIGGER_SPECS:
+                connection.exec_driver_sql(
+                    _id_array_trigger_sql(name, action, column).strip()
+                )
         for _index_name, table, ddl in _PARTIAL_UNIQUE_INDEXES:
             if _table_exists(connection, table):
                 connection.exec_driver_sql(ddl)

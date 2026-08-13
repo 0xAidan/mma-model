@@ -1,8 +1,9 @@
 """Quota budget / cost estimation for odds jobs (DWCS-205).
 
 Uses the provider cost contract plus persisted raw/inferred quota provenance.
-Never assumes unused monthly quota. Never exceeds actual remaining.
-Never pre-authorizes N batches against one unadjusted balance.
+Never assumes unused monthly quota. Never exceeds actual remaining under the
+configured exclusive-API-key operational assumption. Never pre-authorizes N
+batches against one unadjusted balance.
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ class QuotaBudgetDecision:
     remaining_source: str
     purpose: RequestPurpose
     preserves_reserve: bool
+    exclusive_api_key_for_worker: bool
+    quota_guarantee: str
 
 
 def cost_from_quota_headers(quota: QuotaHeaders) -> int | None:
@@ -81,6 +84,12 @@ def validate_remaining_override(
             f"{sched.quota.monthly_limit}"
         )
     return value, f"override_bounded:{value}"
+
+
+def _quota_guarantee(exclusive: bool) -> str:
+    if exclusive:
+        return "exclusive_worker_freshness_window"
+    return "no_absolute_never_exceed_non_exclusive_key"
 
 
 def _observation_freshness(
@@ -154,51 +163,59 @@ def evaluate_quota_budget(
     if estimated_cost < 0:
         raise ValueError("estimated_cost must be nonnegative")
     sched = contract or load_default_schedule_contract()
+    exclusive = bool(sched.quota.exclusive_api_key_for_worker)
+    guarantee = _quota_guarantee(exclusive)
     reserve = int(sched.quota.run_reserve)
     preserves = purpose.value in sched.quota.preserve_reserve_for
     may_spend = purpose.value in sched.quota.may_spend_reserve_for
     if not preserves and not may_spend:
         raise ValueError(f"purpose {purpose.value!r} not configured in schedule quota")
 
+    def _decision(
+        *,
+        state: QuotaBudgetState,
+        remaining_v: int | None,
+        spendable: int | None,
+        reason: str,
+    ) -> QuotaBudgetDecision:
+        return QuotaBudgetDecision(
+            state=state,
+            estimated_cost=estimated_cost,
+            remaining=remaining_v,
+            run_reserve=reserve,
+            spendable=spendable,
+            reason=reason,
+            remaining_source=remaining_source,
+            purpose=purpose,
+            preserves_reserve=preserves,
+            exclusive_api_key_for_worker=exclusive,
+            quota_guarantee=guarantee,
+        )
+
     if remaining is None:
         if allow_missing_remaining_override and remaining_source.startswith(
             "override_bounded"
         ):
-            return QuotaBudgetDecision(
+            return _decision(
                 state=QuotaBudgetState.ALLOWED,
-                estimated_cost=estimated_cost,
-                remaining=None,
-                run_reserve=reserve,
+                remaining_v=None,
                 spendable=None,
                 reason="explicit_bounded_operator_override",
-                remaining_source=remaining_source,
-                purpose=purpose,
-                preserves_reserve=preserves,
             )
-        return QuotaBudgetDecision(
+        return _decision(
             state=QuotaBudgetState.DEFERRED,
-            estimated_cost=estimated_cost,
-            remaining=None,
-            run_reserve=reserve,
+            remaining_v=None,
             spendable=None,
             reason="missing_remaining_fail_closed",
-            remaining_source=remaining_source,
-            purpose=purpose,
-            preserves_reserve=preserves,
         )
 
     remaining_i = int(remaining)
     if remaining_i <= 0:
-        return QuotaBudgetDecision(
+        return _decision(
             state=QuotaBudgetState.EXHAUSTED,
-            estimated_cost=estimated_cost,
-            remaining=remaining_i,
-            run_reserve=reserve,
+            remaining_v=remaining_i,
             spendable=0,
             reason="quota_remaining_nonpositive",
-            remaining_source=remaining_source,
-            purpose=purpose,
-            preserves_reserve=preserves,
         )
 
     spendable = (
@@ -208,47 +225,35 @@ def evaluate_quota_budget(
     )
 
     if estimated_cost > remaining_i:
-        return QuotaBudgetDecision(
+        return _decision(
             state=QuotaBudgetState.EXHAUSTED,
-            estimated_cost=estimated_cost,
-            remaining=remaining_i,
-            run_reserve=reserve,
+            remaining_v=remaining_i,
             spendable=spendable,
             reason="estimated_cost_exceeds_remaining",
-            remaining_source=remaining_source,
-            purpose=purpose,
-            preserves_reserve=preserves,
         )
     if estimated_cost > spendable:
-        return QuotaBudgetDecision(
+        return _decision(
             state=QuotaBudgetState.DEFERRED,
-            estimated_cost=estimated_cost,
-            remaining=remaining_i,
-            run_reserve=reserve,
+            remaining_v=remaining_i,
             spendable=spendable,
             reason=(
                 "estimated_cost_exceeds_spendable_after_run_reserve"
                 if preserves
                 else "estimated_cost_exceeds_spendable"
             ),
-            remaining_source=remaining_source,
-            purpose=purpose,
-            preserves_reserve=preserves,
         )
-    return QuotaBudgetDecision(
+    reason = (
+        "within_remaining_including_reserve"
+        if may_spend and not preserves
+        else "within_remaining_and_run_reserve"
+    )
+    if not exclusive:
+        reason = f"{reason}|non_exclusive_key_no_absolute_guarantee"
+    return _decision(
         state=QuotaBudgetState.ALLOWED,
-        estimated_cost=estimated_cost,
-        remaining=remaining_i,
-        run_reserve=reserve,
+        remaining_v=remaining_i,
         spendable=spendable,
-        reason=(
-            "within_remaining_including_reserve"
-            if may_spend and not preserves
-            else "within_remaining_and_run_reserve"
-        ),
-        remaining_source=remaining_source,
-        purpose=purpose,
-        preserves_reserve=preserves,
+        reason=reason,
     )
 
 
@@ -351,31 +356,24 @@ def plan_request_budget(
         remaining, source = validate_remaining_override(
             remaining_override, contract=sched
         )
-        allow_missing = False
         return evaluate_quota_budget(
             estimated_cost=cost,
             remaining=remaining,
             purpose=purpose,
             contract=sched,
             remaining_source=source,
-            allow_missing_remaining_override=allow_missing,
+            allow_missing_remaining_override=False,
         )
 
-    if session is None:
-        remaining, source = None, "no_session"
-    else:
-        remaining, source = latest_remaining_from_observations(
-            session, provider=provider, as_of=as_of, contract=sched
-        )
-        if remaining is None and allow_bootstrap and sched.quota.bootstrap_enabled:
-            remaining, source = bootstrap_quota_remaining(
-                session,
-                provider=provider,
-                as_of=as_of,
-                contract=sched,
-                offline_fixtures=offline_fixtures,
-                fixture_dir=fixture_dir,  # type: ignore[arg-type]
-            )
+    remaining, source = _resolve_remaining_for_run(
+        session,
+        provider=provider,
+        as_of=as_of,
+        contract=sched,
+        allow_bootstrap=allow_bootstrap,
+        offline_fixtures=offline_fixtures,
+        fixture_dir=fixture_dir,
+    )
     return evaluate_quota_budget(
         estimated_cost=cost,
         remaining=remaining,
@@ -384,6 +382,57 @@ def plan_request_budget(
         remaining_source=source,
         allow_missing_remaining_override=False,
     )
+
+
+def _resolve_remaining_for_run(
+    session: Session | None,
+    *,
+    provider: str,
+    as_of: datetime,
+    contract: OddsScheduleContract,
+    allow_bootstrap: bool,
+    offline_fixtures: bool,
+    fixture_dir: object | None,
+) -> tuple[int | None, str]:
+    """Resolve remaining under exclusive-key assumption.
+
+    Exclusive ownership enables freshness-window planning. Without it, persisted
+    remaining is ignored and a zero-cost bootstrap is forced (or fail closed).
+    """
+    if session is None:
+        return None, "no_session"
+
+    exclusive = bool(contract.quota.exclusive_api_key_for_worker)
+    if exclusive:
+        remaining, source = latest_remaining_from_observations(
+            session, provider=provider, as_of=as_of, contract=contract
+        )
+        if remaining is None and allow_bootstrap and contract.quota.bootstrap_enabled:
+            remaining, source = bootstrap_quota_remaining(
+                session,
+                provider=provider,
+                as_of=as_of,
+                contract=contract,
+                offline_fixtures=offline_fixtures,
+                fixture_dir=fixture_dir,  # type: ignore[arg-type]
+            )
+        return remaining, source
+
+    # Non-exclusive: do not trust persisted remaining across uncontrolled consumers.
+    if not allow_bootstrap or not contract.quota.bootstrap_enabled:
+        return None, "non_exclusive_key_fail_closed"
+    remaining, source = bootstrap_quota_remaining(
+        session,
+        provider=provider,
+        as_of=as_of,
+        contract=contract,
+        offline_fixtures=offline_fixtures,
+        fixture_dir=fixture_dir,  # type: ignore[arg-type]
+        force=True,
+    )
+    if remaining is None:
+        return None, f"{source}|non_exclusive_key_fail_closed"
+    return remaining, f"{source}|non_exclusive_forced_bootstrap"
 
 
 def open_quota_ledger(
@@ -404,20 +453,15 @@ def open_quota_ledger(
             remaining_override, contract=sched
         )
         return RunningQuotaLedger(remaining=remaining, remaining_source=source)
-    if session is None:
-        return RunningQuotaLedger(remaining=None, remaining_source="no_session")
-    remaining, source = latest_remaining_from_observations(
-        session, provider=provider, as_of=as_of, contract=sched
+    remaining, source = _resolve_remaining_for_run(
+        session,
+        provider=provider,
+        as_of=as_of,
+        contract=sched,
+        allow_bootstrap=allow_bootstrap,
+        offline_fixtures=offline_fixtures,
+        fixture_dir=fixture_dir,
     )
-    if remaining is None and allow_bootstrap and sched.quota.bootstrap_enabled:
-        remaining, source = bootstrap_quota_remaining(
-            session,
-            provider=provider,
-            as_of=as_of,
-            contract=sched,
-            offline_fixtures=offline_fixtures,
-            fixture_dir=fixture_dir,  # type: ignore[arg-type]
-        )
     return RunningQuotaLedger(remaining=remaining, remaining_source=source)
 
 
