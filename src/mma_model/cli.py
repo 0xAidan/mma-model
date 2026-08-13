@@ -169,6 +169,12 @@ from mma_model.quality.readonly import (
 )
 from mma_model.quality.report import dumps_report, human_report, write_coverage_evidence
 from mma_model.quality.schema import CoverageSchemaError
+from mma_model.observability.health import (
+    default_missing_report,
+    dumps_health,
+    load_health_state,
+)
+from mma_model.observability.schema import HealthSchemaError, validate_health_payload
 from mma_model.sources.policy import load_source_policy
 from mma_model.predict.backtest import walk_forward_backtest
 from mma_model.predict.train import (
@@ -974,6 +980,33 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Optional content-addressed raw store for referenced blob verification",
+    )
+
+    p_health = sub.add_parser(
+        "health",
+        help="Emit DWCS operational health contract (DWCS-403)",
+    )
+    p_health.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit 2 when any red/blocker component is present",
+    )
+    p_health.add_argument("--json", action="store_true", help="Print sorted-key JSON")
+    p_health.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional disposable SQLite URL (never live data/mma.db)",
+    )
+    p_health.add_argument(
+        "--state",
+        type=Path,
+        default=None,
+        help="Optional component state JSON snapshot for health assembly",
+    )
+    p_health.add_argument(
+        "--series",
+        default="dwcs",
+        choices=["dwcs"],
     )
 
     p_feat = sub.add_parser("features", help="Cutoff-aware PIT feature tools")
@@ -2643,6 +2676,47 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         finally:
             engine.dispose()
+
+    if args.cmd == "health":
+        db_url = getattr(args, "database_url", None)
+        if db_url is not None:
+            raw_url = str(db_url).strip()
+            if not raw_url:
+                print("health configuration error: empty --database-url")
+                return EXIT_INTERNAL
+            default_url = get_settings().mma_database_url
+            if (
+                is_prohibited_live_url(raw_url, default_url=default_url)
+                or raw_url in LIVE_DB_URLS
+                or raw_url.endswith("/data/mma.db")
+                or raw_url.endswith("data/mma.db")
+            ):
+                print("health configuration error: refusing live data/mma.db")
+                return EXIT_INTERNAL
+        try:
+            if args.state is not None:
+                report = load_health_state(Path(args.state))
+            else:
+                report = default_missing_report(series=str(args.series))
+            validate_health_payload(report.to_dict())
+        except (OSError, ValueError, json.JSONDecodeError, HealthSchemaError) as exc:
+            print(f"health configuration error: {exc}")
+            return EXIT_INTERNAL
+        if args.json:
+            print(dumps_health(report), end="")
+        else:
+            print(
+                f"health rollup={report.rollup.value} ok={report.ok} "
+                f"blockers={','.join(report.blocker_codes) or 'none'}"
+            )
+            for component in report.components:
+                print(
+                    f"  {component.name}: {component.status.value}/"
+                    f"{component.severity.value} — {component.detail}"
+                )
+        if args.strict:
+            return int(report.exit_code)
+        return EXIT_OK
 
     if args.cmd == "features":
         if args.features_cmd != "audit":

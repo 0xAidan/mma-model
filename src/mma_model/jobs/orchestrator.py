@@ -46,6 +46,7 @@ from mma_model.jobs.types import (
     TickJobResult,
     TickResult,
 )
+from mma_model.observability.logging import log_event, new_run_id
 from mma_model.odds.normalize import ensure_utc
 
 SERIES_JOB_TYPES = frozenset(
@@ -342,7 +343,7 @@ def _execute_job(
             duration_ms=duration_ms,
         )
 
-    return TickJobResult(
+    tick_row = TickJobResult(
         job_type=job.job_type.value,
         idempotency_key=job.idempotency_key,
         status=status.value if isinstance(status, JobStatus) else str(status),
@@ -361,6 +362,23 @@ def _execute_job(
         artifact_digest=result.artifact_digest,
         current_release_id=result.current_release_id,
     )
+    # Structured log (stdlib logger; does not write to stdout / capsys).
+    log_level = "INFO" if tick_row.status == JobStatus.SUCCESS.value else "ERROR"
+    if tick_row.status == JobStatus.SKIPPED.value:
+        log_level = "INFO"
+    log_event(
+        level=log_level,
+        message=f"job {tick_row.job_type} {tick_row.status}",
+        run_id=str(context.get("run_id")) if context.get("run_id") else None,
+        job_id=job.idempotency_key,
+        idempotency_key=job.idempotency_key,
+        event_id=job.event_id,
+        bout_id=job.bout_id,
+        error_class=tick_row.error_class,
+        duration_ms=duration_ms,
+        emit=True,
+    )
+    return tick_row
 
 
 def run_jobs_tick(
@@ -405,6 +423,7 @@ def run_jobs_tick(
     ctx: MutableMapping[str, Any] = dict(context or {})
     active_registry = registry or HandlerRegistry()
     ctx.setdefault("registry", active_registry)
+    ctx.setdefault("run_id", new_run_id())
 
     overlap_lock = lock
     if overlap_lock is None and acquire_lock:
