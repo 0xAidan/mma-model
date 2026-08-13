@@ -12,8 +12,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from mma_model.db.tables.recommendations import OfficialPublication
 from mma_model.domain.markets import RecommendationState
 from mma_model.grade.service import (
     StateEventType,
@@ -177,14 +179,14 @@ def handle_identity(
         for bout_id in event.bout_ids:
             if bout_id in registry.unresolved_identity_bouts:
                 unresolved.append(bout_id)
-    if unresolved and len(unresolved) == len(event.bout_ids if event else ()):
+    if unresolved and event is not None and len(unresolved) == len(event.bout_ids):
         return HandlerResult(
             status=JobStatus.FAILED,
             error_class=JobErrorClass.IDENTITY_UNRESOLVED,
             detail=f"all bouts unresolved: {unresolved}",
             blocked_bout_ids=tuple(unresolved),
             counts={"unresolved": len(unresolved)},
-            blocks_downstream=False,
+            blocks_downstream=True,
         )
     return HandlerResult(
         status=JobStatus.SUCCESS,
@@ -320,6 +322,24 @@ def handle_recommend(
     for bout_id in event.bout_ids:
         if registry is not None and bout_id in registry.unresolved_identity_bouts:
             blocked.append(bout_id)
+
+    if event.bout_ids and len(blocked) == len(event.bout_ids):
+        return HandlerResult(
+            status=JobStatus.FAILED,
+            error_class=JobErrorClass.IDENTITY_UNRESOLVED,
+            detail="recommend blocked: all bouts identity_unresolved",
+            blocked_bout_ids=tuple(blocked),
+            counts={
+                "published": 0,
+                "price_targets": 0,
+                "confirmed_value": 0,
+                "blocked": len(blocked),
+            },
+            blocks_downstream=True,
+        )
+
+    for bout_id in event.bout_ids:
+        if bout_id in blocked:
             continue
 
         missing_odds = registry is not None and bout_id in registry.missing_odds_bouts
@@ -395,7 +415,7 @@ def handle_publish(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
-    _ = (session, as_of, events)
+    _ = as_of
     registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
     prior = (
         registry.publish.current_release_id
@@ -411,6 +431,29 @@ def handle_publish(
             counts={"written": 0, "current_replaced": False},
             blocks_downstream=True,
         )
+
+    event = next((e for e in events if e.event_id == job.event_id), None)
+    pub_count = 0
+    if job.event_id:
+        pub_count = int(
+            session.scalar(
+                select(func.count())
+                .select_from(OfficialPublication)
+                .where(OfficialPublication.event_id == job.event_id)
+            )
+            or 0
+        )
+    # Empty card with known bouts must not replace last-known-good current.
+    if event is not None and event.bout_ids and pub_count == 0:
+        return HandlerResult(
+            status=JobStatus.FAILED,
+            error_class=JobErrorClass.DEPENDENCY_BLOCKED,
+            detail="publish refused: zero official publications for card; LKG kept",
+            current_release_id=prior,
+            counts={"written": 0, "current_replaced": False, "publications": 0},
+            blocks_downstream=True,
+        )
+
     new_release = f"release-{job.event_id}-{job.window_slot}"
     if registry is not None:
         registry.publish.releases.append(new_release)
@@ -418,7 +461,7 @@ def handle_publish(
     return HandlerResult(
         status=JobStatus.SUCCESS,
         current_release_id=new_release,
-        counts={"written": 1, "current_replaced": True},
+        counts={"written": 1, "current_replaced": True, "publications": pub_count},
         detail="publish seam: versioned release + atomic current pointer",
     )
 
@@ -454,11 +497,22 @@ def handle_grade(
 ) -> HandlerResult:
     """Call DWCS-400 grade services; never INSERT ledger rows ad hoc.
 
+    Partial / non-final results must not consume the event_night success key.
     When ``context`` supplies ``prediction_ids`` / ``official_publication_ids``
-    and ``facts_by_bout``, those are graded. Otherwise the seam invokes the
-    services with empty id lists (idempotent no-op) so the call path is real.
+    and ``facts_by_bout``, those are graded after finals are ready.
     """
     _ = events
+    registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
+    results_final = bool(context.get("results_final", False))
+    if registry is not None:
+        results_final = bool(registry.results_final or results_final)
+    if not results_final:
+        return HandlerResult(
+            status=JobStatus.SKIPPED,
+            detail="results not final; grade deferred (no success_token)",
+            counts={"deferred": True, "results_final": False, "event_id": job.event_id},
+        )
+
     prediction_ids = list(context.get("prediction_ids") or ())
     publication_ids = list(context.get("official_publication_ids") or ())
     facts_by_bout = dict(context.get("facts_by_bout") or {})
@@ -483,6 +537,7 @@ def handle_grade(
             "prediction_grades": len(graded),
             "settlements": len(settled),
             "event_id": job.event_id,
+            "results_final": True,
         },
         detail="grade via grade_predictions / settle_recommendations",
     )

@@ -190,11 +190,13 @@ def test_repeated_tick_no_duplicate_success(tmp_path: Path) -> None:
     assert success_before == success_after
     assert pubs_before == pubs_after
     assert all(
-        row.status in {JobStatus.SKIPPED.value, JobStatus.SUCCESS.value}
-        or row.status == JobStatus.DEPENDENCY_BLOCKED.value
+        row.status
+        in {
+            JobStatus.SKIPPED.value,
+            JobStatus.SUCCESS.value,
+            JobStatus.DEPENDENCY_BLOCKED.value,
+        }
         for row in second.executed
-        if row.job_type not in {"discover", "ingest-history"}
-        or True
     )
     # Every previously successful key is skipped, not re-succeeded.
     skipped = [row for row in second.executed if row.status == JobStatus.SKIPPED.value]
@@ -260,6 +262,86 @@ def test_failed_identity_isolates_bout(tmp_path: Path) -> None:
     assert BOUT_A in recommend.blocked_bout_ids
     publish = next(r for r in result.executed if r.job_type == "publish")
     assert publish.status == JobStatus.SUCCESS.value
+    engine.dispose()
+
+
+def test_all_unresolved_identity_keeps_lkg_publish(tmp_path: Path) -> None:
+    session, engine = _open_session(tmp_path)
+    registry = HandlerRegistry()
+    registry.publish.current_release_id = "release-lkg-keep"
+    registry.unresolved_identity_bouts.update({BOUT_A, BOUT_B})
+    as_of = EVENT_START - timedelta(minutes=60)
+    result = run_jobs_tick(
+        session,
+        as_of=as_of,
+        events=[_event()],
+        cadence=CADENCE,
+        registry=registry,
+        lock_path=tmp_path / "all-id.lock",
+    )
+    session.commit()
+    assert session.scalar(select(func.count()).select_from(OfficialPublication)) == 0
+    assert registry.publish.current_release_id == "release-lkg-keep"
+    recommend = next(r for r in result.executed if r.job_type == "recommend")
+    publish = next(r for r in result.executed if r.job_type == "publish")
+    assert recommend.status in {
+        JobStatus.DEPENDENCY_BLOCKED.value,
+        JobStatus.FAILED.value,
+    }
+    assert publish.status in {
+        JobStatus.DEPENDENCY_BLOCKED.value,
+        JobStatus.FAILED.value,
+    }
+    assert publish.current_release_id in {None, "release-lkg-keep"}
+    engine.dispose()
+
+
+def test_grade_defers_until_results_final(tmp_path: Path) -> None:
+    session, engine = _open_session(tmp_path)
+    registry = HandlerRegistry()
+    first = run_jobs_tick(
+        session,
+        as_of=EVENT_START,
+        events=[_event()],
+        cadence=CADENCE,
+        registry=registry,
+        lock_path=tmp_path / "grade-defer.lock",
+        context={"results_final": False},
+    )
+    session.commit()
+    grade_success = session.scalar(
+        select(func.count()).select_from(PipelineJobRun).where(
+            PipelineJobRun.job_type == "grade",
+            PipelineJobRun.success_token == 1,
+        )
+    )
+    assert grade_success == 0
+    grade_first = next(r for r in first.executed if r.job_type == "grade")
+    assert grade_first.status == JobStatus.SKIPPED.value
+    assert "not final" in grade_first.detail
+
+    registry.results_final = True
+    second = run_jobs_tick(
+        session,
+        as_of=EVENT_START + timedelta(minutes=10),
+        events=[_event()],
+        cadence=CADENCE,
+        registry=registry,
+        lock_path=tmp_path / "grade-defer.lock",
+        context={"results_final": True, "prediction_ids": [], "facts_by_bout": {}},
+    )
+    session.commit()
+    grade_success_after = session.scalar(
+        select(func.count()).select_from(PipelineJobRun).where(
+            PipelineJobRun.job_type == "grade",
+            PipelineJobRun.success_token == 1,
+        )
+    )
+    assert grade_success_after == 1
+    grade_second = next(r for r in second.executed if r.job_type == "grade")
+    assert grade_second.status == JobStatus.SUCCESS.value
+    assert grade_second.duration_ms is not None
+    assert grade_second.duration_ms >= 0
     engine.dispose()
 
 
@@ -458,19 +540,20 @@ def test_overlap_lock_fails_closed(tmp_path: Path) -> None:
     session, engine = _open_session(tmp_path)
     lock_path = tmp_path / "overlap.lock"
     first = FileFlockLock(lock_path)
-    with hold_overlap_lock(first):
-        with pytest.raises((TickOverlapError, OverlapError)):
-            run_jobs_tick(
-                session,
-                as_of=EVENT_START - timedelta(hours=72),
-                events=[_event()],
-                cadence=CADENCE,
-                lock=FileFlockLock(lock_path),
-            )
+    with hold_overlap_lock(first), pytest.raises((TickOverlapError, OverlapError)):
+        run_jobs_tick(
+            session,
+            as_of=EVENT_START - timedelta(hours=72),
+            events=[_event()],
+            cadence=CADENCE,
+            lock=FileFlockLock(lock_path),
+        )
     engine.dispose()
 
 
-def test_grade_calls_service_and_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_grade_calls_service_and_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     session, engine = _open_session(tmp_path)
     seed_model_and_prediction(session)
     session.commit()

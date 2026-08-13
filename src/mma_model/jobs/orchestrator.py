@@ -7,6 +7,7 @@ from canonical event timestamps and an explicit ``--now`` / ``as_of`` UTC.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -35,13 +36,13 @@ from mma_model.jobs.locking import (
 from mma_model.jobs.types import (
     DEFAULT_MAX_TRANSIENT_ATTEMPTS,
     JOB_DEPENDENCIES,
+    NON_RETRYABLE_ERRORS,
     DueJob,
     EventContext,
     HandlerResult,
     JobErrorClass,
     JobStatus,
     JobType,
-    NON_RETRYABLE_ERRORS,
     TickJobResult,
     TickResult,
 )
@@ -67,11 +68,7 @@ def _dependency_satisfied(
     job: DueJob,
     succeeded_types: set[tuple[JobType, str | None]],
 ) -> bool:
-    event_key: str | None
-    if dep in SERIES_JOB_TYPES:
-        event_key = None
-    else:
-        event_key = job.event_id
+    event_key = None if dep in SERIES_JOB_TYPES else job.event_id
 
     if (dep, event_key) in succeeded_types:
         return True
@@ -186,13 +183,14 @@ def _execute_job(
             detail="already succeeded",
             attempt=existing.attempt,
             counts={"duplicate": True},
+            duration_ms=existing.duration_ms,
         )
 
     attempts_prior = count_attempts(session, idempotency_key=job.idempotency_key)
     attempt = attempts_prior + 1
 
-    # Record started then finish in the same write path (durable attempt).
     started_at = as_of
+    t0 = time.perf_counter()
     result = _run_handler(
         session,
         job=job,
@@ -205,7 +203,6 @@ def _execute_job(
     status = result.status
     error_class = result.error_class
     detail = result.detail
-    duration_ms = 0
 
     if status == JobStatus.FAILED and error_class is not None:
         if (
@@ -218,6 +215,7 @@ def _execute_job(
                 and status == JobStatus.FAILED
                 and error_class == JobErrorClass.TRANSIENT
             ):
+                duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
                 record_pipeline_job_run(
                     session,
                     idempotency_key=job.idempotency_key,
@@ -239,6 +237,7 @@ def _execute_job(
                     duration_ms=duration_ms,
                 )
                 attempt += 1
+                t0 = time.perf_counter()
                 result = _run_handler(
                     session,
                     job=job,
@@ -258,6 +257,8 @@ def _execute_job(
         ):
             # Single definitive failure — do not retry.
             pass
+
+    duration_ms = max(0, int((time.perf_counter() - t0) * 1000))
 
     if status == JobStatus.SUCCESS:
         record_pipeline_job_run(
@@ -317,6 +318,26 @@ def _execute_job(
             attempt=attempt,
             counts=result.counts,
             error_class=JobErrorClass.DEPENDENCY_BLOCKED,
+            detail=detail or None,
+            duration_ms=duration_ms,
+        )
+    elif status == JobStatus.SKIPPED:
+        # Deferred / not-ready (e.g. grade before finals). No success_token.
+        record_pipeline_job_run(
+            session,
+            idempotency_key=job.idempotency_key,
+            job_type=job.job_type,
+            status=JobStatus.SKIPPED,
+            as_of=as_of,
+            started_at=started_at,
+            finished_at=as_of,
+            series=job.series,
+            event_id=job.event_id,
+            bout_id=job.bout_id,
+            scope=job.scope,
+            window_slot=job.window_slot,
+            attempt=attempt,
+            counts=result.counts,
             detail=detail or None,
             duration_ms=duration_ms,
         )
@@ -474,7 +495,7 @@ def run_jobs_tick(
                     window_slot=job.window_slot,
                     attempt=1,
                     error_class=JobErrorClass.DEPENDENCY_BLOCKED,
-                    detail="publish blocked: upstream score failed",
+                    detail="publish blocked: upstream score/identity failed",
                     duration_ms=0,
                 )
                 executed.append(
@@ -484,7 +505,7 @@ def run_jobs_tick(
                         status=JobStatus.DEPENDENCY_BLOCKED.value,
                         event_id=job.event_id,
                         error_class=JobErrorClass.DEPENDENCY_BLOCKED.value,
-                        detail="publish blocked: upstream score failed",
+                        detail="publish blocked: upstream score/identity failed",
                     )
                 )
                 failures += 1
@@ -510,7 +531,7 @@ def run_jobs_tick(
                     window_slot=job.window_slot,
                     attempt=1,
                     error_class=JobErrorClass.DEPENDENCY_BLOCKED,
-                    detail="recommend blocked: upstream score failed",
+                    detail="recommend blocked: upstream score/identity failed",
                     duration_ms=0,
                 )
                 executed.append(
@@ -520,7 +541,7 @@ def run_jobs_tick(
                         status=JobStatus.DEPENDENCY_BLOCKED.value,
                         event_id=job.event_id,
                         error_class=JobErrorClass.DEPENDENCY_BLOCKED.value,
-                        detail="recommend blocked: upstream score failed",
+                        detail="recommend blocked: upstream score/identity failed",
                     )
                 )
                 failures += 1
@@ -537,20 +558,37 @@ def run_jobs_tick(
             )
             executed.append(row)
 
-            if row.status == JobStatus.SUCCESS.value:
+            if row.status == JobStatus.SUCCESS.value or (
+                row.status == JobStatus.SKIPPED.value
+                and bool((row.counts or {}).get("duplicate"))
+            ):
                 event_key = None if job.job_type in SERIES_JOB_TYPES else job.event_id
                 succeeded_types.add((job.job_type, event_key))
             elif row.status == JobStatus.SKIPPED.value:
-                event_key = None if job.job_type in SERIES_JOB_TYPES else job.event_id
-                succeeded_types.add((job.job_type, event_key))
+                # Deferred / not-ready (e.g. grade before finals): do not
+                # satisfy deps and do not count as a hard tick failure.
+                pass
             else:
                 failures += 1
-                if (
-                    job.job_type == JobType.SCORE
+                blocks_card = (
+                    job.event_id
                     and row.status == JobStatus.FAILED.value
-                ):
-                    if job.event_id:
-                        blocked_publish_events.add(job.event_id)
+                    and (
+                        job.job_type == JobType.SCORE
+                        or (
+                            job.job_type == JobType.IDENTITY
+                            and row.error_class
+                            == JobErrorClass.IDENTITY_UNRESOLVED.value
+                        )
+                        or (
+                            job.job_type == JobType.RECOMMEND
+                            and row.error_class
+                            == JobErrorClass.IDENTITY_UNRESOLVED.value
+                        )
+                    )
+                )
+                if blocks_card and job.event_id:
+                    blocked_publish_events.add(job.event_id)
 
         return TickResult(
             as_of=stamp.isoformat().replace("+00:00", "Z"),
