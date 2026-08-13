@@ -63,7 +63,11 @@ from mma_model.backtest.report import (
     metric_definitions,
     write_evidence_files,
 )
-from mma_model.domain.markets import MarketFamily, OutcomeKey
+from mma_model.domain.markets import (
+    VOID_ON_DRAW_FAMILIES,
+    MarketFamily,
+    OutcomeKey,
+)
 from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
 from mma_model.dwcs.classification import SeriesVariant
 from mma_model.evaluation.contract import (
@@ -94,7 +98,6 @@ from mma_model.markets.settlement import (
     settle,
 )
 from mma_model.modeling.artifacts import (
-    PINNED_RIDGE_SPEC_HASH,
     compute_code_hash,
     resolve_code_commit,
 )
@@ -244,6 +247,7 @@ class MarketPrediction:
     available: bool
     availability_reason: str | None
     draw_probability: float | None = None
+    p25_conditional: bool = False
 
 
 @dataclass(frozen=True)
@@ -433,6 +437,7 @@ def _prediction_payload(prediction: BoutPrediction) -> dict[str, Any]:
                 "line_point": item.line_point,
                 "outcome_key": item.outcome_key,
                 "p25": item.p25,
+                "p25_conditional": item.p25_conditional,
                 "p50": item.p50,
             }
             for item in prediction.markets
@@ -453,6 +458,21 @@ def _prediction_payload(prediction: BoutPrediction) -> dict[str, Any]:
     }
 
 
+def _conditional_non_void_probability(
+    p_selection: float, p_void: float | None
+) -> float:
+    """p_selection / (1 - p_void) when the market voids on draw."""
+    if p_void is None or p_void <= 0.0:
+        return p_selection
+    if p_void >= 1.0:
+        raise BacktestError("p_void must be < 1")
+    return p_selection / (1.0 - p_void)
+
+
+def _family_voids_on_draw(family: MarketFamily) -> bool:
+    return family in VOID_ON_DRAW_FAMILIES
+
+
 def moneyline_markets(
     *,
     p_a: float,
@@ -460,9 +480,29 @@ def moneyline_markets(
     p_draw: float,
     p25: float | None,
     p75: float | None = None,
+    p25_b: float | None = None,
     fallback_reason: str | None,
 ) -> tuple[MarketPrediction, ...]:
-    p25_b = None if p75 is None else (1.0 - p75)
+    if p_draw < 0.0:
+        raise BacktestError("p_draw cannot be negative")
+    if p_draw > 0.0 and p75 is not None and p25_b is None:
+        raise BacktestError(
+            "moneyline_markets 1-p75 B quantile is only valid when p_draw=0; "
+            "supply explicit p25_b when p_draw>0"
+        )
+    if p_draw > 0.0:
+        resolved_b = p25_b
+    else:
+        resolved_b = p25_b if p25_b is not None else (None if p75 is None else (1.0 - p75))
+    if p25 is not None and p25 > p_a + 1e-12:
+        raise BacktestError(
+            f"p25_A {p25} cannot exceed p50_A {p_a} (inverted conservative threshold)"
+        )
+    if resolved_b is not None and resolved_b > p_b + 1e-12:
+        raise BacktestError(
+            f"p25_B {resolved_b} cannot exceed p50_B {p_b} "
+            "(inverted conservative threshold)"
+        )
     rows = [
         MarketPrediction(
             family=MarketFamily.MONEYLINE.value,
@@ -479,7 +519,7 @@ def moneyline_markets(
             outcome_key=OutcomeKey.FIGHTER_B.value,
             line_point=None,
             p50=p_b,
-            p25=p25_b,
+            p25=resolved_b,
             available=True,
             availability_reason=None,
             draw_probability=p_draw,
@@ -522,7 +562,10 @@ def markets_from_joint(
                     p25=p25_map.get(key),
                     available=True,
                     availability_reason=None,
-                    draw_probability=derived.draw if family is MarketFamily.MONEYLINE else None,
+                    draw_probability=(
+                        derived.draw if family in VOID_ON_DRAW_FAMILIES else None
+                    ),
+                    p25_conditional=p25_map.get(key) is not None,
                 )
             )
     for line_point, mapping in derived.totals.items():
@@ -537,6 +580,7 @@ def markets_from_joint(
                     p25=p25_map.get(key),
                     available=True,
                     availability_reason=None,
+                    p25_conditional=p25_map.get(key) is not None,
                 )
             )
     return tuple(rows)
@@ -766,11 +810,24 @@ def _is_pre_policy_candidate(
     p25: float | None,
     offered: float,
     contract: EvaluationContract,
+    p_void: float | None = None,
+    p25_conditional: bool = False,
 ) -> bool:
     if p25 is None:
         return False
-    conservative = p25 if p25 <= p50 else p50
-    thresholds = compute_value_price_thresholds(p50, conservative, family=family)
+    p50_use = (
+        _conditional_non_void_probability(p50, p_void)
+        if _family_voids_on_draw(family)
+        else p50
+    )
+    if p25_conditional:
+        p25_use = p25
+    elif _family_voids_on_draw(family):
+        p25_use = _conditional_non_void_probability(p25, p_void)
+    else:
+        p25_use = p25
+    conservative = p25_use if p25_use <= p50_use else p50_use
+    thresholds = compute_value_price_thresholds(p50_use, conservative, family=family)
     return offered + 1e-12 >= thresholds.actionable_decimal
 
 
@@ -1249,7 +1306,7 @@ def _grade_bout(
             threshold_rows.append(row)
             continue
         settlement = _settle_market(facts, family, outcome, market.line_point)
-        p_void = market.draw_probability if family is MarketFamily.MONEYLINE else None
+        p_void = market.draw_probability if _family_voids_on_draw(family) else None
         priced = _priced_metrics_for_quote(
             quote=joined.quote,
             p50=market.p50,
@@ -1267,9 +1324,13 @@ def _grade_bout(
             p25=market.p25,
             offered=joined.quote.price_decimal,
             contract=contract,
+            p_void=p_void,
+            p25_conditional=market.p25_conditional,
         )
         priced["pre_policy_candidate"] = is_candidate
         priced["p25"] = market.p25
+        priced["draw_probability"] = market.draw_probability
+        priced["p50_unconditional"] = market.p50
         if market.p25 is None:
             priced["candidate_exclusion"] = ExclusionReason.MISSING_P25.value
             priced["label"] = "priced_observation"
@@ -1441,6 +1502,7 @@ def _attempts_to_rows(
                         line_point=market.line_point,
                         p50=market.p50,
                         settlement=settlement,
+                        draw_probability=market.draw_probability,
                     )
                 )
         for row in attempt.priced_rows:
@@ -1502,6 +1564,132 @@ def _market_rows_for_universe(
     raise BacktestError(f"unhandled universe: {never_universe!r}")
 
 
+def visible_snapshot_payload(snapshot: FeatureSnapshot) -> dict[str, Any]:
+    """Canonical visible profiles, stats, results, and bout identities."""
+    return {
+        "bouts": [
+            {
+                "bout_id": bout.bout_id,
+                "event_id": bout.event_id,
+                "fighter_a_id": bout.fighter_a_id,
+                "fighter_b_id": bout.fighter_b_id,
+                "scheduled_rounds": bout.scheduled_rounds,
+                "status": bout.status,
+                "weight_class": bout.weight_class,
+            }
+            for bout in sorted(snapshot.bouts, key=lambda item: item.bout_id)
+        ],
+        "events": [
+            {
+                "event_date": None if event.event_date is None else event.event_date.isoformat(),
+                "event_id": event.event_id,
+                "name": event.name,
+                "scheduled_start_at": (
+                    None
+                    if event.scheduled_start_at is None
+                    else event.scheduled_start_at.isoformat()
+                ),
+                "series": event.series,
+            }
+            for event in sorted(snapshot.events, key=lambda item: item.event_id)
+        ],
+        "profiles": [
+            {
+                "attribute": row.attribute,
+                "effective_at": row.effective_at.isoformat(),
+                "fighter_id": row.fighter_id,
+                "observed_at": row.observed_at.isoformat(),
+                "source": row.source,
+                "value_date": None if row.value_date is None else row.value_date.isoformat(),
+                "value_num": row.value_num,
+                "value_text": row.value_text,
+            }
+            for row in sorted(
+                snapshot.profiles,
+                key=lambda item: (
+                    item.fighter_id,
+                    item.attribute,
+                    item.effective_at.isoformat(),
+                    item.observed_at.isoformat(),
+                ),
+            )
+        ],
+        "results": [
+            {
+                "bout_id": row.bout_id,
+                "effective_at": row.effective_at.isoformat(),
+                "ending_round": row.ending_round,
+                "fighter_a_id": row.fighter_a_id,
+                "fighter_b_id": row.fighter_b_id,
+                "method": row.method,
+                "observed_at": row.observed_at.isoformat(),
+                "result_type": row.result_type,
+                "revision": row.revision,
+                "time_str": row.time_str,
+                "version_kind": row.version_kind,
+                "winner_fighter_id": row.winner_fighter_id,
+            }
+            for row in sorted(
+                snapshot.result_versions,
+                key=lambda item: (item.bout_id, item.version_kind, item.revision),
+            )
+        ],
+        "stats": [
+            {
+                "bout_id": row.bout_id,
+                "effective_at": row.effective_at.isoformat(),
+                "fighter_id": row.fighter_id,
+                "observed_at": row.observed_at.isoformat(),
+                "stat_key": row.stat_key,
+                "value_num": row.value_num,
+            }
+            for row in sorted(
+                snapshot.stats,
+                key=lambda item: (
+                    item.fighter_id,
+                    item.bout_id,
+                    item.stat_key,
+                    item.effective_at.isoformat(),
+                ),
+            )
+        ],
+    }
+
+
+def compute_run_data_hash(
+    *,
+    groups: Sequence[EventGroup],
+    snapshot: FeatureSnapshot | None,
+    quotes: Sequence[QuoteCandidate],
+    facts: Mapping[str, BoutSettlementFacts],
+) -> str:
+    universe = [
+        {
+            "bout_ids": list(group.bout_ids),
+            "cutoff": group.cutoff.cutoff.isoformat(),
+            "event_id": group.event_id,
+        }
+        for group in groups
+    ]
+    universe_hash = compute_data_hash(universe)
+    if snapshot is None:
+        return universe_hash
+    return sha256_canonical(
+        {
+            "odds": [
+                _quote_content_hash_payload(item)
+                for item in sorted(quotes, key=lambda row: (row.bout_id, row.quote_id))
+            ],
+            "settlement": [
+                _settlement_hash_payload(bout_id, facts[bout_id])
+                for bout_id in sorted(facts)
+            ],
+            "snapshot": visible_snapshot_payload(snapshot),
+            "universe": universe_hash,
+        }
+    )
+
+
 def run_walk_forward(
     *,
     contract: EvaluationContract,
@@ -1516,25 +1704,30 @@ def run_walk_forward(
     generated_at: datetime | None = None,
     extra_hashes: Mapping[str, str] | None = None,
     expected_data_hash: str | None = None,
+    expected_model_hash: str | None = None,
+    expected_calibration_hash: str | None = None,
     run_mode: str = "custom",
     accounting_only: bool = False,
+    snapshot: FeatureSnapshot | None = None,
 ) -> dict[str, Any]:
     """Chronological card walk-forward. 2025 is never used to refit."""
     assert_contract_frozen(contract)
+    if sealed_holdout and generated_at is None:
+        raise BacktestError(
+            "sealed holdout requires an explicit generated_at timestamp "
+            "(or deterministic run id); wall clock is not used"
+        )
     groups = group_cards(cards, contract)
     if require_target_cards and len(groups) != contract.splits.target_cards:
         raise BacktestError(
             f"universe has {len(groups)} cards, expected {contract.splits.target_cards}"
         )
-    data_hash = compute_data_hash(
-        [
-            {
-                "event_id": group.event_id,
-                "bout_ids": list(group.bout_ids),
-                "cutoff": group.cutoff.cutoff.isoformat(),
-            }
-            for group in groups
-        ]
+    facts = dict(settlement_facts or {})
+    data_hash = compute_run_data_hash(
+        groups=groups,
+        snapshot=snapshot,
+        quotes=quotes,
+        facts=facts,
     )
     config_hash = compute_splits_config_hash(contract)
     feature_hash = current_feature_spec_hash()
@@ -1554,7 +1747,6 @@ def run_walk_forward(
         require_target_cards=require_target_cards,
     )
     folds_by_event = {fold.test_event_id: fold for fold in plan.folds}
-    facts = dict(settlement_facts or {})
     attempts: list[BoutAttempt] = []
     holdout_accessed = False
     holdout_accessed_at: str | None = None
@@ -1684,14 +1876,51 @@ def run_walk_forward(
             Path(__file__).with_name("gates.py"),
         ]
     )
+    per_card_estimators = {
+        attempt.event_id: attempt.prediction.estimator_hash
+        for attempt in attempts
+        if attempt.prediction is not None
+    }
+    per_card_calibrators = {
+        attempt.event_id: attempt.prediction.calibrator_hash
+        for attempt in attempts
+        if attempt.prediction is not None
+    }
+    model_hash = sha256_canonical(
+        {
+            "per_card_estimator_hashes": {
+                key: per_card_estimators[key] for key in sorted(per_card_estimators)
+            }
+        }
+    )
+    calibration_hash = sha256_canonical(
+        {
+            "per_card_calibrator_hashes": {
+                key: per_card_calibrators[key] for key in sorted(per_card_calibrators)
+            }
+        }
+    )
+    if expected_model_hash is not None and model_hash != expected_model_hash:
+        raise BacktestError(
+            f"independent model hash mismatch: got {model_hash}, "
+            f"expected {expected_model_hash}"
+        )
+    if (
+        expected_calibration_hash is not None
+        and calibration_hash != expected_calibration_hash
+    ):
+        raise BacktestError(
+            f"independent calibration hash mismatch: got {calibration_hash}, "
+            f"expected {expected_calibration_hash}"
+        )
     hashes = {
-        "calibration": extra_hashes.get("calibration") if extra_hashes else None,
+        "calibration": calibration_hash,
         "code": code_hash,
         "config": config_hash,
         "contract": contract.content_hash,
         "data": data_hash,
         "feature_spec": feature_hash,
-        "model": extra_hashes.get("model") if extra_hashes else PINNED_RIDGE_SPEC_HASH,
+        "model": model_hash,
         "odds": sha256_canonical(
             {
                 "quotes": [
@@ -1711,13 +1940,15 @@ def run_walk_forward(
         ),
         "spec": spec_hash(),
         "expected_data": expected_data_hash,
+        "expected_model": expected_model_hash,
+        "expected_calibration": expected_calibration_hash,
         "expected_contract": PINNED_CONTRACT_HASH,
         "expected_feature_spec": PINNED_FEATURE_SPEC_HASH,
         "expected_config": PINNED_SPLITS_CONFIG_HASH,
         "odds_inventory": extra_hashes.get("odds_inventory") if extra_hashes else None,
     }
     if extra_hashes:
-        for key in ("model", "calibration", "odds", "settlement"):
+        for key in ("odds", "settlement"):
             expected = extra_hashes.get(key)
             if expected is None:
                 continue
@@ -1749,7 +1980,12 @@ def run_walk_forward(
         and predicted_n > 0
         and bootstrap_replicates >= DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES
     )
-    performance_evidence = production_qualified
+    independent_expected = (
+        expected_data_hash is not None
+        and expected_model_hash is not None
+        and expected_calibration_hash is not None
+    )
+    performance_evidence = production_qualified and independent_expected
     accounting_evidence = accounting_only or run_mode == "manifest"
     payload: dict[str, Any] = {
         "accounting_evidence": accounting_evidence,
@@ -1836,6 +2072,9 @@ def execute_backtest_run(
     scorer: CardScorer | None = None,
     quotes: Sequence[QuoteCandidate] | None = None,
     settlement_facts: Mapping[str, BoutSettlementFacts] | None = None,
+    expected_data_hash: str | None = None,
+    expected_model_hash: str | None = None,
+    expected_calibration_hash: str | None = None,
 ) -> dict[str, Any]:
     """CLI/runtime entry: load universe, run engine, write evidence."""
     contract = load_evaluation_contract(path=contract_path)
@@ -1878,9 +2117,10 @@ def execute_backtest_run(
                     if got is not None:
                         active_facts[bout.bout_id] = got
             run_mode = "database"
-            expected_data_hash = None
+            mode_data_hash = expected_data_hash
             extra_hashes = {"odds_inventory": quote_inventory_hash(loaded)}
             accounting_only = False
+            active_snapshot = snapshot
         elif fixture == "protocol":
             cards = protocol_fixture_cards()
             require_target = False
@@ -1896,9 +2136,10 @@ def execute_backtest_run(
                 else protocol_settlement_facts()
             )
             run_mode = "protocol"
-            expected_data_hash = None
+            mode_data_hash = expected_data_hash
             extra_hashes = None
             accounting_only = False
+            active_snapshot = None
         else:
             cards = cards_from_manifest()
             require_target = True
@@ -1906,9 +2147,10 @@ def execute_backtest_run(
             active_quotes = quotes or ()
             active_facts = settlement_facts or {}
             run_mode = "manifest"
-            expected_data_hash = PINNED_MANIFEST_UNIVERSE_HASH
+            mode_data_hash = expected_data_hash or PINNED_MANIFEST_UNIVERSE_HASH
             extra_hashes = None
             accounting_only = True
+            active_snapshot = None
             _ = from_manifest
         payload = run_walk_forward(
             contract=contract,
@@ -1922,7 +2164,10 @@ def execute_backtest_run(
             require_target_cards=require_target,
             generated_at=generated_at,
             extra_hashes=extra_hashes,
-            expected_data_hash=expected_data_hash,
+            expected_data_hash=mode_data_hash,
+            expected_model_hash=expected_model_hash,
+            expected_calibration_hash=expected_calibration_hash,
+            snapshot=active_snapshot,
             run_mode=run_mode,
             accounting_only=accounting_only,
         )

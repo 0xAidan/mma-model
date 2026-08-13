@@ -77,6 +77,15 @@ class RecommendationState(StrEnum):
 
 V1_MARKET_FAMILIES: Final[tuple[MarketFamily, ...]] = tuple(MarketFamily)
 
+# Settlement voids these families on draw / technical draw.
+VOID_ON_DRAW_FAMILIES: Final[frozenset[MarketFamily]] = frozenset(
+    {
+        MarketFamily.MONEYLINE,
+        MarketFamily.METHOD,
+        MarketFamily.FIGHTER_BY_METHOD,
+    }
+)
+
 MONEYLINE_OUTCOMES: Final[tuple[OutcomeKey, ...]] = (
     OutcomeKey.FIGHTER_A,
     OutcomeKey.FIGHTER_B,

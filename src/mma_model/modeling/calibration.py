@@ -262,6 +262,20 @@ def validate_oof_row(
             "OOF row needs bout_id, event_id, and fold_id",
         )
     fold_kind = _normalize_fold_kind(payload.get("fold_kind"))
+    role_raw = payload.get("fold_role")
+    if role_raw is not None and str(role_raw).strip():
+        role = str(role_raw).strip().lower()
+        if role in {"holdout", "locked", "sealed"}:
+            raise CalibrationLeakageError(
+                LeakageKind.LOCKED_2025,
+                f"OOF fold_role {role!r} is locked holdout and cannot tune",
+            )
+    season_raw = payload.get("season")
+    if isinstance(season_raw, int) and season_raw == HOLDOUT_YEAR:
+        raise CalibrationLeakageError(
+            LeakageKind.LOCKED_2025,
+            f"OOF season {season_raw} is locked holdout",
+        )
     cutoff = _parse_cutoff(payload.get("test_cutoff"), field="test_cutoff")
     train_max = _parse_cutoff(
         payload.get("train_max_timestamp"), field="train_max_timestamp"

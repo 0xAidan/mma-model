@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from mma_model.backtest.engine import PrecomputedScorer, ProtocolWalkForwardScorer, run_walk_forward
+from datetime import UTC, datetime
+
+import pytest
+
+from mma_model.backtest.engine import (
+    BacktestError,
+    PrecomputedScorer,
+    ProtocolWalkForwardScorer,
+    run_walk_forward,
+)
 from mma_model.modeling.splits import protocol_fixture_cards
 from tests.backtest.helpers import CONTRACT, scores_for_small_universe, small_universe
 
@@ -35,6 +44,7 @@ def test_sealed_holdout_scores_2025_but_never_trains_on_it() -> None:
         sealed_holdout=True,
         require_target_cards=False,
         bootstrap_replicates=6,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     hold = [row for row in payload["attempts"] if row["season"] == 2025]
     assert hold
@@ -61,6 +71,7 @@ def test_protocol_pipeline_never_trains_on_2025() -> None:
         sealed_holdout=True,
         require_target_cards=False,
         bootstrap_replicates=8,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     for row in payload["attempts"]:
         pred = row.get("prediction")
@@ -74,3 +85,15 @@ def test_protocol_pipeline_never_trains_on_2025() -> None:
     if hold[0]["status"] == "predicted":
         assert hold[0]["prediction"]["train_event_ids"]
         assert "hold-2025" not in hold[0]["prediction"]["train_event_ids"]
+
+
+def test_sealed_holdout_requires_generated_at() -> None:
+    with pytest.raises(BacktestError, match="generated_at"):
+        run_walk_forward(
+            contract=CONTRACT,
+            cards=small_universe(),
+            scorer=PrecomputedScorer(scores_for_small_universe(include_holdout=True)),
+            sealed_holdout=True,
+            require_target_cards=False,
+            bootstrap_replicates=4,
+        )

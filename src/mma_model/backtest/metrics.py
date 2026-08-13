@@ -7,16 +7,17 @@ denominator. Event-block bootstrap never IID-resamples fights.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Final, Never
 
 import numpy as np
 
 from mma_model.backtest.gates import PricedScopeError
-from mma_model.domain.markets import MarketFamily
+from mma_model.domain.markets import VOID_ON_DRAW_FAMILIES, MarketFamily
 from mma_model.dwcs.classification import SeriesVariant
 from mma_model.evaluation.contract import REQUIRED_INTERVAL_LEVELS, EvaluationContract
 from mma_model.markets.settlement import SettlementResult
@@ -35,6 +36,8 @@ DEFAULT_MAX_ATTEMPT_MULTIPLIER: Final = 50
 INTERVAL_LEVELS: Final = REQUIRED_INTERVAL_LEVELS
 FLAT_STAKE_UNITS: Final = 1.0
 INITIAL_KELLY_BANKROLL: Final = 1.0
+EXACT_ROUND_OTHER_KEY: Final = "other_no_exact_round"
+VOID_ON_DRAW_FAMILY_VALUES: Final = frozenset(item.value for item in VOID_ON_DRAW_FAMILIES)
 
 
 class MetricScope(StrEnum):
@@ -101,10 +104,11 @@ class PricedBet:
     closing_ev: float | None
     expected_value: float
     p_void: float | None = None
+    block_occurrence_id: str | None = None
 
     @property
     def block_id(self) -> str:
-        return self.event_id
+        return self.block_occurrence_id or self.event_id
 
 
 @dataclass(frozen=True)
@@ -185,9 +189,13 @@ class IntervalEstimate:
     n_replicates: int
     n_rejected: int
     n_missing: int = 0
+    degenerate_single_event: bool = False
+    insufficient: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "degenerate_single_event": self.degenerate_single_event,
+            "insufficient": self.insufficient,
             "level": self.level,
             "lower": self.lower,
             "n_missing": self.n_missing,
@@ -210,6 +218,8 @@ class MarketOutcomeRow:
     line_point: float | None
     p50: float
     settlement: SettlementResult
+    draw_probability: float | None = None
+    block_occurrence_id: str | None = None
 
 
 def _ratio(numerator: float, denominator: int) -> float | None:
@@ -440,51 +450,122 @@ def _skill_block(
     }
 
 
-def per_market_outcome_metrics(rows: Sequence[MarketOutcomeRow]) -> dict[str, Any]:
-    """Log loss / Brier by market on win/loss settlements only (pushes/voids counted out)."""
-    by_family: dict[str, list[MarketOutcomeRow]] = {}
+def _market_group_key(
+    row: MarketOutcomeRow,
+) -> tuple[str, str, str, float | None]:
+    return (
+        row.block_occurrence_id or row.event_id,
+        row.bout_id,
+        row.market_family,
+        row.line_point,
+    )
+
+
+def _multiclass_log_loss(p_observed: float) -> float:
+    return -math.log(max(float(p_observed), 1e-15))
+
+
+def _multiclass_brier(distribution: Mapping[str, float], observed: str) -> float:
+    return float(
+        sum(
+            (prob - (1.0 if key == observed else 0.0)) ** 2
+            for key, prob in distribution.items()
+        )
+    )
+
+
+def _score_market_group(
+    members: Sequence[MarketOutcomeRow],
+) -> tuple[float, float] | str:
+    """Return (log_loss, brier) or an exclusion label."""
+    if not members:
+        return "unresolved"
+    family = members[0].market_family
+    settlements = {row.settlement for row in members}
+    if (
+        SettlementResult.UNRESOLVED in settlements
+        and SettlementResult.WIN not in settlements
+        and SettlementResult.LOSS not in settlements
+    ):
+        return "unresolved"
+    if family in VOID_ON_DRAW_FAMILY_VALUES:
+        if SettlementResult.VOID in settlements or SettlementResult.PUSH in settlements:
+            return "void"
+    elif SettlementResult.PUSH in settlements:
+        return "push"
+    if SettlementResult.VOID in settlements and family not in VOID_ON_DRAW_FAMILY_VALUES:
+        return "void"
+    p_draw = 0.0
+    for row in members:
+        if row.draw_probability is not None:
+            p_draw = float(row.draw_probability)
+            break
+    dist: dict[str, float] = {row.outcome_key: float(row.p50) for row in members}
+    if family == MarketFamily.MONEYLINE.value and len(dist) == 1:
+        only = next(iter(dist))
+        other = "fighter_b" if only == "fighter_a" else "fighter_a"
+        dist[other] = max(0.0, 1.0 - dist[only] - p_draw)
+    if family in VOID_ON_DRAW_FAMILY_VALUES and p_draw > 0.0:
+        remaining = 1.0 - p_draw
+        if remaining <= 0.0:
+            return "void"
+        dist = {key: value / remaining for key, value in dist.items()}
+    if family == MarketFamily.EXACT_ROUND.value:
+        mass = sum(dist.values())
+        dist[EXACT_ROUND_OTHER_KEY] = max(0.0, 1.0 - mass)
+    winners = [row.outcome_key for row in members if row.settlement is SettlementResult.WIN]
+    if len(winners) == 1:
+        observed = winners[0]
+    elif not winners and family == MarketFamily.EXACT_ROUND.value:
+        observed = EXACT_ROUND_OTHER_KEY
+    elif not winners:
+        return "unresolved"
+    else:
+        raise MetricsError(f"multiple WIN settlements in {family} group")
+    if observed not in dist:
+        return "unresolved"
+    return _multiclass_log_loss(dist[observed]), _multiclass_brier(dist, observed)
+
+
+def grouped_market_scores(
+    rows: Sequence[MarketOutcomeRow],
+) -> tuple[list[tuple[str, float, float]], dict[str, int]]:
+    """Complete-distribution scores grouped by event+bout+family+line."""
+    groups: dict[tuple[str, str, str, float | None], list[MarketOutcomeRow]] = {}
     for row in rows:
-        by_family.setdefault(row.market_family, []).append(row)
+        groups.setdefault(_market_group_key(row), []).append(row)
+    scored: list[tuple[str, float, float]] = []
+    excluded = {"push": 0, "unresolved": 0, "void": 0}
+    for key, members in groups.items():
+        result = _score_market_group(members)
+        if isinstance(result, str):
+            excluded[result] = excluded.get(result, 0) + 1
+            continue
+        scored.append((key[2], result[0], result[1]))
+    return scored, excluded
+
+
+def per_market_outcome_metrics(rows: Sequence[MarketOutcomeRow]) -> dict[str, Any]:
+    """Multiclass log loss / Brier on complete settled outcome distributions."""
+    scored, _excluded = grouped_market_scores(rows)
     payload: dict[str, Any] = {}
     families = [item.value for item in MarketFamily]
     for family in families:
-        family_rows = by_family.get(family, [])
-        scored: list[tuple[int, float]] = []
-        n_push = 0
-        n_void = 0
-        n_unresolved = 0
-        for row in family_rows:
-            if row.settlement is SettlementResult.WIN:
-                scored.append((1, float(row.p50)))
-            elif row.settlement is SettlementResult.LOSS:
-                scored.append((0, float(row.p50)))
-            elif row.settlement is SettlementResult.PUSH:
-                n_push += 1
-            elif row.settlement is SettlementResult.VOID:
-                n_void += 1
-            elif row.settlement is SettlementResult.UNRESOLVED:
-                n_unresolved += 1
-            else:
-                never_result: Never = row.settlement
-                raise MetricsError(f"unhandled settlement: {never_result!r}")
-        n_scored = len(scored)
+        family_scores = [item for item in scored if item[0] == family]
+        n_scored = len(family_scores)
         if n_scored == 0:
             log_loss = None
             brier = None
-            calib = None
         else:
-            y = [item[0] for item in scored]
-            p = [item[1] for item in scored]
-            scored_ids = {
-                SettlementResult.WIN,
-                SettlementResult.LOSS,
-            }
-            events = [
-                row.event_id for row in family_rows if row.settlement in scored_ids
-            ]
-            log_loss = binary_nll(y, p)
-            brier = binary_brier(y, p)
-            calib = binary_calibration_report(y, p, event_ids=events) if n_scored >= 1 else None
+            log_loss = sum(item[1] for item in family_scores) / n_scored
+            brier = sum(item[2] for item in family_scores) / n_scored
+        fam_rows = [row for row in rows if row.market_family == family]
+        _fam_scores, fam_excl = grouped_market_scores(fam_rows)
+        n_push = sum(1 for row in fam_rows if row.settlement is SettlementResult.PUSH)
+        n_void = sum(1 for row in fam_rows if row.settlement is SettlementResult.VOID)
+        n_unresolved = sum(
+            1 for row in fam_rows if row.settlement is SettlementResult.UNRESOLVED
+        )
         payload[family] = {
             "brier": _counted(
                 f"{family}_brier",
@@ -493,9 +574,12 @@ def per_market_outcome_metrics(rows: Sequence[MarketOutcomeRow]) -> dict[str, An
                 denominator=n_scored,
                 scope=MetricScope.ALL_PREDICTIONS,
                 unit="brier",
-                definition=f"Brier on {family} win/loss settlements; pushes/voids excluded",
+                definition=(
+                    f"Multiclass Brier on {family} complete settled distributions; "
+                    "void/push/unresolved groups excluded"
+                ),
             ).to_dict(),
-            "calibration": None if calib is None else calib.to_dict(),
+            "calibration": None,
             "log_loss": _counted(
                 f"{family}_log_loss",
                 log_loss,
@@ -503,12 +587,19 @@ def per_market_outcome_metrics(rows: Sequence[MarketOutcomeRow]) -> dict[str, An
                 denominator=n_scored,
                 scope=MetricScope.ALL_PREDICTIONS,
                 unit="nll",
-                definition=f"Log loss on {family} win/loss settlements; pushes/voids excluded",
+                definition=(
+                    f"Multiclass log loss on {family} complete settled distributions; "
+                    "void/push/unresolved groups excluded"
+                ),
             ).to_dict(),
+            "n_groups": n_scored,
             "n_push": n_push,
+            "n_push_groups": fam_excl["push"],
             "n_scored_win_loss": n_scored,
             "n_unresolved": n_unresolved,
+            "n_unresolved_groups": fam_excl["unresolved"],
             "n_void": n_void,
+            "n_void_groups": fam_excl["void"],
         }
     return payload
 
@@ -669,7 +760,9 @@ def _kelly_fraction_for_bet(bet: PricedBet) -> float:
     if bet.p_void is None or bet.p_void == 0.0:
         return quarter_kelly_fraction(bet.model_prob, bet.offered_decimal)
     return quarter_kelly_fraction_with_void(
-        bet.model_prob, bet.offered_decimal, p_void=bet.p_void
+        p_win=bet.model_prob,
+        p_void=bet.p_void,
+        offered_decimal=bet.offered_decimal,
     )
 
 
@@ -688,10 +781,11 @@ def kelly_bankroll_path(bets: Sequence[PricedBet]) -> tuple[tuple[float, ...], f
     by_event: dict[str, list[PricedBet]] = {}
     order: list[str] = []
     for bet in bets:
-        if bet.event_id not in by_event:
-            order.append(bet.event_id)
-            by_event[bet.event_id] = []
-        by_event[bet.event_id].append(bet)
+        key = bet.block_id
+        if key not in by_event:
+            order.append(key)
+            by_event[key] = []
+        by_event[key].append(bet)
     for event_id in order:
         card_start = bankroll
         card_pnl = 0.0
@@ -910,8 +1004,10 @@ def resample_event_blocks(
         return ()
     drawn = rng.choice(np.asarray(event_ids), size=len(event_ids), replace=True)
     out: list[PricedBet] = []
-    for event_id in drawn:
-        out.extend(blocks[str(event_id)])
+    for index, event_id in enumerate(drawn):
+        occurrence = f"{event_id}#{index}"
+        for bet in blocks[str(event_id)]:
+            out.append(replace(bet, block_occurrence_id=occurrence))
     return tuple(out)
 
 
@@ -955,8 +1051,25 @@ def bootstrap_betting_intervals(
     rejected_empty = 0
     n_clv_missing = 0
     n_close_ev_missing = 0
+    n_clv_rejected = 0
+    n_close_ev_rejected = 0
     attempts = 0
-    while attempts < max_attempts and len(roi_samples) < int(replicates):
+    can_clv = any(
+        bet.probability_clv is not None and not bet.is_proxy_timestamp for bet in bets
+    )
+    can_close = any(
+        bet.closing_ev is not None and not bet.is_proxy_timestamp for bet in bets
+    )
+    requested = int(replicates)
+    degenerate = n_events <= 1
+
+    def _enough() -> bool:
+        roi_ready = len(roi_samples) >= requested
+        clv_ready = (not can_clv) or len(clv_samples) >= requested
+        close_ready = (not can_close) or len(close_ev_samples) >= requested
+        return roi_ready and clv_ready and close_ready
+
+    while attempts < max_attempts and not _enough():
         attempts += 1
         drawn = resample_event_blocks(blocks, rng=rng)
         if not drawn:
@@ -966,30 +1079,34 @@ def bootstrap_betting_intervals(
         if totals.flat_1_unit_roi.value is None:
             rejected_empty += 1
             continue
-        roi_samples.append(float(totals.flat_1_unit_roi.value))
+        if len(roi_samples) < requested:
+            roi_samples.append(float(totals.flat_1_unit_roi.value))
+            dd_samples.append(
+                float(totals.maximum_drawdown.value)
+                if totals.maximum_drawdown.value is not None
+                else 0.0
+            )
+            lose_samples.append(float(totals.longest_losing_run.value or 0))
         if totals.mean_probability_clv.value is None:
             n_clv_missing += 1
-        else:
+            n_clv_rejected += 1
+        elif len(clv_samples) < requested:
             clv_samples.append(float(totals.mean_probability_clv.value))
         if totals.mean_closing_ev.value is None:
             n_close_ev_missing += 1
-        else:
+            n_close_ev_rejected += 1
+        elif len(close_ev_samples) < requested:
             close_ev_samples.append(float(totals.mean_closing_ev.value))
-        dd_samples.append(
-            float(totals.maximum_drawdown.value)
-            if totals.maximum_drawdown.value is not None
-            else 0.0
-        )
-        lose_samples.append(float(totals.longest_losing_run.value or 0))
     intervals: dict[str, dict[str, Any]] = {}
-    for metric_name, samples, n_missing, n_rejected in (
-        ("flat_1_unit_roi", roi_samples, 0, rejected_empty),
-        ("clv", clv_samples, n_clv_missing, 0),
-        ("closing_ev", close_ev_samples, n_close_ev_missing, 0),
-        ("maximum_drawdown", dd_samples, 0, rejected_empty),
-        ("longest_losing_run", lose_samples, 0, rejected_empty),
+    for metric_name, samples, n_missing, n_rejected, can_fill in (
+        ("flat_1_unit_roi", roi_samples, 0, rejected_empty, True),
+        ("clv", clv_samples, n_clv_missing, n_clv_rejected, can_clv),
+        ("closing_ev", close_ev_samples, n_close_ev_missing, n_close_ev_rejected, can_close),
+        ("maximum_drawdown", dd_samples, 0, rejected_empty, True),
+        ("longest_losing_run", lose_samples, 0, rejected_empty, True),
     ):
         metric_intervals = []
+        insufficient = can_fill and len(samples) < requested
         for level in levels:
             lower, upper = _percentile_interval(samples, level)
             metric_intervals.append(
@@ -1000,23 +1117,28 @@ def bootstrap_betting_intervals(
                     n_replicates=len(samples),
                     n_rejected=n_rejected,
                     n_missing=n_missing,
+                    degenerate_single_event=degenerate,
+                    insufficient=insufficient,
                 ).to_dict()
             )
         intervals[metric_name] = metric_intervals
     return {
         "bootstrap_unit": "event_block",
+        "degenerate_single_event": degenerate,
         "event_count": n_events,
         "event_ids": list(event_ids),
         "intervals": intervals,
         "n_rejected_empty_bets": rejected_empty,
         "n_rejected": rejected_empty,
         "n_replicates": len(roi_samples),
-        "requested_replicates": int(replicates),
+        "requested_replicates": requested,
         "seed": int(seed),
         "clv_n_replicates": len(clv_samples),
         "clv_n_missing": n_clv_missing,
+        "clv_n_rejected": n_clv_rejected,
         "closing_ev_n_replicates": len(close_ev_samples),
         "closing_ev_n_missing": n_close_ev_missing,
+        "closing_ev_n_rejected": n_close_ev_rejected,
     }
 
 
@@ -1052,9 +1174,13 @@ def bootstrap_outcome_intervals(
         drawn_ids = rng.choice(np.asarray(event_ids), size=len(event_ids), replace=True)
         drawn: list[OutcomeObservation] = []
         drawn_markets: list[MarketOutcomeRow] = []
-        for event_id in drawn_ids:
+        for index, event_id in enumerate(drawn_ids):
+            occurrence = f"{event_id}#{index}"
             drawn.extend(grouped.get(str(event_id), ()))
-            drawn_markets.extend(market_grouped.get(str(event_id), ()))
+            drawn_markets.extend(
+                replace(row, block_occurrence_id=occurrence)
+                for row in market_grouped.get(str(event_id), ())
+            )
         y, p, _events = _binary_pairs(drawn)
         if not y:
             rejected += 1
@@ -1095,45 +1221,67 @@ def bootstrap_outcome_intervals(
             )
         interval_map[name] = metric_intervals
     per_market: dict[str, Any] = {}
+    outcome_degenerate = len(event_ids) <= 1
     for family in (item.value for item in MarketFamily):
-        fam_samples: list[float] = []
+        fam_ll: list[float] = []
+        fam_brier: list[float] = []
         fam_missing = 0
         fam_attempts = 0
         rng_m = np.random.default_rng(int(seed) + 17)
-        while len(fam_samples) < int(replicates) and fam_attempts < max_attempts:
+        while (
+            (len(fam_ll) < int(replicates) or len(fam_brier) < int(replicates))
+            and fam_attempts < max_attempts
+        ):
             fam_attempts += 1
             if not event_ids:
                 break
             drawn_ids = rng_m.choice(np.asarray(event_ids), size=len(event_ids), replace=True)
             drawn_m: list[MarketOutcomeRow] = []
-            for event_id in drawn_ids:
-                drawn_m.extend(market_grouped.get(str(event_id), ()))
-            scored = [
-                row
-                for row in drawn_m
-                if row.market_family == family
-                and row.settlement in {SettlementResult.WIN, SettlementResult.LOSS}
-            ]
-            if not scored:
+            for index, event_id in enumerate(drawn_ids):
+                occurrence = f"{event_id}#{index}"
+                drawn_m.extend(
+                    replace(row, block_occurrence_id=occurrence)
+                    for row in market_grouped.get(str(event_id), ())
+                )
+            family_rows = [row for row in drawn_m if row.market_family == family]
+            scored_groups, _excl = grouped_market_scores(family_rows)
+            if not scored_groups:
                 fam_missing += 1
                 continue
-            y_m = [1 if row.settlement is SettlementResult.WIN else 0 for row in scored]
-            p_m = [float(row.p50) for row in scored]
-            fam_samples.append(binary_nll(y_m, p_m))
-        fam_intervals = []
+            if len(fam_ll) < int(replicates):
+                fam_ll.append(sum(item[1] for item in scored_groups) / len(scored_groups))
+            if len(fam_brier) < int(replicates):
+                fam_brier.append(sum(item[2] for item in scored_groups) / len(scored_groups))
+        fam_ll_intervals = []
+        fam_brier_intervals = []
         for level in levels:
-            lower, upper = _percentile_interval(fam_samples, level)
-            fam_intervals.append(
+            ll_lo, ll_hi = _percentile_interval(fam_ll, level)
+            br_lo, br_hi = _percentile_interval(fam_brier, level)
+            fam_ll_intervals.append(
                 IntervalEstimate(
                     level=level,
-                    lower=lower,
-                    upper=upper,
-                    n_replicates=len(fam_samples),
+                    lower=ll_lo,
+                    upper=ll_hi,
+                    n_replicates=len(fam_ll),
                     n_rejected=0,
                     n_missing=fam_missing,
+                    degenerate_single_event=outcome_degenerate,
+                    insufficient=len(fam_ll) < int(replicates),
                 ).to_dict()
             )
-        per_market[family] = {"log_loss": fam_intervals}
+            fam_brier_intervals.append(
+                IntervalEstimate(
+                    level=level,
+                    lower=br_lo,
+                    upper=br_hi,
+                    n_replicates=len(fam_brier),
+                    n_rejected=0,
+                    n_missing=fam_missing,
+                    degenerate_single_event=outcome_degenerate,
+                    insufficient=len(fam_brier) < int(replicates),
+                ).to_dict()
+            )
+        per_market[family] = {"brier": fam_brier_intervals, "log_loss": fam_ll_intervals}
     return {
         "bootstrap_unit": "event_block",
         "event_count": len(event_ids),
@@ -1204,10 +1352,13 @@ def breakdowns(
             if family == market
         )
         m_outcomes = tuple(row for row in market_rows if row.market_family == market)
+        market_outcome = per_market_outcome_metrics(m_outcomes).get(market, {})
         payload["markets"][market] = {
             "betting": betting_metrics(m_bets, n_threshold_only=m_threshold).to_dict(),
+            "n_priced_selections": len(m_bets),
             "n_threshold_selections": m_threshold,
-            "outcome": per_market_outcome_metrics(m_outcomes).get(market, {}),
+            "n_outcome_groups": market_outcome.get("n_groups", 0),
+            "outcome": market_outcome,
         }
     sources = sorted(
         {
@@ -1222,12 +1373,16 @@ def breakdowns(
             if f"{bet.source_kind}:{bet.provider or ''}:{bet.bookmaker_key or ''}"
             == source
         )
+        source_betting = betting_metrics(s_bets, n_threshold_only=0)
         payload["sources"][source] = {
-            "betting": betting_metrics(s_bets, n_threshold_only=0).to_dict(),
+            "betting": source_betting.to_dict(),
             "n_priced_selections": len(s_bets),
+            "n_threshold_selections": 0,
+            "n_settled": source_betting.turnover.denominator,
         }
     payload["sources"]["threshold_only"] = {
         "n_threshold_selections": n_threshold_only,
+        "n_priced_selections": 0,
         "betting": betting_metrics((), n_threshold_only=n_threshold_only).to_dict(),
     }
     payload["n_threshold_only_top"] = n_threshold_only
@@ -1296,6 +1451,31 @@ def assert_breakdowns_reconcile(
         raise MetricsError(
             f"outcome market slices {outcome_family_sum} != {n_outcome}"
         )
+    year_priced = sum(
+        _selection_priced_count(tuple(row for row in attempts if row.season == year))
+        for year in {row.season for row in attempts}
+    )
+    if year_priced != n_bets:
+        raise MetricsError(f"year priced selections {year_priced} != priced bets {n_bets}")
+    year_threshold = sum(
+        _selection_threshold_count(tuple(row for row in attempts if row.season == year))
+        for year in {row.season for row in attempts}
+    )
+    if year_threshold != n_threshold:
+        raise MetricsError(
+            f"year threshold selections {year_threshold} != {n_threshold}"
+        )
+    source_priced = sum(
+        1
+        for _source in {
+            f"{bet.source_kind}:{bet.provider or ''}:{bet.bookmaker_key or ''}"
+            for bet in bets
+        }
+        for bet in bets
+        if f"{bet.source_kind}:{bet.provider or ''}:{bet.bookmaker_key or ''}" == _source
+    )
+    if source_priced != n_bets:
+        raise MetricsError(f"source priced slices {source_priced} != priced bets {n_bets}")
 
 
 def expected_value_for_row(model_prob: float, offered_decimal: float) -> float:

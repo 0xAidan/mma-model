@@ -26,6 +26,7 @@ from mma_model.backtest.metrics import (
     DEFAULT_BACKTEST_BOOTSTRAP_REPLICATES,
     DEFAULT_BACKTEST_BOOTSTRAP_SEED,
 )
+from mma_model.domain.markets import VOID_ON_DRAW_FAMILIES, MarketFamily
 from mma_model.dwcs.classification import SeriesVariant
 from mma_model.evaluation.contract import EvaluationContract
 from mma_model.features.as_of import cutoff_for_event
@@ -93,6 +94,7 @@ class _OofRecord:
     bout_id: str
     event_id: str
     season: int
+    fold_role: str
     fold_id: str
     fold_kind: str
     test_cutoff: datetime
@@ -369,7 +371,9 @@ class SnapshotWalkForwardScorer:
                 "event_id": record.event_id,
                 "fold_id": record.fold_id,
                 "fold_kind": record.fold_kind,
+                "fold_role": record.fold_role,
                 "model_id": record.model_id,
+                "season": record.season,
                 "test_cutoff": record.test_cutoff.isoformat(),
                 "train_event_ids": train_ids,
                 "train_event_ids_hash": sha256_canonical({"train_event_ids": train_ids}),
@@ -567,6 +571,7 @@ class SnapshotWalkForwardScorer:
                 atoms = calibrator.apply_logits(
                     hazard, decision, scheduled_rounds=rounds_n
                 )
+                p_draw = float(atoms.get("draw", 0.0))
                 for market in markets_from_joint(atoms, scheduled_rounds=rounds_n):
                     if not market.available or not market.outcome_key:
                         continue
@@ -574,7 +579,11 @@ class SnapshotWalkForwardScorer:
                         f"{bout_id}|"
                         f"{_selection_id(market.family, market.outcome_key, market.line_point)}"
                     )
-                    out[key] = float(market.p50)
+                    p_sel = float(market.p50)
+                    family = MarketFamily(market.family)
+                    if family in VOID_ON_DRAW_FAMILIES and 0.0 < p_draw < 1.0:
+                        p_sel = p_sel / (1.0 - p_draw)
+                    out[key] = p_sel
             return out
 
         try:
@@ -856,6 +865,7 @@ class SnapshotWalkForwardScorer:
                     bout_id=bout_id,
                     event_id=group.event_id,
                     season=group.season,
+                    fold_role=group.role.value,
                     fold_id=fold.fold_id,
                     fold_kind=fold_kind,
                     test_cutoff=group.cutoff.cutoff,
@@ -886,6 +896,7 @@ class SnapshotWalkForwardScorer:
                         bout_id=prediction.bout_id,
                         event_id=group.event_id,
                         season=group.season,
+                        fold_role=group.role.value,
                         fold_id=fold.fold_id,
                         fold_kind=fold_kind,
                         test_cutoff=group.cutoff.cutoff,
@@ -908,6 +919,7 @@ class SnapshotWalkForwardScorer:
                     bout_id=prediction.bout_id,
                     event_id=group.event_id,
                     season=group.season,
+                    fold_role=group.role.value,
                     fold_id=fold.fold_id,
                     fold_kind=fold_kind,
                     test_cutoff=group.cutoff.cutoff,

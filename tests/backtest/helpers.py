@@ -96,13 +96,15 @@ def make_prediction(
 ) -> BoutPrediction:
     p_a = min(max(p_a, 1e-15), 1.0 - 1e-15)
     p_b = 1.0 - p_a
+    if p25 is not None:
+        p25 = min(float(p25), p_a)
     if markets is None:
         markets = moneyline_markets(
             p_a=p_a,
             p_b=p_b,
             p_draw=0.0,
             p25=p25,
-            p75=None if p25 is None else min(0.99, float(p25) + 0.08),
+            p75=None if p25 is None else min(0.99, max(p_a, float(p25) + 0.08)),
             fallback_reason="m1_moneyline_fallback",
         )
     return BoutPrediction(

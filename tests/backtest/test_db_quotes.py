@@ -12,9 +12,11 @@ import mma_model.db.tables.core  # noqa: F401
 import mma_model.db.tables.identity  # noqa: F401
 import mma_model.db.tables.odds  # noqa: F401
 from mma_model.backtest.engine import (
+    PrecomputedScorer,
     facts_from_snapshot,
     join_quote,
     quote_candidate_from_loaded,
+    run_walk_forward,
 )
 from mma_model.backtest.quotes import load_quotes_at_cutoff, select_closing_row
 from mma_model.db.base import Base
@@ -42,6 +44,15 @@ from mma_model.odds.types import (
     NormalizedQuote,
     OddsEvent,
     QuoteAvailability,
+)
+from mma_model.value.evidence import PriceObservationRole
+from tests.backtest.helpers import (
+    CONTRACT,
+    decisive_facts,
+    later_dev_card,
+    make_prediction,
+    make_score,
+    two_bout_dev_card,
 )
 
 START = datetime(2017, 7, 11, 19, 0, tzinfo=UTC)
@@ -374,3 +385,99 @@ def test_db_replacement_and_ambiguous_quotes_are_blocked(tmp_path: Path) -> None
     assert all(not row.eligible for row in amb_rows)
     if amb_rows:
         assert amb_rows[0].eligibility_reason != QuoteBlockReason.NONE.value
+
+
+def test_db_closing_quote_produces_clv_through_walk_forward(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _seed_bout(
+        session,
+        bout_id="2017-a",
+        event_id="dev-2017",
+        fighter_a="Alpha One",
+        fighter_b="Bravo Two",
+        start=START,
+    )
+    session.commit()
+    _append_quote(
+        session,
+        external_id="prov-clv",
+        home="Alpha One",
+        away="Bravo Two",
+        commence=START,
+        observed_at=CUTOFF - timedelta(minutes=30),
+        price_decimal=2.20,
+        raw_ref="open-clv",
+    )
+    _append_quote(
+        session,
+        external_id="prov-clv",
+        home="Alpha One",
+        away="Bravo Two",
+        commence=START,
+        observed_at=CUTOFF + timedelta(minutes=10),
+        price_decimal=1.90,
+        raw_ref="close-clv",
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-clv",
+        home_team="Alpha One",
+        away_team="Bravo Two",
+        commence_time=START,
+    )
+    assert decision.status == MATCH_STATUS_MATCHED
+    persist_match_decision(session, decision, observed_at=CUTOFF - timedelta(minutes=10))
+    session.commit()
+    rows = load_quotes_at_cutoff(
+        session,
+        bout_ids=("2017-a",),
+        cutoff=CUTOFF,
+        event_start=START,
+    )
+    eligible = [row for row in rows if row.eligible]
+    assert eligible
+    opening = max(eligible, key=lambda row: (row.quote.observed_at, int(row.quote.id or 0)))
+    closing = select_closing_row(session, opening=opening, event_start=START)
+    assert closing is not None
+    assert closing.quote_evidence is not None
+    assert closing.quote_evidence.price_role is PriceObservationRole.CLOSING
+    assert opening.quote_evidence is not None
+    assert opening.quote_evidence.price_role is PriceObservationRole.OPENING
+    candidate = quote_candidate_from_loaded(opening, closing=closing)
+    payload = run_walk_forward(
+        contract=CONTRACT,
+        cards=(two_bout_dev_card(), later_dev_card()),
+        scorer=PrecomputedScorer(
+            {
+                "dev-2017": make_score(
+                    "dev-2017",
+                    (
+                        make_prediction(
+                            "2017-a",
+                            "dev-2017",
+                            p_a=0.62,
+                            p25=0.55,
+                            estimator_hash="e",
+                        ),
+                    ),
+                    estimator_hash="e",
+                )
+            }
+        ),
+        quotes=(candidate,),
+        settlement_facts={"2017-a": decisive_facts("a")},
+        require_target_cards=False,
+        bootstrap_replicates=6,
+    )
+    priced = next(
+        item
+        for row in payload["attempts"]
+        if row["bout_id"] == "2017-a"
+        for item in row["priced_rows"]
+        if item["outcome_key"] == "fighter_a"
+    )
+    assert priced["probability_clv"] is not None
+    assert priced["closing_ev"] is not None
+    assert priced.get("reason") in {None, "none", "ok"} or priced["available"] is True

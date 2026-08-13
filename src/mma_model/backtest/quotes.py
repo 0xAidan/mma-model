@@ -103,6 +103,7 @@ def _resolve_row(
     cutoff: datetime,
     event_start: datetime,
     stale_after: int,
+    price_role: PriceObservationRole,
 ) -> LoadedQuoteRow | None:
     cutoff = ensure_utc(cutoff)
     event_start = ensure_utc(event_start)
@@ -130,7 +131,7 @@ def _resolve_row(
         evidence = quote_evidence_from_row(
             quote,
             eligibility=eligibility,
-            price_role=PriceObservationRole.OPENING,
+            price_role=price_role,
         )
     except (IneligiblePriceError, InvalidOddsError):
         evidence = None
@@ -206,6 +207,7 @@ def load_quotes_at_cutoff(
                 cutoff=cutoff,
                 event_start=event_start,
                 stale_after=stale_after,
+                price_role=PriceObservationRole.OPENING,
             )
             if row is None:
                 continue
@@ -288,6 +290,7 @@ def select_closing_row(
         cutoff=ensure_utc(chosen.observed_at),
         event_start=event_start,
         stale_after=stale_after,
+        price_role=PriceObservationRole.CLOSING,
     )
     if resolved is None or not resolved.eligible:
         return None

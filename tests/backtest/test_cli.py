@@ -78,3 +78,27 @@ def test_cli_rejects_protocol_and_from_manifest(capsys) -> None:
     )
     assert code == EXIT_INTERNAL
     assert "not both" in capsys.readouterr().out
+
+
+def test_cli_expected_data_hash_mismatch(tmp_path: Path, capsys) -> None:
+    code = main(
+        [
+            "backtest",
+            "run",
+            "--contract",
+            "config/evaluation/dwcs_v1.json",
+            "--fixture",
+            "protocol",
+            "--output",
+            str(tmp_path),
+            "--bootstrap-replicates",
+            "8",
+            "--generated-at",
+            "2026-08-13T16:00:00+00:00",
+            "--expected-data-hash",
+            "0" * 64,
+        ]
+    )
+    assert code == EXIT_INTERNAL
+    text = capsys.readouterr().out.lower()
+    assert "hash" in text

@@ -586,7 +586,25 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument(
         "--generated-at",
         default=None,
-        help="Optional explicit UTC timestamp stored but excluded from content hash",
+        help=(
+            "Explicit UTC timestamp hashed with evidence. "
+            "Required for --sealed-holdout; wall clock is never used"
+        ),
+    )
+    p_run.add_argument(
+        "--expected-data-hash",
+        default=None,
+        help="Independent expected source-data hash; mismatch fails the run",
+    )
+    p_run.add_argument(
+        "--expected-model-hash",
+        default=None,
+        help="Independent expected per-card estimator hash digest",
+    )
+    p_run.add_argument(
+        "--expected-calibration-hash",
+        default=None,
+        help="Independent expected per-card calibrator hash digest",
     )
 
     p_source = sub.add_parser("source", help="Source adapter utilities")
@@ -1657,6 +1675,11 @@ def main(argv: list[str] | None = None) -> int:
                     bootstrap_seed=int(args.bootstrap_seed),
                     generated_at=generated_at,
                     default_database_url=get_settings().mma_database_url,
+                    expected_data_hash=getattr(args, "expected_data_hash", None),
+                    expected_model_hash=getattr(args, "expected_model_hash", None),
+                    expected_calibration_hash=getattr(
+                        args, "expected_calibration_hash", None
+                    ),
                 )
             except EvaluationContractError as exc:
                 print(f"evaluation contract error: {exc}")

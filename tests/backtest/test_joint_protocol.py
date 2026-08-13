@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from mma_model.backtest.engine import ProtocolWalkForwardScorer, run_walk_forward
 from mma_model.backtest.walk_forward_scorer import JointProtocolWalkForwardScorer
 from mma_model.domain.markets import MarketFamily
@@ -23,6 +25,7 @@ def test_joint_protocol_later_card_uses_one_calibrated_estimator() -> None:
         require_target_cards=False,
         bootstrap_replicates=4,
         bootstrap_seed=306001,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     joint_rows = [
         row
@@ -73,6 +76,18 @@ def test_joint_protocol_later_card_uses_one_calibrated_estimator() -> None:
     )
     assert abs(ml_a["p50"] - p_a) < 1e-8
     assert abs(ml_b["p50"] - p_b) < 1e-8
+    method_row = next(
+        item
+        for item in sample["markets"]
+        if item["family"] == MarketFamily.METHOD.value and item["available"]
+    )
+    assert method_row["draw_probability"] == p_draw
+    fbm_row = next(
+        item
+        for item in sample["markets"]
+        if item["family"] == MarketFamily.FIGHTER_BY_METHOD.value and item["available"]
+    )
+    assert fbm_row["draw_probability"] == p_draw
     assert ml_a["p25"] is not None
     assert ml_b["p25"] is not None
     totals = [
@@ -98,6 +113,7 @@ def test_m1_protocol_is_fallback_not_multi_market_proof() -> None:
         sealed_holdout=True,
         require_target_cards=False,
         bootstrap_replicates=4,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     predicted = [row for row in payload["attempts"] if row.get("prediction") is not None]
     assert predicted

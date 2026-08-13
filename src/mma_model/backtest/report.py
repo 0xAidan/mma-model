@@ -36,7 +36,7 @@ def canonical_dumps(payload: Mapping[str, Any]) -> str:
 
 
 def hashed_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy payload without generated_at (and without content_hash itself)."""
+    """Copy payload without content_hash. generated_at is hashed when present."""
     return {
         key: value
         for key, value in payload.items()

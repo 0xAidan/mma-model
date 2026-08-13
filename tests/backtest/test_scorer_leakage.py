@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,7 +13,7 @@ from mma_model.features.snapshot import SnapshotBout, SnapshotEvent, SnapshotRes
 from mma_model.labels.outcomes import WinnerSide
 from mma_model.modeling.baselines import protocol_training_universe
 from mma_model.modeling.splits import group_cards, protocol_fixture_cards
-from tests.backtest.helpers import CONTRACT, make_card
+from tests.backtest.helpers import CONTRACT, make_card, make_quote
 
 
 def test_ufc_310_season_metadata_blocks_holdout_train() -> None:
@@ -138,14 +138,17 @@ def test_two_sealed_2025_cards_do_not_use_first_outcome() -> None:
 
 def test_real_scorer_future_event_does_not_change_prior_card_hashes() -> None:
     cards, snapshot, _odds = protocol_training_universe()
-    early = tuple(card for card in cards if card.scheduled_start_at.year < 2024)
+    target = next(card for card in cards if card.event_id == "dev-2023")
+    prior = tuple(
+        card for card in cards if card.scheduled_start_at <= target.scheduled_start_at
+    )
     stamp = datetime(2026, 2, 1, tzinfo=UTC)
     first = run_walk_forward(
         contract=CONTRACT,
-        cards=early,
+        cards=prior,
         scorer=SnapshotWalkForwardScorer(
             snapshot=snapshot,
-            eval_event_ids=frozenset(card.event_id for card in early),
+            eval_event_ids=frozenset(card.event_id for card in prior),
             contract=CONTRACT,
             bootstrap_replicates=4,
             bootstrap_seed=306001,
@@ -155,7 +158,9 @@ def test_real_scorer_future_event_does_not_change_prior_card_hashes() -> None:
         bootstrap_seed=306001,
         generated_at=stamp,
     )
-    future_start = datetime(2023, 12, 1, 2, 0, tzinfo=UTC)
+    target_first = next(row for row in first["attempts"] if row["event_id"] == "dev-2023")
+    assert target_first.get("prediction") is not None
+    future_start = target.scheduled_start_at + timedelta(days=45)
     snapshot.events.append(
         SnapshotEvent(
             event_id="future-2023b",
@@ -203,12 +208,18 @@ def test_real_scorer_future_event_does_not_change_prior_card_hashes() -> None:
             method="U-DEC",
             ending_round=3,
             time_str="5:00",
-            effective_at=datetime(2024, 1, 1, tzinfo=UTC),
-            observed_at=datetime(2024, 1, 1, tzinfo=UTC),
+            effective_at=future_start,
+            observed_at=future_start,
         )
     )
+    future_quote = make_quote(
+        "future-a",
+        observed_at=future_start - timedelta(minutes=90),
+        price=2.15,
+        quote_id=99,
+    )
     future_card = make_card("future-2023b", future_start, ("future-a",))
-    full = early + (future_card,)
+    full = prior + (future_card,)
     second = run_walk_forward(
         contract=CONTRACT,
         cards=full,
@@ -219,13 +230,15 @@ def test_real_scorer_future_event_does_not_change_prior_card_hashes() -> None:
             bootstrap_replicates=4,
             bootstrap_seed=306001,
         ),
+        quotes=(future_quote,),
         require_target_cards=False,
         bootstrap_replicates=4,
         bootstrap_seed=306001,
         generated_at=stamp,
     )
-    for event_id in ("dev-2017", "brazil-2018"):
-        assert first["card_output_hashes"][event_id] == second["card_output_hashes"][event_id]
+    target_second = next(row for row in second["attempts"] if row["event_id"] == "dev-2023")
+    assert target_first["prediction"] == target_second["prediction"]
+    assert first["card_output_hashes"]["dev-2023"] == second["card_output_hashes"]["dev-2023"]
 
 
 def test_same_generated_at_is_byte_identical() -> None:
