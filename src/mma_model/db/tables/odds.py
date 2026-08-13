@@ -305,6 +305,10 @@ class OddsManualPriceObservation(Base):
             "length(trim(region)) > 0",
             name="ck_odds_manual_region_nonempty",
         ),
+        CheckConstraint(
+            "length(trim(selection_identity)) > 0",
+            name="ck_odds_manual_selection_identity_nonempty",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -329,6 +333,6 @@ class OddsManualPriceObservation(Base):
     event_external_id: Mapped[str | None] = mapped_column(
         String(128), nullable=True, index=True
     )
-    settlement_identity: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    selection_identity: Mapped[str] = mapped_column(String(200), nullable=False)
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

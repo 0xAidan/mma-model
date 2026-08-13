@@ -17,10 +17,12 @@ from mma_model.db.odds_guards import install_odds_sqlite_guards
 from mma_model.db.session import sqlite_connect_pragmas
 from mma_model.db.tables.odds import OddsManualPriceObservation
 from mma_model.domain.markets import (
+    V1_MARKET_FAMILIES,
     MarketFamily,
     MarketMaturity,
     OutcomeKey,
     RecommendationState,
+    catalog_for_family,
 )
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.bookmaker_keys import is_bet365_bookmaker_key
@@ -30,6 +32,7 @@ from mma_model.odds.manual_price import (
     LineLifecycleState,
     ObservedPrice,
     PriceSourceKind,
+    canonical_selection_identity,
     compute_exact_ev,
     parse_manual_price_observation,
 )
@@ -375,14 +378,16 @@ def test_manual_price_maps_canonical_identity_fields() -> None:
             "observed_at": "2026-08-12T18:00:00Z",
             "source_updated_at": "2026-08-12T17:55:00Z",
             "event_external_id": "evt-123",
-            "settlement_identity": "totals:over:2.5",
+            "selection_identity": "totals:over:2.5",
         }
     )
     assert observed.source_kind is PriceSourceKind.USER_OBSERVED
     assert observed.attempted_provider is None
     assert observed.line_point == pytest.approx(2.5)
     assert observed.observed_at == OBSERVED
+    assert observed.selection_identity == "totals:over:2.5"
     assert observed.as_identity_dict()["attempted_provider"] is None
+    assert observed.as_identity_dict()["selection_identity"] == "totals:over:2.5"
 
 
 def test_parser_rejects_price_on_non_available_and_prior_price() -> None:
@@ -507,7 +512,7 @@ def test_observed_price_normalizes_non_utc_aware_datetimes() -> None:
         observed_at=raw,
         source_updated_at=raw,
         event_external_id=None,
-        settlement_identity=None,
+        selection_identity=None,
     )
     assert obs.observed_at.tzinfo == UTC
     assert obs.observed_at == datetime(2026, 8, 12, 18, 0, tzinfo=UTC)
@@ -553,11 +558,12 @@ def test_raw_sql_rejects_invalid_manual_selection_and_entitlement(tmp_path: Path
                     INSERT INTO odds_manual_price_observations (
                       dedupe_key, source_kind, automated, bookmaker_key, region,
                       market_family, outcome_key, line_point, price_decimal, lifecycle,
-                      attempted_provider, observed_at, created_at
+                      attempted_provider, selection_identity, observed_at, created_at
                     ) VALUES (
                       'bad-family', 'user_observed', 0, 'bk', 'us',
                       'moneyline', 'over', NULL, 2.0, 'available',
-                      NULL, '2026-08-12T18:00:00+00:00', '2026-08-12T18:00:00+00:00'
+                      NULL, 'moneyline:over', '2026-08-12T18:00:00+00:00',
+                      '2026-08-12T18:00:00+00:00'
                     )
                     """
             )
@@ -569,11 +575,12 @@ def test_raw_sql_rejects_invalid_manual_selection_and_entitlement(tmp_path: Path
                     INSERT INTO odds_manual_price_observations (
                       dedupe_key, source_kind, automated, bookmaker_key, region,
                       market_family, outcome_key, line_point, price_decimal, lifecycle,
-                      attempted_provider, observed_at, created_at
+                      attempted_provider, selection_identity, observed_at, created_at
                     ) VALUES (
                       'bad-line', 'user_observed', 0, 'bk', 'us',
                       'totals', 'over', 3.5, 1.91, 'available',
-                      NULL, '2026-08-12T18:00:00+00:00', '2026-08-12T18:00:00+00:00'
+                      NULL, 'totals:over:3.5', '2026-08-12T18:00:00+00:00',
+                      '2026-08-12T18:00:00+00:00'
                     )
                     """
             )
@@ -585,11 +592,12 @@ def test_raw_sql_rejects_invalid_manual_selection_and_entitlement(tmp_path: Path
                     INSERT INTO odds_manual_price_observations (
                       dedupe_key, source_kind, automated, bookmaker_key, region,
                       market_family, outcome_key, line_point, price_decimal, lifecycle,
-                      attempted_provider, observed_at, created_at
+                      attempted_provider, selection_identity, observed_at, created_at
                     ) VALUES (
                       'entitlement-missing-provider', 'user_observed', 0, 'bk', 'us',
                       'moneyline', 'fighter_a', NULL, NULL, 'entitlement_failed',
-                      NULL, '2026-08-12T18:00:00+00:00', '2026-08-12T18:00:00+00:00'
+                      NULL, 'moneyline:fighter_a', '2026-08-12T18:00:00+00:00',
+                      '2026-08-12T18:00:00+00:00'
                     )
                     """
             )
@@ -601,11 +609,12 @@ def test_raw_sql_rejects_invalid_manual_selection_and_entitlement(tmp_path: Path
                 INSERT INTO odds_manual_price_observations (
                   dedupe_key, source_kind, automated, bookmaker_key, region,
                   market_family, outcome_key, line_point, price_decimal, lifecycle,
-                  attempted_provider, observed_at, created_at
+                  attempted_provider, selection_identity, observed_at, created_at
                 ) VALUES (
                   'entitlement-ok', 'user_observed', 0, 'bk', 'us',
                   'moneyline', 'fighter_a', NULL, NULL, 'entitlement_failed',
-                  'opticodds', '2026-08-12T18:00:00+00:00', '2026-08-12T18:00:00+00:00'
+                  'opticodds', 'moneyline:fighter_a',
+                  '2026-08-12T18:00:00+00:00', '2026-08-12T18:00:00+00:00'
                 )
                 """
             )
@@ -703,7 +712,7 @@ def test_manual_user_observed_bet365_may_claim_label(bookmaker_key: str) -> None
         observed_at=OBSERVED,
         source_updated_at=None,
         event_external_id="manual-bet365",
-        settlement_identity=None,
+        selection_identity=None,
     )
     guidance = build_price_guidance(
         family=MarketFamily.MONEYLINE,
@@ -736,7 +745,7 @@ def test_manual_bet365fake_does_not_claim_bet365() -> None:
         observed_at=OBSERVED,
         source_updated_at=None,
         event_external_id="manual-fake",
-        settlement_identity=None,
+        selection_identity=None,
     )
     guidance = build_price_guidance(
         family=MarketFamily.MONEYLINE,
@@ -903,3 +912,254 @@ def test_cli_record_manual_rejects_locked_with_price(tmp_path: Path, capsys) -> 
     )
     assert code == 2
     assert "price_decimal" in capsys.readouterr().out
+
+
+def test_parser_rejects_reserved_provenance_fields() -> None:
+    base = {
+        "bookmaker_key": "fanduel",
+        "region": "us",
+        "market_family": "moneyline",
+        "outcome_key": "fighter_a",
+        "price_decimal": 1.91,
+        "observed_at": "2026-08-12T18:00:00Z",
+    }
+    with pytest.raises(ValueError, match="reserved field 'source_kind'"):
+        parse_manual_price_observation({**base, "source_kind": "reference_provider"})
+    with pytest.raises(ValueError, match="reserved field 'automated'"):
+        parse_manual_price_observation({**base, "automated": True})
+    with pytest.raises(ValueError, match="provider is only valid"):
+        parse_manual_price_observation({**base, "provider": "the_odds_api"})
+    with pytest.raises(ValueError, match="settlement_identity is not accepted"):
+        parse_manual_price_observation(
+            {**base, "settlement_identity": "moneyline:fighter_a"}
+        )
+
+
+def test_parser_entitlement_provider_alias_and_conflict() -> None:
+    ok = parse_manual_price_observation(
+        {
+            "bookmaker_key": "bet365",
+            "region": "uk",
+            "market_family": "moneyline",
+            "outcome_key": "fighter_a",
+            "lifecycle": "entitlement_failed",
+            "provider": "opticodds",
+            "observed_at": "2026-08-12T18:00:00Z",
+        }
+    )
+    assert ok.attempted_provider == "opticodds"
+    assert ok.source_kind is PriceSourceKind.USER_OBSERVED
+    assert ok.provider is None
+    assert ok.selection_identity == "moneyline:fighter_a"
+
+    matching = parse_manual_price_observation(
+        {
+            "bookmaker_key": "bet365",
+            "region": "uk",
+            "market_family": "moneyline",
+            "outcome_key": "fighter_a",
+            "lifecycle": "entitlement_failed",
+            "provider": "opticodds",
+            "attempted_provider": "opticodds",
+            "observed_at": "2026-08-12T18:00:00Z",
+        }
+    )
+    assert matching.attempted_provider == "opticodds"
+
+    with pytest.raises(ValueError, match="conflicting provider"):
+        parse_manual_price_observation(
+            {
+                "bookmaker_key": "bet365",
+                "region": "uk",
+                "market_family": "moneyline",
+                "outcome_key": "fighter_a",
+                "lifecycle": "entitlement_failed",
+                "provider": "opticodds",
+                "attempted_provider": "sportsgameodds",
+                "observed_at": "2026-08-12T18:00:00Z",
+            }
+        )
+
+
+def test_canonical_selection_identity_all_families_and_mismatch() -> None:
+    for family in V1_MARKET_FAMILIES:
+        catalog = catalog_for_family(family)
+        for outcome in catalog.outcomes:
+            lines = catalog.line_points if catalog.requires_line_point() else (None,)
+            for line in lines:
+                expected = canonical_selection_identity(family, outcome, line)
+                if line is None:
+                    assert expected == f"{family.value}:{outcome.value}"
+                else:
+                    assert expected == f"{family.value}:{outcome.value}:{float(line)}"
+                obs = ObservedPrice(
+                    source_kind=PriceSourceKind.USER_OBSERVED,
+                    automated=False,
+                    provider=None,
+                    bookmaker_key="bk",
+                    bookmaker_title=None,
+                    region="us",
+                    market_family=family,
+                    outcome_key=outcome,
+                    line_point=line,
+                    price_decimal=1.91,
+                    lifecycle=LineLifecycleState.AVAILABLE,
+                    observed_at=OBSERVED,
+                    source_updated_at=None,
+                    event_external_id=None,
+                )
+                assert obs.selection_identity == expected
+
+    with pytest.raises(ValueError, match="selection_identity mismatch"):
+        ObservedPrice(
+            source_kind=PriceSourceKind.USER_OBSERVED,
+            automated=False,
+            provider=None,
+            bookmaker_key="bk",
+            bookmaker_title=None,
+            region="us",
+            market_family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            line_point=None,
+            price_decimal=1.91,
+            lifecycle=LineLifecycleState.AVAILABLE,
+            observed_at=OBSERVED,
+            source_updated_at=None,
+            event_external_id=None,
+            selection_identity="moneyline:fighter_b",
+        )
+
+
+def test_selection_identity_persists_in_store(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    store = OddsQuoteStore(session)
+    observed = parse_manual_price_observation(
+        {
+            "bookmaker_key": "draftkings",
+            "region": "us",
+            "market_family": "totals",
+            "outcome_key": "under",
+            "line_point": 1.5,
+            "price_decimal": 1.95,
+            "observed_at": "2026-08-12T18:00:00Z",
+        }
+    )
+    assert observed.selection_identity == "totals:under:1.5"
+    store.append_manual_prices([observed])
+    session.commit()
+    row = session.scalars(select(OddsManualPriceObservation)).one()
+    assert row.selection_identity == "totals:under:1.5"
+    assert row.market_family == "totals"
+    assert row.outcome_key == "under"
+    assert row.line_point == pytest.approx(1.5)
+
+
+def test_source_updated_at_must_not_exceed_observed_at() -> None:
+    with pytest.raises(ValueError, match="source_updated_at must be <="):
+        ObservedPrice(
+            source_kind=PriceSourceKind.USER_OBSERVED,
+            automated=False,
+            provider=None,
+            bookmaker_key="bk",
+            bookmaker_title=None,
+            region="us",
+            market_family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            line_point=None,
+            price_decimal=1.91,
+            lifecycle=LineLifecycleState.AVAILABLE,
+            observed_at=OBSERVED,
+            source_updated_at=OBSERVED + timedelta(seconds=1),
+            event_external_id=None,
+        )
+
+    eastern = timezone(timedelta(hours=-4))
+    # 14:01 EDT = 18:01 UTC > 18:00 UTC observed
+    with pytest.raises(ValueError, match="source_updated_at must be <="):
+        ObservedPrice(
+            source_kind=PriceSourceKind.USER_OBSERVED,
+            automated=False,
+            provider=None,
+            bookmaker_key="bk",
+            bookmaker_title=None,
+            region="us",
+            market_family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            line_point=None,
+            price_decimal=1.91,
+            lifecycle=LineLifecycleState.AVAILABLE,
+            observed_at=OBSERVED,
+            source_updated_at=datetime(2026, 8, 12, 14, 1, tzinfo=eastern),
+            event_external_id=None,
+        )
+
+    with pytest.raises(ValueError, match="source_updated_at must be <="):
+        ObservedPrice.from_reference_quote(
+            provider="the_odds_api",
+            bookmaker_key="fanduel",
+            bookmaker_title="FanDuel",
+            region="us",
+            market_family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            price_decimal=1.95,
+            observed_at=OBSERVED,
+            source_updated_at=OBSERVED + timedelta(minutes=5),
+        )
+
+
+def test_prob_ev_positive_must_be_unit_interval() -> None:
+    with pytest.raises(PriceGuidanceSelectionError, match="prob_ev_positive"):
+        build_price_guidance(
+            family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            maturity=MarketMaturity.QUALIFIED,
+            p50=0.55,
+            p25=0.50,
+            gates_pass=True,
+            prob_ev_positive=1.5,
+        )
+    with pytest.raises(PriceGuidanceSelectionError, match="prob_ev_positive"):
+        build_price_guidance(
+            family=MarketFamily.MONEYLINE,
+            outcome_key=OutcomeKey.FIGHTER_A,
+            maturity=MarketMaturity.QUALIFIED,
+            p50=0.55,
+            p25=0.50,
+            gates_pass=True,
+            prob_ev_positive=-0.01,
+        )
+
+
+def test_cli_rejects_reserved_provenance_relabel(tmp_path: Path, capsys) -> None:
+    from mma_model.cli import main
+
+    obs = tmp_path / "bad-prov.json"
+    obs.write_text(
+        json.dumps(
+            {
+                "bookmaker_key": "fanduel",
+                "region": "us",
+                "market_family": "moneyline",
+                "outcome_key": "fighter_a",
+                "price_decimal": 1.91,
+                "observed_at": "2026-08-12T18:00:00Z",
+                "source_kind": "reference_provider",
+                "automated": True,
+                "provider": "the_odds_api",
+            }
+        ),
+        encoding="utf-8",
+    )
+    code = main(
+        [
+            "odds",
+            "record-manual-price",
+            "--observation-json",
+            str(obs),
+            "--database-url",
+            f"sqlite:///{tmp_path / 'cli-prov.db'}",
+        ]
+    )
+    assert code == 2
+    out = capsys.readouterr().out
+    assert "reserved field" in out or "provider is only valid" in out

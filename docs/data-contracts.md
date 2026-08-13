@@ -263,8 +263,10 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 | **Guidance** | `mma_model.odds.price_guidance` — catalog-validated selection; observation must match family/outcome/line; fair / actionable / strong-value for qualified unpriced rows |
 | **Exact EV** | Only when an available observed price exists on a qualified + gates-pass selection (`compute_exact_ev`); never synthetic ROI/CLV |
 | **Lifecycle** | Explicit `available` / `unknown` / `suspended` / `locked` / `removed` / `entitlement_failed` — no forward-fill; `attempted_provider` required for entitlement failures |
-| **Storage** | `odds_manual_price_observations` (append-only); migration `0013_odds_manual_prices` (final integrity CHECKs + `attempted_provider`) |
-| **Migration note** | Draft `0014_odds_manual_integrity` was never shipped and is removed. Final schema lives in `0013`. Local DBs stamped at the removed `0014` revision are incompatible with this chain — stamp/downgrade to `0013_odds_manual_prices` before upgrading (do not silently discard audit rows). |
+| **Selection identity** | Canonical `selection_identity` = `family:outcome` or `family:outcome:line` from DWCS-200 catalog; computed when omitted, rejected on mismatch. Not the settlement rule-set content hash. |
+| **Manual provenance** | Parser always sets `user_observed` / non-automated; rejects caller `source_kind` / `automated` / non-entitlement `provider` (no silent relabel). |
+| **Clocks** | When both exist, `source_updated_at <= observed_at` (UTC-normalized). |
+| **Storage** | `odds_manual_price_observations` (append-only); migration `0013_odds_manual_prices` (final integrity CHECKs + `attempted_provider` + `selection_identity`) |
 | **Bet365 identity** | Explicit aliases only (`bet365`, `bet365_au`); automated/reference observations reject those keys while fallback is active; only non-automated `user_observed` may claim Bet365 |
 | **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance … [--line-point]`; `mma-model odds record-manual-price …` |
 | **Prohibited** | Sportsbook website scraping, credential/cookie storage, Bet365 claims for reference consensus |

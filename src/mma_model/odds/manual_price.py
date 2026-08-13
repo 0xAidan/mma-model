@@ -3,6 +3,9 @@
 Manual prices are labeled ``user_observed`` and are never automated.
 Exact EV requires an observed available price; locks/removals/entitlement
 failures are explicit and never forward-filled.
+
+``selection_identity`` is the canonical DWCS-200 family/outcome/line key.
+It is not the settlement rule-set content hash (see ``mma_model.markets.rules``).
 """
 
 from __future__ import annotations
@@ -26,6 +29,11 @@ from mma_model.odds.provider_decision import licensed_bookmaker_adapter_authoriz
 from mma_model.odds.types import PROVIDER_THE_ODDS_API
 
 MANUAL_SOURCE_LABEL: Final[str] = "user_observed"
+
+# Caller-supplied keys that would silently relabel provenance if accepted.
+_RESERVED_MANUAL_PROVENANCE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"source_kind", "automated"}
+)
 
 
 class PriceSourceKind(StrEnum):
@@ -73,9 +81,42 @@ def validate_market_selection(
         )
 
 
+def canonical_selection_identity(
+    family: MarketFamily,
+    outcome_key: OutcomeKey,
+    line_point: float | None,
+) -> str:
+    """Deterministic DWCS-200 selection identity (family:outcome[:line]).
+
+    Distinct from settlement rule-set identity (contract content hash).
+    """
+    validate_market_selection(family, outcome_key, line_point)
+    if line_point is None:
+        return f"{family.value}:{outcome_key.value}"
+    return f"{family.value}:{outcome_key.value}:{float(line_point)}"
+
+
 def _normalize_utc(value: datetime, *, field: str) -> datetime:
     """Require aware datetime and return UTC (for frozen dataclass assignment)."""
     return ensure_utc(value, field=field).astimezone(UTC)
+
+
+def _resolve_selection_identity(
+    *,
+    family: MarketFamily,
+    outcome_key: OutcomeKey,
+    line_point: float | None,
+    supplied: str | None,
+) -> str:
+    canonical = canonical_selection_identity(family, outcome_key, line_point)
+    if supplied is None:
+        return canonical
+    if supplied != canonical:
+        raise ValueError(
+            "selection_identity mismatch versus family/outcome/line: "
+            f"got {supplied!r}, expected {canonical!r}"
+        )
+    return canonical
 
 
 @dataclass(frozen=True)
@@ -96,7 +137,7 @@ class ObservedPrice:
     observed_at: datetime
     source_updated_at: datetime | None
     event_external_id: str | None
-    settlement_identity: str | None
+    selection_identity: str | None = None
     detail: str | None = None
     attempted_provider: str | None = None
 
@@ -157,6 +198,23 @@ class ObservedPrice:
                 "source_updated_at",
                 _normalize_utc(self.source_updated_at, field="source_updated_at"),
             )
+            if self.source_updated_at > self.observed_at:
+                raise ValueError(
+                    "source_updated_at must be <= observed_at "
+                    f"(got source_updated_at={self.source_updated_at.isoformat()}, "
+                    f"observed_at={self.observed_at.isoformat()})"
+                )
+
+        object.__setattr__(
+            self,
+            "selection_identity",
+            _resolve_selection_identity(
+                family=self.market_family,
+                outcome_key=self.outcome_key,
+                line_point=self.line_point,
+                supplied=_optional_str(self.selection_identity),
+            ),
+        )
 
     @property
     def dedupe_key(self) -> str:
@@ -198,7 +256,7 @@ class ObservedPrice:
                 else self.source_updated_at.isoformat()
             ),
             "event_external_id": self.event_external_id,
-            "settlement_identity": self.settlement_identity,
+            "selection_identity": self.selection_identity,
             "price_decimal": self.price_decimal,
             "detail": self.detail,
         }
@@ -242,7 +300,8 @@ class ObservedPrice:
         bookmaker_title: str | None = None,
         line_point: float | None = None,
         event_external_id: str | None = None,
-        settlement_identity: str | None = None,
+        selection_identity: str | None = None,
+        source_updated_at: datetime | None = None,
     ) -> ObservedPrice:
         attempted = str(provider).strip()
         if not attempted:
@@ -260,9 +319,9 @@ class ObservedPrice:
             price_decimal=None,
             lifecycle=LineLifecycleState.ENTITLEMENT_FAILED,
             observed_at=observed_at,
-            source_updated_at=None,
+            source_updated_at=source_updated_at,
             event_external_id=event_external_id,
-            settlement_identity=settlement_identity,
+            selection_identity=selection_identity,
             detail=detail,
             attempted_provider=attempted,
         )
@@ -282,7 +341,7 @@ class ObservedPrice:
         event_external_id: str | None = None,
         line_point: float | None = None,
         source_updated_at: datetime | None = None,
-        settlement_identity: str | None = None,
+        selection_identity: str | None = None,
     ) -> ObservedPrice:
         if provider != PROVIDER_THE_ODDS_API:
             raise ValueError(
@@ -304,7 +363,7 @@ class ObservedPrice:
             observed_at=observed_at,
             source_updated_at=source_updated_at,
             event_external_id=event_external_id,
-            settlement_identity=settlement_identity,
+            selection_identity=selection_identity,
             detail="reference odds; never Bet365",
             attempted_provider=None,
         )
@@ -323,7 +382,13 @@ def compute_exact_ev(model_prob: float, offered_decimal: float) -> float:
 
 
 def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
-    """Parse a user-entered numeric price / book / time observation."""
+    """Parse a user-entered numeric price / book / time observation.
+
+    Always labels the row ``user_observed`` / non-automated. Reserved provenance
+    fields (``source_kind``, ``automated``) are rejected when present so callers
+    cannot silently claim reference/automated provenance. ``provider`` is only
+    accepted as an alias for ``attempted_provider`` on ``entitlement_failed``.
+    """
     if "prior_price_decimal" in payload and payload.get("prior_price_decimal") not in (
         None,
         "",
@@ -331,6 +396,22 @@ def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
         raise ValueError(
             "prior_price_decimal is not accepted (no forward-fill / silent drop); "
             "record a prior AVAILABLE observation separately if needed"
+        )
+
+    for key in _RESERVED_MANUAL_PROVENANCE_FIELDS:
+        if key in payload and payload.get(key) not in (None, ""):
+            raise ValueError(
+                f"manual observation rejects reserved field {key!r}; "
+                "parser always sets source_kind=user_observed and automated=false"
+            )
+
+    if "settlement_identity" in payload and payload.get("settlement_identity") not in (
+        None,
+        "",
+    ):
+        raise ValueError(
+            "settlement_identity is not accepted; use selection_identity "
+            "(canonical DWCS-200 family:outcome[:line], not settlement rule-set id)"
         )
 
     bookmaker_key = str(payload.get("bookmaker_key") or "").strip()
@@ -371,19 +452,30 @@ def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
         price_decimal = None
 
     attempted_provider = _optional_str(payload.get("attempted_provider"))
+    provider_alias = _optional_str(payload.get("provider"))
     if lifecycle is LineLifecycleState.ENTITLEMENT_FAILED:
+        if attempted_provider and provider_alias and attempted_provider != provider_alias:
+            raise ValueError(
+                "conflicting provider and attempted_provider for entitlement_failed "
+                f"(provider={provider_alias!r}, attempted_provider={attempted_provider!r})"
+            )
         if not attempted_provider:
-            # Allow `provider` alias only for entitlement parse convenience.
-            attempted_provider = _optional_str(payload.get("provider"))
+            attempted_provider = provider_alias
         if not attempted_provider:
             raise ValueError(
                 "entitlement_failed requires attempted_provider "
                 "(or provider alias in JSON)"
             )
-    elif attempted_provider is not None:
-        raise ValueError(
-            "attempted_provider is only valid when lifecycle=entitlement_failed"
-        )
+    else:
+        if provider_alias is not None:
+            raise ValueError(
+                "provider is only valid as attempted_provider alias when "
+                "lifecycle=entitlement_failed"
+            )
+        if attempted_provider is not None:
+            raise ValueError(
+                "attempted_provider is only valid when lifecycle=entitlement_failed"
+            )
 
     title = payload.get("bookmaker_title")
     return ObservedPrice(
@@ -401,7 +493,7 @@ def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
         observed_at=observed_at,
         source_updated_at=source_updated_at,
         event_external_id=_optional_str(payload.get("event_external_id")),
-        settlement_identity=_optional_str(payload.get("settlement_identity")),
+        selection_identity=_optional_str(payload.get("selection_identity")),
         detail=_optional_str(payload.get("detail")),
         attempted_provider=attempted_provider,
     )

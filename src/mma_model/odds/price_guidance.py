@@ -138,6 +138,19 @@ def build_price_guidance(
             line_point=line_point,
         )
 
+    if prob_ev_positive is not None:
+        try:
+            prob_value = float(prob_ev_positive)
+        except (TypeError, ValueError) as exc:
+            raise PriceGuidanceSelectionError(
+                "prob_ev_positive must be a number in [0, 1]"
+            ) from exc
+        if not 0.0 <= prob_value <= 1.0:
+            raise PriceGuidanceSelectionError(
+                f"prob_ev_positive must be in [0, 1] (got {prob_ev_positive!r})"
+            )
+        prob_ev_positive = prob_value
+
     offered_for_classification: float | None = None
     lifecycle = LineLifecycleState.UNKNOWN
     if observed is not None:

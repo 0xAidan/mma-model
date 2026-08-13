@@ -289,7 +289,7 @@ class OddsQuoteStore:
                     observed_at=obs.observed_at,
                     source_updated_at=obs.source_updated_at,
                     event_external_id=obs.event_external_id,
-                    settlement_identity=obs.settlement_identity,
+                    selection_identity=obs.selection_identity,
                     detail=obs.detail,
                 )
             )

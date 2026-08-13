@@ -5,22 +5,22 @@ Revises: 0012_odds_availability
 Create Date: 2026-08-12
 
 Creates ``odds_manual_price_observations`` with DWCS-200 selection CHECKs,
-``attempted_provider`` provenance, and append-only SQLite guards.
+``attempted_provider`` provenance, canonical ``selection_identity``, and
+append-only SQLite guards.
 
-If an older unshipped draft of this table exists without ``attempted_provider``,
-rows are rebuilt in place with zero loss: entitlement rows backfill
-``attempted_provider`` from ``detail`` (``provider=<id>:``) or
-``legacy_unspecified``. This revision supersedes the removed draft ``0014``.
+This revision is the sole unshipped manual-price migration. Fresh databases
+upgrade from ``0012`` into this final schema. Draft/local databases that already
+contain a partial manual-price table must be recreated (Alembic will not re-run
+an already-stamped revision).
 """
 
 from __future__ import annotations
 
-import re
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect
 
 from mma_model.db.odds_guards import drop_odds_sqlite_guards, install_odds_sqlite_guards
 
@@ -56,15 +56,9 @@ _FAMILY_OUTCOME_LINE_SQL = (
     ")"
 )
 
-_PROVIDER_DETAIL_RE = re.compile(r"^provider=([^:\s]+)\s*:")
-
 
 def _existing_tables() -> set[str]:
     return set(inspect(op.get_bind()).get_table_names())
-
-
-def _column_names(table: str) -> set[str]:
-    return {col["name"] for col in inspect(op.get_bind()).get_columns(table)}
 
 
 def _create_final_table() -> None:
@@ -86,7 +80,7 @@ def _create_final_table() -> None:
         sa.Column("observed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("source_updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("event_external_id", sa.String(length=128), nullable=True),
-        sa.Column("settlement_identity", sa.String(length=200), nullable=True),
+        sa.Column("selection_identity", sa.String(length=200), nullable=False),
         sa.Column("detail", sa.String(length=500), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
@@ -131,6 +125,10 @@ def _create_final_table() -> None:
             "length(trim(region)) > 0",
             name="ck_odds_manual_region_nonempty",
         ),
+        sa.CheckConstraint(
+            "length(trim(selection_identity)) > 0",
+            name="ck_odds_manual_selection_identity_nonempty",
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("dedupe_key", name="uq_odds_manual_price_dedupe_key"),
     )
@@ -145,81 +143,9 @@ def _create_final_table() -> None:
         ("ix_odds_manual_price_observations_attempted_provider", "attempted_provider"),
         ("ix_odds_manual_price_observations_observed_at", "observed_at"),
         ("ix_odds_manual_price_observations_event_external_id", "event_external_id"),
+        ("ix_odds_manual_price_observations_selection_identity", "selection_identity"),
     ):
         op.create_index(name, "odds_manual_price_observations", [col])
-
-
-def backfill_attempted_provider(lifecycle: str, detail: str | None) -> str | None:
-    """Deterministic attempted_provider for rebuilt entitlement rows (never drop)."""
-    if lifecycle != "entitlement_failed":
-        return None
-    text_detail = (detail or "").strip()
-    match = _PROVIDER_DETAIL_RE.match(text_detail)
-    if match:
-        return match.group(1).strip()
-    return "legacy_unspecified"
-
-
-def _rebuild_preserving_all_rows() -> None:
-    """Rebuild draft table → final schema without discarding audit rows."""
-    bind = op.get_bind()
-    before = bind.execute(
-        text("SELECT COUNT(*) FROM odds_manual_price_observations")
-    ).scalar_one()
-    op.rename_table(
-        "odds_manual_price_observations",
-        "odds_manual_price_observations_old",
-    )
-    _create_final_table()
-    rows = bind.execute(
-        text(
-            """
-            SELECT
-              id, dedupe_key, source_kind, automated, bookmaker_key, bookmaker_title,
-              region, market_family, outcome_key, line_point, price_decimal, lifecycle,
-              observed_at, source_updated_at, event_external_id,
-              settlement_identity, detail, created_at
-            FROM odds_manual_price_observations_old
-            ORDER BY id
-            """
-        )
-    ).mappings().all()
-    for row in rows:
-        attempted = backfill_attempted_provider(
-            str(row["lifecycle"]),
-            None if row["detail"] is None else str(row["detail"]),
-        )
-        bind.execute(
-            text(
-                """
-                INSERT INTO odds_manual_price_observations (
-                  id, dedupe_key, source_kind, automated, bookmaker_key, bookmaker_title,
-                  region, market_family, outcome_key, line_point, price_decimal, lifecycle,
-                  attempted_provider, observed_at, source_updated_at, event_external_id,
-                  settlement_identity, detail, created_at
-                ) VALUES (
-                  :id, :dedupe_key, :source_kind, :automated, :bookmaker_key,
-                  :bookmaker_title, :region, :market_family, :outcome_key, :line_point,
-                  :price_decimal, :lifecycle, :attempted_provider, :observed_at,
-                  :source_updated_at, :event_external_id, :settlement_identity,
-                  :detail, :created_at
-                )
-                """
-            ),
-            {
-                **dict(row),
-                "attempted_provider": attempted,
-            },
-        )
-    after = bind.execute(
-        text("SELECT COUNT(*) FROM odds_manual_price_observations")
-    ).scalar_one()
-    if after != before:
-        raise RuntimeError(
-            "odds_manual_price_observations rebuild lost rows: "
-            f"before={before}, after={after}"
-        )
-    op.drop_table("odds_manual_price_observations_old")
 
 
 def upgrade() -> None:
@@ -227,8 +153,6 @@ def upgrade() -> None:
     drop_odds_sqlite_guards(op.get_bind())
     if "odds_manual_price_observations" not in existing:
         _create_final_table()
-    elif "attempted_provider" not in _column_names("odds_manual_price_observations"):
-        _rebuild_preserving_all_rows()
     install_odds_sqlite_guards(op.get_bind())
 
 
