@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from mma_model.db.tables.odds import (
     OddsAvailabilityObservation,
     OddsBoutLifecycleObservation,
+    OddsMatchObservation,
     OddsProviderEventAlias,
     OddsQuote,
 )
@@ -50,6 +51,10 @@ _TERMINAL_TO_ACTIVE_EVIDENCE: Final[dict[str, frozenset[str]]] = {
         {
             "odds_bout_match_review_approved",
             "operator_lifecycle_clear",
+            # A newer matched rematch supersedes prior ambiguity blocks.
+            "match_provider_id",
+            "match_participant_pair",
+            "match_manual_review",
         }
     ),
     "cancelled": frozenset({"canonical_bout_correction_reactivate"}),
@@ -134,13 +139,18 @@ class QuoteValueEligibility(StrEnum):
 class QuoteBlockReason(StrEnum):
     NONE = "none"
     UNMATCHED = "unmatched"
+    LATEST_MATCH_NOT_MATCHED = "latest_match_not_matched"
     ALIAS_BOUT_MISMATCH = "alias_bout_mismatch"
+    CALLER_MATCH_RESTRICT = "caller_match_restrict"
     BOUT_TERMINAL = "bout_terminal"
     SELECTION_LOCKED = "selection_locked"
     MARKET_UNKNOWN = "market_unknown"
     QUOTE_UNAVAILABLE = "quote_unavailable"
     STALE = "stale"
     NOT_VISIBLE = "not_visible"
+
+
+_MATCHED_STATUS: Final[str] = "matched"
 
 
 class AvailabilityNote(StrEnum):
@@ -293,6 +303,37 @@ def alias_effective_at(
     return max(
         effective,
         key=lambda row: (int(row.alias_version), _as_utc_sqlite(row.created_at)),
+    )
+
+
+def latest_match_observation_at(
+    session: Session,
+    *,
+    provider: str,
+    external_event_id: str,
+    as_of: datetime,
+) -> OddsMatchObservation | None:
+    """Latest persisted match decision for provider/external event at cutoff."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    rows = list(
+        session.scalars(
+            select(OddsMatchObservation).where(
+                OddsMatchObservation.provider == provider,
+                OddsMatchObservation.external_event_id == external_event_id,
+            )
+        ).all()
+    )
+    visible = [
+        row for row in rows if _as_utc_sqlite(row.observed_at) <= cutoff
+    ]
+    if not visible:
+        return None
+    return max(
+        visible,
+        key=lambda row: (
+            _as_utc_sqlite(row.observed_at),
+            int(row.id or 0),
+        ),
     )
 
 
@@ -611,7 +652,8 @@ def market_availability_unknown_at(
 
     Never infers SUSPENDED/LOCKED from absence — only explicit UNKNOWN rows.
     When ``quote_evidence_at`` is set (available quote observe/source clock), an
-    UNKNOWN older than that evidence is treated as cleared by the newer quote.
+    UNKNOWN *strictly older* than that evidence is cleared. Equal timestamps
+    remain fail-closed (UNKNOWN still blocks).
     """
     cutoff = _require_aware_utc(as_of, field="as_of")
     candidates = [
@@ -642,6 +684,7 @@ def market_availability_unknown_at(
     latest = max(candidates, key=_sort_key)
     if quote_evidence_at is not None:
         evidence = _require_aware_utc(quote_evidence_at, field="quote_evidence_at")
+        # Fail-closed equality: only strictly newer quote evidence clears.
         if _as_utc_sqlite(latest.observed_at) < evidence:
             return None
     return latest
@@ -765,15 +808,15 @@ def resolve_quote_value_eligibility(
     as_of: datetime,
     stale_after_minutes: int,
 ) -> QuoteEligibilityDecision:
-    """Combine alias-effective bout identity with quote-scoped gates.
+    """Combine latest match decision + alias-effective bout with quote gates.
 
-    Bout identity is derived from the alias effective at ``as_of``. A caller
-    ``bout_id`` that disagrees with ``alias.bout_id`` is rejected (wrong-bout /
-    historical-alias mismatch). ``match_status`` alone is never authority for
-    lifecycle lookup.
+    Authority for value is the latest persisted match observation at ``as_of``
+    (must be MATCHED to the same bout as the effective alias). An old alias that
+    remains after a newer ambiguous/unmatched decision is never value authority.
+    Caller ``bout_id`` / ``match_status`` may only further restrict, never grant.
     """
-    del match_status  # alias at cutoff is authoritative for bout identity
     cutoff = _require_aware_utc(as_of, field="as_of")
+    caller_status = (match_status or "").strip()
     selection = _quote_selection_identity(quote)
     base = dict(
         quote_id=int(quote.id),
@@ -816,6 +859,92 @@ def resolve_quote_value_eligibility(
             reason=QuoteBlockReason.UNMATCHED,
             detail="no effective alias at as_of for quote value eligibility",
             **base,
+        )
+
+    latest_match = latest_match_observation_at(
+        session,
+        provider=quote.provider,
+        external_event_id=quote.external_event_id,
+        as_of=cutoff,
+    )
+    if latest_match is None:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.UNMATCHED,
+            detail="no persisted match decision at as_of",
+            resolved_bout_id=alias.bout_id,
+            availability_note=AvailabilityNote.NONE,
+            quote_id=int(quote.id),
+            selection_identity=selection,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family,
+            outcome_key=quote.outcome_key,
+            line_point=quote.line_point,
+            freshness_at=base["freshness_at"],
+        )
+    if latest_match.match_status != _MATCHED_STATUS:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.LATEST_MATCH_NOT_MATCHED,
+            detail=(
+                f"latest match_status={latest_match.match_status!r} "
+                f"(reason={latest_match.reason!r}) blocks quote value"
+            ),
+            resolved_bout_id=alias.bout_id,
+            availability_note=AvailabilityNote.NONE,
+            quote_id=int(quote.id),
+            selection_identity=selection,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family,
+            outcome_key=quote.outcome_key,
+            line_point=quote.line_point,
+            freshness_at=base["freshness_at"],
+        )
+    if latest_match.bout_id != alias.bout_id:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.ALIAS_BOUT_MISMATCH,
+            detail=(
+                f"latest matched bout_id={latest_match.bout_id!r} != "
+                f"alias.bout_id={alias.bout_id!r}"
+            ),
+            resolved_bout_id=alias.bout_id,
+            availability_note=AvailabilityNote.NONE,
+            quote_id=int(quote.id),
+            selection_identity=selection,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family,
+            outcome_key=quote.outcome_key,
+            line_point=quote.line_point,
+            freshness_at=base["freshness_at"],
+        )
+
+    # Caller inputs may only further restrict; never grant over persisted state.
+    if caller_status and caller_status != _MATCHED_STATUS:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.CALLER_MATCH_RESTRICT,
+            detail=(
+                f"caller match_status={caller_status!r} further restricts "
+                "despite persisted matched decision"
+            ),
+            resolved_bout_id=alias.bout_id,
+            availability_note=AvailabilityNote.NONE,
+            quote_id=int(quote.id),
+            selection_identity=selection,
+            bookmaker_key=quote.bookmaker_key,
+            region=quote.region,
+            market_family=quote.market_family,
+            outcome_key=quote.outcome_key,
+            line_point=quote.line_point,
+            freshness_at=base["freshness_at"],
         )
     if bout_id is not None and bout_id != alias.bout_id:
         return QuoteEligibilityDecision(

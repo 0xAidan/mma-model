@@ -46,7 +46,9 @@ from mma_model.odds.lifecycle import (
     apply_bout_lifecycle,
     classify_quote_value_eligibility,
     latest_bout_lifecycle,
+    latest_match_observation_at,
     latest_quote_timestamp,
+    market_availability_unknown_at,
     quote_authoritative_freshness,
     quote_is_stale,
     quote_row_is_stale,
@@ -1457,6 +1459,8 @@ def test_migration_upgrade_downgrade_preserves_schema_roundtrip(tmp_path: Path) 
         assert "REFERENCES odds_quotes" in fk_sql or "references odds_quotes" in fk_sql.lower()
         assert "ck_odds_bout_lifecycle_scope_shape" in fk_sql
         assert "ck_odds_bout_lifecycle_terminal_bout_scope" in fk_sql
+        assert "ck_odds_bout_lifecycle_selection_state" in fk_sql
+        assert "fk_odds_bout_lifecycle_quote_id" in fk_sql
 
     command.downgrade(_alembic_config(db_path), "0013_odds_manual_prices")
     with engine.begin() as conn:
@@ -1612,6 +1616,23 @@ def test_raw_sql_rejects_integrity_violations(tmp_path: Path) -> None:
             )
         )
 
+    # Selection-scoped terminal (review_blocked) rejected by selection_state.
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys=ON"))
+        conn.execute(
+            text(
+                "INSERT INTO odds_bout_lifecycle_observations ("
+                "dedupe_key, bout_id, provider, external_event_id, bookmaker_key, "
+                "region, market_family, outcome_key, line_point, quote_id, "
+                "lifecycle, evidence_kind, detail, price_decimal, observed_at, created_at"
+                ") VALUES ("
+                "'life-sel-term', 'b1', 'the_odds_api', 'ext', 'fanduel', "
+                "'us', 'moneyline', NULL, NULL, NULL, "
+                f"'review_blocked', 'ambiguous_match_blocked', NULL, NULL, "
+                f"'{now}', '{now}')"
+            )
+        )
+
 
 def test_migration_0015_downgrade_drops_scope_then_reupgrade(tmp_path: Path) -> None:
     db_path = tmp_path / "mig0015.db"
@@ -1631,6 +1652,22 @@ def test_migration_0015_downgrade_drops_scope_then_reupgrade(tmp_path: Path) -> 
             row[1] for row in conn.execute(text("PRAGMA table_info(odds_quotes)"))
         }
         assert "dedupe_version" not in quote_cols
+        life_sql = conn.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='odds_bout_lifecycle_observations'"
+            )
+        ).scalar_one()
+        assert "quote_id" not in (life_sql or "")
+        assert "fk_odds_bout_lifecycle_quote_id" not in (life_sql or "")
+        assert "ck_odds_bout_lifecycle_selection_state" not in (life_sql or "")
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='index'")
+            )
+        }
+        assert "ix_odds_bout_lifecycle_observations_quote_id" not in indexes
     command.upgrade(_alembic_config(db_path), "head")
     with engine.begin() as conn:
         life_cols = {
@@ -1641,6 +1678,22 @@ def test_migration_0015_downgrade_drops_scope_then_reupgrade(tmp_path: Path) -> 
         }
         assert "quote_id" in life_cols
         assert "bookmaker_key" in life_cols
+        life_sql = conn.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='odds_bout_lifecycle_observations'"
+            )
+        ).scalar_one()
+        assert "fk_odds_bout_lifecycle_quote_id" in life_sql
+        assert "ck_odds_bout_lifecycle_selection_state" in life_sql
+        assert "REFERENCES odds_quotes" in life_sql or "references odds_quotes" in life_sql.lower()
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='index'")
+            )
+        }
+        assert "ix_odds_bout_lifecycle_observations_quote_id" in indexes
 
 
 # --- CLI ------------------------------------------------------------------
@@ -4224,6 +4277,18 @@ def test_scoped_lifecycle_quote_id_must_match_provider_and_scope(
             market_family=MarketFamily.MONEYLINE.value,
         )
 
+    with pytest.raises(ValueError, match="provider mismatch"):
+        apply_bout_lifecycle(
+            session,
+            bout_id="bout-qid",
+            lifecycle=OddsBoutLifecycleState.LOCKED,
+            evidence_kind="provider_lock_signal",
+            observed_at=OBSERVED,
+            provider="other_provider",
+            external_event_id="prov-qid",
+            quote_id=quote.id,
+        )
+
     locked = apply_bout_lifecycle(
         session,
         bout_id="bout-qid",
@@ -4239,3 +4304,378 @@ def test_scoped_lifecycle_quote_id_must_match_provider_and_scope(
     assert locked.quote_id == quote.id
     assert locked.bookmaker_key == "fanduel"
     assert locked.market_family == MarketFamily.MONEYLINE.value
+
+
+def test_changed_opponent_old_alias_blocks_quote_value_until_rematch(
+    tmp_path: Path,
+) -> None:
+    """Old alias may remain, but latest ambiguous match blocks quote value."""
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    t0 = OBSERVED - timedelta(hours=2)
+    t1 = OBSERVED - timedelta(hours=1)
+    t2 = OBSERVED
+    _seed_bout(
+        session,
+        bout_id="bout-opp",
+        event_id="evt-opp",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    session.add(
+        BoutSourceId(
+            bout_id="bout-opp",
+            source=PROVIDER_THE_ODDS_API,
+            external_id="prov-opp",
+        )
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-opp",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=t0,
+        source_updated_at=t0,
+        price_decimal=1.9,
+        raw_ref="opp-quote",
+    )
+    session.commit()
+
+    first = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-opp",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=t0,
+    )
+    persist_match_decision(session, first, observed_at=t0)
+    session.commit()
+    assert first.status == MATCH_STATUS_MATCHED
+
+    quote = session.scalars(
+        select(OddsQuote).where(OddsQuote.raw_ref == "opp-quote")
+    ).one()
+    before = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-opp",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=t0 + timedelta(minutes=30),
+        stale_after_minutes=360,
+    )
+    assert before.eligible is True
+
+    blocked = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-opp",
+        home_team="Totally Different",
+        away_team="Name Pair",
+        commence_time=start,
+        observed_at=t1,
+    )
+    persist_match_decision(session, blocked, observed_at=t1)
+    session.commit()
+    assert blocked.status == MATCH_STATUS_AMBIGUOUS
+
+    # Old alias remains for audit...
+    alias = alias_effective_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-opp",
+        as_of=t2,
+    )
+    assert alias is not None
+    assert alias.bout_id == "bout-opp"
+    # ...but REVIEW_BLOCKED + latest match block value.
+    life = latest_bout_lifecycle(
+        session,
+        bout_id="bout-opp",
+        as_of=t2,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-opp",
+    )
+    assert life is not None
+    assert life.lifecycle == OddsBoutLifecycleState.REVIEW_BLOCKED.value
+    latest = latest_match_observation_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-opp",
+        as_of=t2,
+    )
+    assert latest is not None
+    assert latest.match_status == MATCH_STATUS_AMBIGUOUS
+
+    after = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-opp",
+        match_status=MATCH_STATUS_MATCHED,  # caller cannot grant over latest
+        as_of=t2,
+        stale_after_minutes=360,
+    )
+    assert after.eligible is False
+    assert after.reason in {
+        QuoteBlockReason.LATEST_MATCH_NOT_MATCHED,
+        QuoteBlockReason.BOUT_TERMINAL,
+    }
+
+    # Historical PIT before ambiguity still eligible under prior matched decision.
+    hist = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-opp",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=t0 + timedelta(minutes=30),
+        stale_after_minutes=360,
+    )
+    assert hist.eligible is True
+
+    # Caller restrict: even while matched at PIT, unmatched caller status blocks.
+    restricted = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-opp",
+        match_status=MATCH_STATUS_UNMATCHED,
+        as_of=t0 + timedelta(minutes=30),
+        stale_after_minutes=360,
+    )
+    assert restricted.eligible is False
+    assert restricted.reason == QuoteBlockReason.CALLER_MATCH_RESTRICT
+
+
+def test_review_approval_and_reversal_drive_quote_eligibility(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-ra",
+        event_id="evt-ra",
+        fighter_a="Same One",
+        fighter_b="Same Two",
+        start=start,
+    )
+    _seed_bout(
+        session,
+        bout_id="bout-rb",
+        event_id="evt-ra",
+        fighter_a="Same One",
+        fighter_b="Same Two",
+        start=start,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-rev-elig",
+        home="Same One",
+        away="Same Two",
+        commence=start,
+        observed_at=OBSERVED - timedelta(hours=1),
+        source_updated_at=OBSERVED - timedelta(hours=1),
+        price_decimal=1.85,
+        raw_ref="rev-elig-q",
+    )
+    session.commit()
+
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-rev-elig",
+        home_team="Same One",
+        away_team="Same Two",
+        commence_time=start,
+        observed_at=OBSERVED - timedelta(hours=1),
+    )
+    persist_match_decision(
+        session, decision, observed_at=OBSERVED - timedelta(hours=1)
+    )
+    session.commit()
+    assert decision.status == MATCH_STATUS_AMBIGUOUS
+    assert decision.review_id is not None
+
+    quote = session.scalars(
+        select(OddsQuote).where(OddsQuote.raw_ref == "rev-elig-q")
+    ).one()
+    # Ambiguous before approval: no value (even if caller claims matched).
+    pending = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-ra",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED - timedelta(minutes=30),
+        stale_after_minutes=360,
+    )
+    assert pending.eligible is False
+    assert pending.reason in {
+        QuoteBlockReason.LATEST_MATCH_NOT_MATCHED,
+        QuoteBlockReason.UNMATCHED,
+        QuoteBlockReason.NOT_VISIBLE,
+    }
+
+    approved = approve_bout_match_review(
+        session,
+        review_id=decision.review_id,
+        bout_id="bout-ra",
+        actor="ops",
+        expected_version=1,
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    assert approved.status == "approved"
+    latest = latest_match_observation_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-rev-elig",
+        as_of=OBSERVED + timedelta(minutes=1),
+    )
+    assert latest is not None
+    assert latest.match_status == MATCH_STATUS_MATCHED
+    assert latest.bout_id == "bout-ra"
+
+    ok = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-ra",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED + timedelta(minutes=1),
+        stale_after_minutes=360,
+    )
+    assert ok.eligible is True
+
+    reverse_bout_match_review(
+        session,
+        review_id=decision.review_id,
+        actor="ops",
+        expected_version=2,
+        observed_at=OBSERVED + timedelta(minutes=5),
+    )
+    session.commit()
+    reversed_latest = latest_match_observation_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-rev-elig",
+        as_of=OBSERVED + timedelta(minutes=6),
+    )
+    assert reversed_latest is not None
+    assert reversed_latest.match_status == MATCH_STATUS_AMBIGUOUS
+
+    blocked = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-ra",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED + timedelta(minutes=6),
+        stale_after_minutes=360,
+    )
+    assert blocked.eligible is False
+
+    # Historical after approval / before reverse remains eligible.
+    mid = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id="bout-ra",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED + timedelta(minutes=2),
+        stale_after_minutes=360,
+    )
+    assert mid.eligible is True
+
+
+def test_availability_unknown_equal_timestamp_fail_closed(tmp_path: Path) -> None:
+    from mma_model.db.tables.odds import OddsAvailabilityObservation
+
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    stamp = OBSERVED - timedelta(hours=1)
+    _seed_bout(
+        session,
+        bout_id="bout-eq",
+        event_id="evt-eq",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id="prov-eq",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=start,
+            home_team="Alpha Fighter",
+            away_team="Bravo Fighter",
+        ),
+        provider=PROVIDER_THE_ODDS_API,
+    )
+    session.add(
+        OddsAvailabilityObservation(
+            dedupe_key="unk-eq",
+            provider=PROVIDER_THE_ODDS_API,
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-eq",
+            bookmaker_key="fanduel",
+            bookmaker_title="FanDuel",
+            provider_market_key="h2h",
+            market_family=MarketFamily.MONEYLINE.value,
+            availability="unknown",
+            observed_at=stamp,
+            commence_time=start,
+            snapshot_at=None,
+        )
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-eq",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=stamp,
+        source_updated_at=stamp,
+        price_decimal=1.9,
+        raw_ref="eq-q",
+        bookmaker_key="fanduel",
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-eq",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+
+    unknown = market_availability_unknown_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-eq",
+        bookmaker_key="fanduel",
+        region="us",
+        market_family=MarketFamily.MONEYLINE.value,
+        provider_market_key="h2h",
+        as_of=OBSERVED,
+        quote_evidence_at=stamp,
+    )
+    assert unknown is not None
+
+    blocked = resolve_quote_value_eligibility(
+        session,
+        quote=session.scalars(
+            select(OddsQuote).where(OddsQuote.raw_ref == "eq-q")
+        ).one(),
+        bout_id=decision.bout_id,
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    assert blocked.eligible is False
+    assert blocked.reason == QuoteBlockReason.MARKET_UNKNOWN
+    assert blocked.availability_note == AvailabilityNote.UNKNOWN_BLOCKING

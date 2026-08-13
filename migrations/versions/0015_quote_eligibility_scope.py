@@ -42,6 +42,14 @@ _LIFECYCLE_TERMINAL_BOUT_SCOPE_SQL = (
     "AND outcome_key IS NULL AND line_point IS NULL AND quote_id IS NULL"
     ")"
 )
+_LIFECYCLE_SELECTION_STATE_SQL = (
+    "("
+    "bookmaker_key IS NULL AND region IS NULL AND market_family IS NULL "
+    "AND outcome_key IS NULL AND line_point IS NULL AND quote_id IS NULL"
+    ") OR ("
+    "lifecycle IN ('active', 'stale', 'missing_unknown', 'locked')"
+    ")"
+)
 _LIFECYCLE_SCOPE_NONEMPTY_SQL = (
     "(bookmaker_key IS NULL OR length(trim(bookmaker_key)) > 0) AND "
     "(region IS NULL OR length(trim(region)) > 0) AND "
@@ -160,6 +168,10 @@ def upgrade() -> None:
                 _LIFECYCLE_TERMINAL_BOUT_SCOPE_SQL,
             )
             batch.create_check_constraint(
+                "ck_odds_bout_lifecycle_selection_state",
+                _LIFECYCLE_SELECTION_STATE_SQL,
+            )
+            batch.create_check_constraint(
                 "ck_odds_bout_lifecycle_scope_nonempty",
                 _LIFECYCLE_SCOPE_NONEMPTY_SQL,
             )
@@ -192,6 +204,7 @@ def downgrade() -> None:
             for cname in (
                 "ck_odds_bout_lifecycle_scope_family_outcome",
                 "ck_odds_bout_lifecycle_scope_nonempty",
+                "ck_odds_bout_lifecycle_selection_state",
                 "ck_odds_bout_lifecycle_terminal_bout_scope",
                 "ck_odds_bout_lifecycle_scope_shape",
             ):

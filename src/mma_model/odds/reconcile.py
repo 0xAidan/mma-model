@@ -22,6 +22,7 @@ from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.lifecycle import (
     TERMINAL_LIFECYCLES,
     OddsBoutLifecycleState,
+    alias_effective_at,
     apply_bout_lifecycle,
     classify_quote_value_eligibility,
     clears_observational_block,
@@ -328,6 +329,46 @@ def supersede_provider_alias_if_active(
     return True
 
 
+def append_match_observation(
+    session: Session,
+    decision: OddsMatchDecision,
+    *,
+    observed_at: datetime,
+) -> OddsMatchObservation:
+    """Append a match observation only (no alias / lifecycle side effects)."""
+    stamp = require_aware_utc(observed_at, field="observed_at")
+    dedupe = decision_dedupe_key(decision, observed_at=stamp)
+    existing = session.scalar(
+        select(OddsMatchObservation).where(OddsMatchObservation.dedupe_key == dedupe)
+    )
+    if existing is not None:
+        return existing
+    row = OddsMatchObservation(
+        dedupe_key=dedupe,
+        provider=decision.provider,
+        external_event_id=decision.external_event_id,
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        match_rule=decision.match_rule,
+        reason=decision.reason,
+        review_id=decision.review_id,
+        eligible_for_value=1 if decision.eligible_for_value else 0,
+        observed_at=stamp,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _review_block_evidence_kind(reason: str) -> str:
+    text = (reason or "").lower()
+    if "stored provider id unsafe" in text:
+        return "stored_provider_id_unsafe"
+    if "replacement" in text:
+        return "replacement_match_blocked"
+    return "ambiguous_match_blocked"
+
+
 def persist_match_decision(
     session: Session,
     decision: OddsMatchDecision,
@@ -399,28 +440,29 @@ def persist_match_decision(
                 external_event_id=decision.external_event_id,
                 detail=decision.reason,
             )
+    elif decision.status in {MATCH_STATUS_AMBIGUOUS, MATCH_STATUS_UNMATCHED}:
+        # Old alias may remain for audit, but must not stay value authority.
+        # Persist REVIEW_BLOCKED on the prior alias bout so lifecycle consumers
+        # and quote eligibility both see the block (alongside the match row).
+        prior_alias = alias_effective_at(
+            session,
+            provider=decision.provider,
+            external_event_id=decision.external_event_id,
+            as_of=stamp,
+        )
+        if prior_alias is not None and decision.status == MATCH_STATUS_AMBIGUOUS:
+            apply_bout_lifecycle(
+                session,
+                bout_id=prior_alias.bout_id,
+                lifecycle=OddsBoutLifecycleState.REVIEW_BLOCKED,
+                evidence_kind=_review_block_evidence_kind(decision.reason),
+                observed_at=stamp,
+                provider=decision.provider,
+                external_event_id=decision.external_event_id,
+                detail=decision.reason,
+            )
 
-    dedupe = decision_dedupe_key(decision, observed_at=stamp)
-    existing = session.scalar(
-        select(OddsMatchObservation).where(OddsMatchObservation.dedupe_key == dedupe)
-    )
-    if existing is not None:
-        return existing
-    row = OddsMatchObservation(
-        dedupe_key=dedupe,
-        provider=decision.provider,
-        external_event_id=decision.external_event_id,
-        bout_id=decision.bout_id,
-        match_status=decision.status,
-        match_rule=decision.match_rule,
-        reason=decision.reason,
-        review_id=decision.review_id,
-        eligible_for_value=1 if decision.eligible_for_value else 0,
-        observed_at=stamp,
-    )
-    session.add(row)
-    session.flush()
-    return row
+    return append_match_observation(session, decision, observed_at=stamp)
 
 
 def reconcile_provider_events(
@@ -1004,6 +1046,7 @@ __all__ = [
     "OddsOfflineModeError",
     "OddsReconcileError",
     "activate_provider_alias",
+    "append_match_observation",
     "apply_replacement",
     "load_golden_card",
     "persist_match_decision",

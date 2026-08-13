@@ -20,6 +20,9 @@ from mma_model.db.tables.odds import OddsBoutMatchReview, OddsProviderEventAlias
 from mma_model.odds.lifecycle import OddsBoutLifecycleState, apply_bout_lifecycle
 from mma_model.odds.matching import (
     MATCH_RULE_MANUAL_REVIEW,
+    MATCH_STATUS_AMBIGUOUS,
+    MATCH_STATUS_MATCHED,
+    OddsMatchDecision,
     as_utc_sqlite,
     dump_evidence,
     load_matching_contract,
@@ -179,7 +182,10 @@ def approve_bout_match_review(
     then activates and attaches the owned alias. CAS loss or later failure rolls
     back claim/alias/lifecycle together — no orphan side effects.
     """
-    from mma_model.odds.reconcile import activate_provider_alias
+    from mma_model.odds.reconcile import (
+        activate_provider_alias,
+        append_match_observation,
+    )
 
     actor_text = (actor or "").strip()
     if not actor_text:
@@ -287,6 +293,24 @@ def approve_bout_match_review(
                 external_event_id=review.external_event_id,
                 detail=f"review_id={review_id}",
             )
+            # Quote eligibility consumes latest match observation; approval must
+            # supersede any prior ambiguous/unmatched decision.
+            append_match_observation(
+                session,
+                OddsMatchDecision(
+                    provider=review.provider,
+                    external_event_id=review.external_event_id,
+                    status=MATCH_STATUS_MATCHED,
+                    bout_id=bout_id,
+                    match_rule=MATCH_RULE_MANUAL_REVIEW,
+                    reason=f"approved review {review_id}",
+                    lifecycle=OddsBoutLifecycleState.ACTIVE,
+                    eligible_for_value=True,
+                    review_id=review_id,
+                    candidate_bout_ids=(bout_id,),
+                ),
+                observed_at=stamp,
+            )
     except OddsBoutMatchReviewError:
         raise
 
@@ -362,7 +386,10 @@ def reverse_bout_match_review(
     observed_at: datetime | None = None,
 ) -> OddsBoutMatchReview:
     """Reverse an approved/rejected review; supersede only this review's alias."""
-    from mma_model.odds.reconcile import supersede_provider_alias_if_active
+    from mma_model.odds.reconcile import (
+        append_match_observation,
+        supersede_provider_alias_if_active,
+    )
 
     actor_text = (actor or "").strip()
     if not actor_text:
@@ -403,6 +430,22 @@ def reverse_bout_match_review(
                     provider=review.provider,
                     external_event_id=review.external_event_id,
                     detail=f"review_id={review_id}",
+                )
+                append_match_observation(
+                    session,
+                    OddsMatchDecision(
+                        provider=review.provider,
+                        external_event_id=review.external_event_id,
+                        status=MATCH_STATUS_AMBIGUOUS,
+                        bout_id=None,
+                        match_rule=None,
+                        reason=f"review reversed: {review_id}",
+                        lifecycle=OddsBoutLifecycleState.REVIEW_BLOCKED,
+                        eligible_for_value=False,
+                        review_id=review_id,
+                        candidate_bout_ids=(decision_bout_id,),
+                    ),
+                    observed_at=stamp,
                 )
         else:
             preserved_newer_alias = True
