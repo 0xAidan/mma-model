@@ -281,7 +281,7 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 | **Ambiguity** | Dedicated `odds_bout_match_reviews` queue (not fighter identity); approve activates alias after version CAS; reject stays blocked; no fighter mapping writes |
 | **Aliases / source IDs** | Immutable `BoutSourceId` + versioned `odds_provider_event_aliases`; exactly one active alias per provider/external ID (partial unique index). Same-ID replacements supersede history and do not expose prior quotes under the new active alias |
 | **Lifecycle** | Latest explicit lifecycle wins; bare match→ACTIVE cannot override locked/cancelled/replaced/review_blocked without explicit transition evidence |
-| **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations`, `odds_bout_match_reviews`; migrations `0014_odds_matching` + `0015_odds_matching_integrity` |
+| **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations`, `odds_bout_match_reviews`; migration `0014_odds_matching` (final unshipped schema) |
 | **Next DWCS** | `--next-dwcs --as-of <UTC>` selects nearest upcoming DWCS card (fight-night cluster), scopes provider events, fail-closed on zero bouts/events |
 | **CLI** | `mma-model odds reconcile --next-dwcs --strict [--as-of …]`; golden seeding only with `--golden-card` + `--offline-fixtures` + disposable `--database-url` |
 | **Golden** | Offline/disposable-DB only; committed fixtures under `tests/fixtures/odds/golden/` must achieve 100% exact active-bout matches |

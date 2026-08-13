@@ -14,6 +14,7 @@ stale_after_minutes: 360
 match_rules:
   - provider_id
   - participant_pair
+  - manual_review
 
 match_statuses:
   - matched
@@ -40,7 +41,8 @@ prohibited:
 notes: >
   Stored provider IDs are a strong candidate only after verifying the linked bout
   exists, is active DWCS, matches both participants order-independently, and lies
-  inside match_window_minutes. Ambiguity uses the dedicated odds-bout review queue.
-  Replacements version aliases (immutable BoutSourceId) and never inherit old quotes.
-  stale_after_minutes is computed from latest quote timestamps. Golden seeding is
-  offline/disposable-DB only.
+  inside match_window_minutes. Ambiguity uses the dedicated odds-bout review queue
+  with manual_review activation after revalidation. First alias versions include
+  prior quotes; reused-ID replacement versions establish a quote cutoff. Lifecycle
+  and quote freshness are PIT-safe at observed_at. Golden seeding is
+  offline/disposable-DB only against one card event.

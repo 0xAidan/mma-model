@@ -18,6 +18,7 @@ from mma_model.db.tables.core import (
     CanonicalFighter,
 )
 from mma_model.db.tables.odds import OddsEventRow, OddsMatchObservation, OddsProviderEventAlias
+from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.lifecycle import (
     OddsBoutLifecycleState,
     apply_bout_lifecycle,
@@ -25,6 +26,7 @@ from mma_model.odds.lifecycle import (
 )
 from mma_model.odds.match_review import enqueue_bout_match_review
 from mma_model.odds.matching import (
+    MATCH_RULE_MANUAL_REVIEW,
     MATCH_RULE_PARTICIPANT_PAIR,
     MATCH_RULE_PROVIDER_ID,
     MATCH_STATUS_AMBIGUOUS,
@@ -39,7 +41,13 @@ from mma_model.odds.matching import (
     require_aware_utc,
 )
 from mma_model.odds.snapshot import OddsOfflineModeError, require_disposable_database_url
-from mma_model.odds.types import PROVIDER_THE_ODDS_API
+from mma_model.odds.store import OddsQuoteStore
+from mma_model.odds.types import (
+    PROVIDER_THE_ODDS_API,
+    NormalizedQuote,
+    OddsEvent,
+    QuoteAvailability,
+)
 
 _DWCS_SERIES = frozenset({"dwcs", "dwcs_brazil"})
 _INACTIVE_BOUT = frozenset({"cancelled", "canceled", "replaced"})
@@ -71,10 +79,9 @@ def seed_canonical_card(session: Session, card: Mapping[str, Any]) -> None:
     """Idempotently seed canonical fighters/events/bouts from a golden card.
 
     Test/offline only. Production CLI must not call this against a live DB.
-    Bouts share a card-anchor DWCS event when their start equals the card
-    minimum; otherwise each bout gets its own DWCS event (same series) so
-    participant+time matching stays exact. ``--next-dwcs`` expands the
-    nearest upcoming event to the full fight-night cluster.
+    Mirrors production cardinality: one DWCS card event, many bouts. Provider
+    commence times in golden fixtures must lie within ``match_window_minutes``
+    of that shared event scheduled start.
     """
     card_id = str(card.get("card_id") or "golden-card")
     bouts = list(card.get("bouts") or [])
@@ -91,8 +98,10 @@ def seed_canonical_card(session: Session, card: Mapping[str, Any]) -> None:
             session.add(CanonicalFighter(id=fb_id, display_name=str(bout["fighter_b"])))
     session.flush()
 
-    starts = [_parse_utc(str(bout["scheduled_start"])) for bout in bouts]
-    card_start = min(starts)
+    if card.get("scheduled_start"):
+        card_start = _parse_utc(str(card["scheduled_start"]))
+    else:
+        card_start = min(_parse_utc(str(bout["scheduled_start"])) for bout in bouts)
     event_id = f"{card_id}:event"
     if session.get(CanonicalEvent, event_id) is None:
         session.add(
@@ -106,35 +115,72 @@ def seed_canonical_card(session: Session, card: Mapping[str, Any]) -> None:
         )
         session.flush()
 
-    # Per-bout scheduled starts: create lightweight child events when a bout's
-    # start differs from the card anchor so participant+time matching stays exact.
-    for index, bout in enumerate(bouts):
+    for bout in bouts:
         bout_id = str(bout["bout_id"])
-        bout_start = _parse_utc(str(bout["scheduled_start"]))
-        if bout_start == card_start:
-            bout_event_id = event_id
-        else:
-            bout_event_id = f"{card_id}:event:{index}:{bout_id}"
-            if session.get(CanonicalEvent, bout_event_id) is None:
-                session.add(
-                    CanonicalEvent(
-                        id=bout_event_id,
-                        name=f"{card_id} bout {index + 1}",
-                        series="dwcs",
-                        status="scheduled",
-                        scheduled_start_at=bout_start,
-                    )
-                )
         if session.get(CanonicalBout, bout_id) is not None:
             continue
         session.add(
             CanonicalBout(
                 id=bout_id,
-                event_id=bout_event_id,
+                event_id=event_id,
                 fighter_a_id=f"{bout_id}:a",
                 fighter_b_id=f"{bout_id}:b",
                 status=str(bout.get("status") or "scheduled"),
             )
+        )
+    session.flush()
+
+
+def _seed_golden_quotes(
+    session: Session,
+    fixture_events: Sequence[Mapping[str, Any]],
+    *,
+    provider: str,
+    observed_at: datetime,
+) -> None:
+    """Offline golden only: seed one quote per fixture event before matching."""
+    store = OddsQuoteStore(session)
+    for index, event in enumerate(fixture_events):
+        external_id = str(event["id"])
+        commence = _parse_utc(str(event["commence_time"]))
+        row = store.upsert_event(
+            OddsEvent(
+                id=external_id,
+                sport_key=str(event.get("sport_key") or "mma_mixed_martial_arts"),
+                commence_time=commence,
+                home_team=str(event["home_team"]),
+                away_team=str(event["away_team"]),
+            ),
+            provider=provider,
+        )
+        store.append_quotes(
+            [
+                NormalizedQuote(
+                    provider=provider,
+                    bookmaker_key="fanduel",
+                    bookmaker_title="FanDuel",
+                    region="us",
+                    event_id=external_id,
+                    home_team=str(event["home_team"]),
+                    away_team=str(event["away_team"]),
+                    market_family=MarketFamily.MONEYLINE,
+                    provider_market_key="h2h",
+                    outcome_key=OutcomeKey.FIGHTER_A,
+                    outcome_label=str(event["home_team"]),
+                    line_point=None,
+                    price_decimal=1.91,
+                    availability=QuoteAvailability.AVAILABLE,
+                    # Quote clock follows reconcile as_of/observed_at so golden
+                    # eligibility is not falsely stale relative to wall clock.
+                    observed_at=observed_at,
+                    source_updated_at=None,
+                    commence_time=commence,
+                    snapshot_at=None,
+                    raw_ref=f"golden-quote-{index}",
+                    dedupe_key=f"golden-quote-{external_id}",
+                )
+            ],
+            events_by_external_id={external_id: row},
         )
     session.flush()
 
@@ -260,6 +306,23 @@ def supersede_provider_aliases(
     return len(rows)
 
 
+def supersede_provider_alias_if_active(
+    session: Session,
+    *,
+    alias_id: str,
+    observed_at: datetime,
+) -> bool:
+    """Supersede one alias by id only when it is still active."""
+    stamp = require_aware_utc(observed_at, field="observed_at")
+    row = session.get(OddsProviderEventAlias, alias_id)
+    if row is None or row.status != "active":
+        return False
+    row.status = "superseded"
+    row.superseded_at = stamp
+    session.flush()
+    return True
+
+
 def persist_match_decision(
     session: Session,
     decision: OddsMatchDecision,
@@ -323,6 +386,16 @@ def persist_match_decision(
                 bout_id=decision.bout_id,
                 lifecycle=OddsBoutLifecycleState.STALE,
                 evidence_kind="quote_age_exceeds_stale_after_minutes",
+                observed_at=stamp,
+                provider=decision.provider,
+                external_event_id=decision.external_event_id,
+            )
+        elif decision.lifecycle is OddsBoutLifecycleState.MISSING_UNKNOWN:
+            apply_bout_lifecycle(
+                session,
+                bout_id=decision.bout_id,
+                lifecycle=OddsBoutLifecycleState.MISSING_UNKNOWN,
+                evidence_kind="no_quotes_for_matched_event",
                 observed_at=stamp,
                 provider=decision.provider,
                 external_event_id=decision.external_event_id,
@@ -668,6 +741,7 @@ def run_odds_reconcile(
         card = load_golden_card(golden_card_path)
         seed_canonical_card(session, card)
         fixture_events = list(card.get("provider_events") or [])
+        _seed_golden_quotes(session, fixture_events, provider=provider, observed_at=stamp)
 
     blockers: list[dict[str, Any]] = []
     scoped_event: CanonicalEvent | None = None
@@ -851,7 +925,11 @@ def run_odds_reconcile(
         ),
         "blockers": blockers_sorted,
         "decisions": decision_rows,
-        "rules": [MATCH_RULE_PROVIDER_ID, MATCH_RULE_PARTICIPANT_PAIR],
+        "rules": [
+            MATCH_RULE_PROVIDER_ID,
+            MATCH_RULE_PARTICIPANT_PAIR,
+            MATCH_RULE_MANUAL_REVIEW,
+        ],
         "notes": [
             "Exact bookmaker lines remain optional enrichment.",
             "Sportsbook-agnostic actionable price guidance remains mandatory fallback.",

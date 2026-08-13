@@ -40,18 +40,23 @@ from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.lifecycle import (
     OddsBoutLifecycleState,
     QuoteValueEligibility,
+    alias_effective_at,
     apply_bout_lifecycle,
     classify_quote_value_eligibility,
+    latest_bout_lifecycle,
     quotes_visible_under_active_alias,
+    quotes_visible_under_alias_at,
 )
 from mma_model.odds.match_review import (
     OddsBoutMatchReviewError,
     approve_bout_match_review,
+    enqueue_bout_match_review,
     reject_bout_match_review,
     reverse_bout_match_review,
 )
 from mma_model.odds.matching import (
     EXPECTED_MATCHING_CONTRACT_VERSION,
+    MATCH_RULE_MANUAL_REVIEW,
     MATCH_RULE_PARTICIPANT_PAIR,
     MATCH_RULE_PROVIDER_ID,
     MATCH_STATUS_AMBIGUOUS,
@@ -92,7 +97,7 @@ GOLDEN_REPLACEMENT = REPO_ROOT / "tests/fixtures/odds/golden/card_replacement.js
 OBSERVED = datetime(2026, 8, 12, 18, 0, tzinfo=UTC)
 AS_OF_CARD = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
 PINNED_DIGEST_LITERAL = (
-    "ada7d61aea144b2691f38529735b8cf07b6af358b96d0b9e20b7c3417332a982"
+    "f5406f7c5600646c3ab33c7767c2f4a881ef6abf6beea6fe891f06f248906305"
 )
 
 
@@ -215,6 +220,56 @@ def test_require_aware_utc_rejects_naive() -> None:
 # --- provider-ID safety ---------------------------------------------------
 
 
+def _add_quote(
+    session,
+    *,
+    external_id: str,
+    home: str,
+    away: str,
+    commence: datetime,
+    observed_at: datetime,
+    dedupe: str,
+) -> None:
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id=external_id,
+            sport_key="mma_mixed_martial_arts",
+            commence_time=commence,
+            home_team=home,
+            away_team=away,
+        ),
+        provider=PROVIDER_THE_ODDS_API,
+    )
+    store.append_quotes(
+        [
+            NormalizedQuote(
+                provider=PROVIDER_THE_ODDS_API,
+                bookmaker_key="fanduel",
+                bookmaker_title="FanDuel",
+                region="us",
+                event_id=external_id,
+                home_team=home,
+                away_team=away,
+                market_family=MarketFamily.MONEYLINE,
+                provider_market_key="h2h",
+                outcome_key=OutcomeKey.FIGHTER_A,
+                outcome_label=home,
+                line_point=None,
+                price_decimal=1.9,
+                availability=QuoteAvailability.AVAILABLE,
+                observed_at=observed_at,
+                source_updated_at=None,
+                commence_time=commence,
+                snapshot_at=None,
+                raw_ref=dedupe,
+                dedupe_key=dedupe,
+            )
+        ],
+        events_by_external_id={external_id: event_row},
+    )
+
+
 def test_provider_id_match_requires_participant_and_time(tmp_path: Path) -> None:
     session = _session(tmp_path)
     start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
@@ -233,6 +288,15 @@ def test_provider_id_match_requires_participant_and_time(tmp_path: Path) -> None
             external_id="prov-stored-id",
         )
     )
+    _add_quote(
+        session,
+        external_id="prov-stored-id",
+        home="Bravo Fighter",
+        away="Alpha Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(minutes=5),
+        dedupe="prov-stored-quote",
+    )
     session.commit()
 
     decision = match_provider_event(
@@ -242,6 +306,7 @@ def test_provider_id_match_requires_participant_and_time(tmp_path: Path) -> None
         home_team="Bravo Fighter",
         away_team="Alpha Fighter",
         commence_time=start,
+        observed_at=OBSERVED,
     )
     assert decision.status == MATCH_STATUS_MATCHED
     assert decision.match_rule == MATCH_RULE_PROVIDER_ID
@@ -1048,12 +1113,32 @@ def test_lifecycle_requires_evidence_and_never_forward_fills(tmp_path: Path) -> 
     )
     session.commit()
 
-    with pytest.raises(ValueError, match="evidence"):
+    with pytest.raises(ValueError, match="evidence_kind|disallowed|unknown"):
         apply_bout_lifecycle(
             session,
             bout_id="bout-l",
             lifecycle=OddsBoutLifecycleState.LOCKED,
             evidence_kind="",
+            observed_at=OBSERVED,
+        )
+
+    with pytest.raises(ValueError, match="disallowed|unknown"):
+        apply_bout_lifecycle(
+            session,
+            bout_id="bout-l",
+            lifecycle=OddsBoutLifecycleState.LOCKED,
+            evidence_kind="probably_locked",
+            observed_at=OBSERVED,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-l",
+        )
+
+    with pytest.raises(ValueError, match="provider and external_event_id"):
+        apply_bout_lifecycle(
+            session,
+            bout_id="bout-l",
+            lifecycle=OddsBoutLifecycleState.LOCKED,
+            evidence_kind="provider_lock_signal",
             observed_at=OBSERVED,
         )
 
@@ -1064,6 +1149,8 @@ def test_lifecycle_requires_evidence_and_never_forward_fills(tmp_path: Path) -> 
             lifecycle=OddsBoutLifecycleState.LOCKED,
             evidence_kind="provider_lock_signal",
             observed_at=OBSERVED,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-l",
             price_decimal=1.95,
         )
 
@@ -1281,7 +1368,7 @@ def test_quote_history_survives_cancellation(tmp_path: Path) -> None:
 # --- migrations / integrity ----------------------------------------------
 
 
-def test_migration_creates_matching_tables_and_indexes(tmp_path: Path) -> None:
+def test_migration_upgrade_downgrade_preserves_schema_roundtrip(tmp_path: Path) -> None:
     db_path = tmp_path / "mig203.db"
     command.upgrade(_alembic_config(db_path), "head")
     engine = create_engine(f"sqlite:///{db_path}", future=True)
@@ -1302,6 +1389,31 @@ def test_migration_creates_matching_tables_and_indexes(tmp_path: Path) -> None:
         }
         assert "uq_odds_provider_event_alias_active" in indexes
         assert "uq_odds_bout_match_reviews_pending_provider_ext" in indexes
+        cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(odds_bout_match_reviews)"))
+        }
+        assert "activated_alias_id" in cols
+        assert "activated_alias_version" in cols
+
+    command.downgrade(_alembic_config(db_path), "0013_odds_manual_prices")
+    with engine.begin() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+        assert "odds_provider_event_aliases" not in tables
+        assert "odds_bout_match_reviews" not in tables
+        assert "odds_match_observations" not in tables
+
+    command.upgrade(_alembic_config(db_path), "head")
+    with engine.begin() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+        assert "odds_bout_match_reviews" in tables
+        assert "odds_provider_event_aliases" in tables
 
 
 def test_raw_sql_rejects_integrity_violations(tmp_path: Path) -> None:
@@ -1664,3 +1776,486 @@ def test_matching_contract_loads_from_non_editable_wheel_install(tmp_path: Path)
     assert probe.returncode == 0, probe.stdout + probe.stderr
     assert "WHEEL_MATCHING_OK" in probe.stdout
     assert PINNED_DIGEST_LITERAL in probe.stdout
+
+
+# --- second-review: PIT / alias / review / statuses -----------------------
+
+
+def test_quote_first_then_match_keeps_quotes_visible(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-q1",
+        event_id="evt-q1",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _add_quote(
+        session,
+        external_id="prov-q1",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(minutes=30),
+        dedupe="q1-first",
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-q1",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+    assert decision.eligible_for_value is True
+    visible = quotes_visible_under_alias_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-q1",
+        as_of=OBSERVED,
+    )
+    assert len(visible) == 1
+
+
+def test_no_quotes_matched_is_missing_blocked(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-nq",
+        event_id="evt-nq",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-nq",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    assert decision.status == MATCH_STATUS_MATCHED
+    assert decision.lifecycle == OddsBoutLifecycleState.MISSING_UNKNOWN
+    assert decision.eligible_for_value is False
+
+
+def test_pit_future_lifecycle_and_quotes_do_not_leak(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-pit",
+        event_id="evt-pit",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _add_quote(
+        session,
+        external_id="prov-pit",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(hours=1),
+        dedupe="pit-old",
+    )
+    session.commit()
+    past = OBSERVED - timedelta(minutes=10)
+    decision_past = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-pit",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=past,
+    )
+    assert decision_past.eligible_for_value is True
+    persist_match_decision(session, decision_past, observed_at=past)
+
+    apply_bout_lifecycle(
+        session,
+        bout_id="bout-pit",
+        lifecycle=OddsBoutLifecycleState.CANCELLED,
+        evidence_kind="canonical_bout_cancelled",
+        observed_at=OBSERVED + timedelta(hours=1),
+    )
+    _add_quote(
+        session,
+        external_id="prov-pit",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED + timedelta(hours=2),
+        dedupe="pit-future",
+    )
+    session.commit()
+
+    latest_past = latest_bout_lifecycle(
+        session, bout_id="bout-pit", as_of=past, provider=PROVIDER_THE_ODDS_API
+    )
+    assert latest_past is None or latest_past.lifecycle != "cancelled"
+    visible_past = quotes_visible_under_alias_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-pit",
+        as_of=past,
+    )
+    assert all(q.dedupe_key != "pit-future" for q in visible_past)
+    decision_replay = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-pit",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=past,
+    )
+    assert decision_replay.lifecycle != OddsBoutLifecycleState.CANCELLED
+
+
+def test_alias_effective_at_historical_replacement(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 9, 1, 2, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="old-bout",
+        event_id="evt-h1",
+        fighter_a="Alex Original",
+        fighter_b="Blake Opponent",
+        start=start,
+    )
+    _seed_bout(
+        session,
+        bout_id="new-bout",
+        event_id="evt-h2",
+        fighter_a="Alex Original",
+        fighter_b="Casey Replacement",
+        start=start,
+    )
+    t0 = OBSERVED - timedelta(hours=2)
+    t1 = OBSERVED
+    first = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-hist",
+        home_team="Alex Original",
+        away_team="Blake Opponent",
+        commence_time=start,
+        observed_at=t0,
+    )
+    _add_quote(
+        session,
+        external_id="prov-hist",
+        home="Alex Original",
+        away="Blake Opponent",
+        commence=start,
+        observed_at=t0 - timedelta(minutes=5),
+        dedupe="hist-old",
+    )
+    persist_match_decision(session, first, observed_at=t0)
+    apply_replacement(
+        session,
+        old_bout_id="old-bout",
+        new_bout_id="new-bout",
+        provider=PROVIDER_THE_ODDS_API,
+        old_external_event_id="prov-hist",
+        new_external_event_id="prov-hist",
+        new_home_team="Casey Replacement",
+        new_away_team="Alex Original",
+        new_commence_time=start,
+        observed_at=t1,
+    )
+    session.commit()
+    before = alias_effective_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-hist",
+        as_of=t0 + timedelta(minutes=1),
+    )
+    assert before is not None
+    assert before.bout_id == "old-bout"
+    after = alias_effective_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-hist",
+        as_of=t1 + timedelta(minutes=1),
+    )
+    assert after is not None
+    assert after.bout_id == "new-bout"
+    visible_after = quotes_visible_under_alias_at(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-hist",
+        as_of=t1 + timedelta(minutes=1),
+    )
+    assert visible_after == []
+
+
+def test_review_approval_requires_candidates_and_revalidation(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-ok",
+        event_id="evt-ok",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _seed_bout(
+        session,
+        bout_id="bout-ufc",
+        event_id="evt-ufc",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+        series="ufc",
+    )
+    empty_id = enqueue_bout_match_review(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-empty",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        candidate_bout_ids=(),
+        reason="empty",
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    with pytest.raises(OddsBoutMatchReviewError, match="empty candidate"):
+        approve_bout_match_review(
+            session,
+            review_id=empty_id,
+            bout_id="bout-ok",
+            actor="ops",
+            expected_version=1,
+        )
+
+    review_id = enqueue_bout_match_review(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-rev-val",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        candidate_bout_ids=("bout-ok", "bout-ufc"),
+        reason="ambig",
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    with pytest.raises(OddsBoutMatchReviewError, match="revalidation|DWCS"):
+        approve_bout_match_review(
+            session,
+            review_id=review_id,
+            bout_id="bout-ufc",
+            actor="ops",
+            expected_version=1,
+        )
+    with pytest.raises(OddsBoutMatchReviewError, match="revalidation|participants"):
+        # wrong participants on review fields vs bout-ok names... use wrong names via new review
+        bad = enqueue_bout_match_review(
+            session,
+            provider=PROVIDER_THE_ODDS_API,
+            external_event_id="prov-wrong-part",
+            home_team="Wrong One",
+            away_team="Wrong Two",
+            commence_time=start,
+            candidate_bout_ids=("bout-ok",),
+            reason="bad",
+            observed_at=OBSERVED,
+        )
+        session.commit()
+        approve_bout_match_review(
+            session,
+            review_id=bad,
+            bout_id="bout-ok",
+            actor="ops",
+            expected_version=1,
+        )
+
+    approved = approve_bout_match_review(
+        session,
+        review_id=review_id,
+        bout_id="bout-ok",
+        actor="ops",
+        expected_version=1,
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    assert approved.activated_alias_id is not None
+    alias = session.get(OddsProviderEventAlias, approved.activated_alias_id)
+    assert alias is not None
+    assert alias.match_rule == MATCH_RULE_MANUAL_REVIEW
+
+
+def test_pending_review_evidence_change_increments_version(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    review_id = enqueue_bout_match_review(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-cas",
+        home_team="A",
+        away_team="B",
+        commence_time=start,
+        candidate_bout_ids=("bout-1",),
+        reason="first",
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    row = session.get(OddsBoutMatchReview, review_id)
+    assert row is not None
+    assert row.version == 1
+    enqueue_bout_match_review(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-cas",
+        home_team="A",
+        away_team="B",
+        commence_time=start,
+        candidate_bout_ids=("bout-1", "bout-2"),
+        reason="updated",
+        observed_at=OBSERVED + timedelta(minutes=1),
+    )
+    session.commit()
+    session.refresh(row)
+    assert row.version == 2
+    assert "bout-2" in row.candidate_bout_ids_json
+
+
+def test_reverse_only_owned_alias_preserves_newer(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-a",
+        event_id="evt-r1",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _seed_bout(
+        session,
+        bout_id="bout-b",
+        event_id="evt-r1",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    review_id = enqueue_bout_match_review(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-owned",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        candidate_bout_ids=("bout-a", "bout-b"),
+        reason="ambig",
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    first = approve_bout_match_review(
+        session,
+        review_id=review_id,
+        bout_id="bout-a",
+        actor="ops",
+        expected_version=1,
+        observed_at=OBSERVED,
+    )
+    session.commit()
+    owned_id = first.activated_alias_id
+    # Newer alias from later match/replacement path
+    from mma_model.odds.reconcile import activate_provider_alias
+
+    newer = activate_provider_alias(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-owned",
+        bout_id="bout-b",
+        match_rule=MATCH_RULE_PARTICIPANT_PAIR,
+        observed_at=OBSERVED + timedelta(minutes=5),
+    )
+    session.commit()
+    reverse_bout_match_review(
+        session,
+        review_id=review_id,
+        actor="ops",
+        expected_version=2,
+        observed_at=OBSERVED + timedelta(minutes=10),
+    )
+    session.commit()
+    owned = session.get(OddsProviderEventAlias, owned_id)
+    assert owned is not None
+    assert owned.status == "superseded"
+    session.refresh(newer)
+    assert newer.status == "active"
+    assert newer.bout_id == "bout-b"
+
+
+def test_unknown_bout_and_cancelled_event_not_active(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-unk",
+        event_id="evt-unk",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+        bout_status="mystery",
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-unk",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+    )
+    assert decision.status == MATCH_STATUS_UNMATCHED
+
+    _seed_bout(
+        session,
+        bout_id="bout-ce",
+        event_id="evt-ce",
+        fighter_a="Alpha Fighter",
+        fighter_b="Charlie Fighter",
+        start=start,
+        event_status="cancelled",
+    )
+    session.commit()
+    decision2 = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-ce",
+        home_team="Alpha Fighter",
+        away_team="Charlie Fighter",
+        commence_time=start,
+    )
+    assert decision2.status == MATCH_STATUS_UNMATCHED
+
+
+def test_golden_uses_single_card_event(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    card = load_golden_card(GOLDEN_ACTIVE)
+    seed_canonical_card(session, card)
+    session.commit()
+    events = session.scalars(select(CanonicalEvent)).all()
+    assert len(events) == 1
+    assert events[0].id == "dwcs-golden-s10e1:event"
+    bouts = session.scalars(select(CanonicalBout)).all()
+    assert len(bouts) == 5
+    assert {bout.event_id for bout in bouts} == {"dwcs-golden-s10e1:event"}

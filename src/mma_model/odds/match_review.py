@@ -16,14 +16,15 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import set_committed_value
 
-from mma_model.db.tables.core import CanonicalBout
-from mma_model.db.tables.odds import OddsBoutMatchReview
+from mma_model.db.tables.odds import OddsBoutMatchReview, OddsProviderEventAlias
 from mma_model.odds.lifecycle import OddsBoutLifecycleState, apply_bout_lifecycle
 from mma_model.odds.matching import (
-    MATCH_RULE_PROVIDER_ID,
+    MATCH_RULE_MANUAL_REVIEW,
     as_utc_sqlite,
     dump_evidence,
+    load_matching_contract,
     require_aware_utc,
+    validate_linked_bout,
 )
 
 ReviewStatus = Literal["pending", "approved", "rejected", "reversed"]
@@ -59,9 +60,21 @@ def enqueue_bout_match_review(
     observed_at: datetime | None = None,
     actor: str = "odds_reconcile",
 ) -> str:
-    """Idempotently enqueue a pending odds-bout match review; returns review id."""
+    """Idempotently enqueue a pending odds-bout match review; returns review id.
+
+    Pending evidence/candidate changes use optimistic CAS and increment version.
+    """
     stamp = require_aware_utc(observed_at or _utc_now(), field="observed_at")
     commence = require_aware_utc(commence_time, field="commence_time")
+    candidates_json = json.dumps(list(candidate_bout_ids))
+    evidence_json = dump_evidence(
+        {
+            "kind": "odds_bout_match_review",
+            "reason": reason,
+            "candidate_bout_ids": list(candidate_bout_ids),
+            "actor": actor,
+        }
+    )
     existing = session.scalar(
         select(OddsBoutMatchReview).where(
             OddsBoutMatchReview.provider == provider,
@@ -70,13 +83,39 @@ def enqueue_bout_match_review(
         )
     )
     if existing is not None:
-        existing.candidate_bout_ids_json = json.dumps(list(candidate_bout_ids))
-        existing.reason = reason
-        existing.home_team = home_team
-        existing.away_team = away_team
-        existing.commence_time = commence
-        existing.updated_at = stamp
-        session.flush()
+        unchanged = (
+            existing.candidate_bout_ids_json == candidates_json
+            and existing.reason == reason
+            and existing.home_team == home_team
+            and existing.away_team == away_team
+            and as_utc_sqlite(existing.commence_time) == commence
+        )
+        if unchanged:
+            return existing.id
+        result = session.execute(
+            update(OddsBoutMatchReview)
+            .where(
+                OddsBoutMatchReview.id == existing.id,
+                OddsBoutMatchReview.status == "pending",
+                OddsBoutMatchReview.version == existing.version,
+            )
+            .values(
+                candidate_bout_ids_json=candidates_json,
+                reason=reason,
+                home_team=home_team,
+                away_team=away_team,
+                commence_time=commence,
+                evidence_json=evidence_json,
+                version=existing.version + 1,
+                updated_at=stamp,
+            )
+        )
+        if result.rowcount != 1:
+            raise OddsBoutMatchReviewError(
+                "concurrent pending review update rejected (stale version)"
+            )
+        session.expire(existing)
+        session.refresh(existing)
         return existing.id
 
     row = OddsBoutMatchReview(
@@ -88,17 +127,10 @@ def enqueue_bout_match_review(
         home_team=home_team,
         away_team=away_team,
         commence_time=commence,
-        candidate_bout_ids_json=json.dumps(list(candidate_bout_ids)),
+        candidate_bout_ids_json=candidates_json,
         reason=reason,
         rule_id=RULE_ODDS_BOUT_AMBIGUOUS,
-        evidence_json=dump_evidence(
-            {
-                "kind": "odds_bout_match_review",
-                "reason": reason,
-                "candidate_bout_ids": list(candidate_bout_ids),
-                "actor": actor,
-            }
-        ),
+        evidence_json=evidence_json,
         created_at=stamp,
         updated_at=stamp,
     )
@@ -109,7 +141,7 @@ def enqueue_bout_match_review(
 
 def _committed_review_snapshot(
     session: Session, review_id: str
-) -> tuple[str, int, str | None] | None:
+) -> tuple[str, int, str | None, str | None, int | None] | None:
     bind = session.get_bind()
     with bind.connect() as conn:
         row = conn.execute(
@@ -117,11 +149,19 @@ def _committed_review_snapshot(
                 OddsBoutMatchReview.status,
                 OddsBoutMatchReview.version,
                 OddsBoutMatchReview.decision_bout_id,
+                OddsBoutMatchReview.activated_alias_id,
+                OddsBoutMatchReview.activated_alias_version,
             ).where(OddsBoutMatchReview.id == review_id)
         ).one_or_none()
     if row is None:
         return None
-    return (str(row[0]), int(row[1]), row[2])
+    return (
+        str(row[0]),
+        int(row[1]),
+        row[2],
+        row[3],
+        int(row[4]) if row[4] is not None else None,
+    )
 
 
 def approve_bout_match_review(
@@ -146,7 +186,7 @@ def approve_bout_match_review(
     committed = _committed_review_snapshot(session, review_id)
     if committed is None:
         raise OddsBoutMatchReviewError(f"review not found: {review_id}")
-    status, version, _decision = committed
+    status, version, _decision, _alias_id, _alias_ver = committed
     if status != "pending":
         raise OddsBoutMatchReviewError(f"review not pending (status={status})")
     if version != expected_version:
@@ -154,18 +194,41 @@ def approve_bout_match_review(
             f"stale review version: expected {expected_version}, got {version}"
         )
     candidates = _parse_candidates(review.candidate_bout_ids_json)
-    if candidates and bout_id not in candidates:
+    if not candidates:
+        raise OddsBoutMatchReviewError(
+            "empty candidate_bout_ids cannot be approved; revalidate candidates first"
+        )
+    if bout_id not in candidates:
         raise OddsBoutMatchReviewError(
             f"bout_id {bout_id!r} not in candidate set {candidates!r}"
         )
-    bout = session.get(CanonicalBout, bout_id)
-    if bout is None:
-        raise OddsBoutMatchReviewError(f"canonical bout missing: {bout_id}")
-    if bout.status in {"cancelled", "canceled", "replaced"}:
-        raise OddsBoutMatchReviewError(
-            f"cannot approve inactive bout status={bout.status}"
-        )
+    contract = load_matching_contract()
+    ok, reason = validate_linked_bout(
+        session,
+        bout_id=bout_id,
+        home_team=review.home_team,
+        away_team=review.away_team,
+        commence_time=as_utc_sqlite(review.commence_time),
+        max_delta_minutes=contract.match_window_minutes,
+        require_dwcs=True,
+    )
+    if not ok:
+        raise OddsBoutMatchReviewError(f"approval revalidation failed: {reason}")
 
+    alias = activate_provider_alias(
+        session,
+        provider=review.provider,
+        external_event_id=review.external_event_id,
+        bout_id=bout_id,
+        match_rule=MATCH_RULE_MANUAL_REVIEW,
+        observed_at=stamp,
+        evidence={
+            "review_id": review_id,
+            "approved_by": actor_text,
+            "reason": review.reason,
+        },
+        write_immutable_source_id=True,
+    )
     result = session.execute(
         update(OddsBoutMatchReview)
         .where(
@@ -177,6 +240,8 @@ def approve_bout_match_review(
             status="approved",
             version=expected_version + 1,
             decision_bout_id=bout_id,
+            activated_alias_id=alias.id,
+            activated_alias_version=alias.alias_version,
             decided_by=actor_text,
             decided_at=stamp,
             updated_at=stamp,
@@ -185,20 +250,6 @@ def approve_bout_match_review(
     if result.rowcount != 1:
         raise OddsBoutMatchReviewError("concurrent review update rejected")
 
-    activate_provider_alias(
-        session,
-        provider=review.provider,
-        external_event_id=review.external_event_id,
-        bout_id=bout_id,
-        match_rule=MATCH_RULE_PROVIDER_ID,
-        observed_at=stamp,
-        evidence={
-            "review_id": review_id,
-            "approved_by": actor_text,
-            "reason": review.reason,
-        },
-        write_immutable_source_id=True,
-    )
     apply_bout_lifecycle(
         session,
         bout_id=bout_id,
@@ -214,6 +265,8 @@ def approve_bout_match_review(
     set_committed_value(review, "status", "approved")
     set_committed_value(review, "version", expected_version + 1)
     set_committed_value(review, "decision_bout_id", bout_id)
+    set_committed_value(review, "activated_alias_id", alias.id)
+    set_committed_value(review, "activated_alias_version", alias.alias_version)
     return review
 
 
@@ -236,7 +289,7 @@ def reject_bout_match_review(
     committed = _committed_review_snapshot(session, review_id)
     if committed is None:
         raise OddsBoutMatchReviewError(f"review not found: {review_id}")
-    status, version, _decision = committed
+    status, version, _decision, _alias_id, _alias_ver = committed
     if status != "pending":
         raise OddsBoutMatchReviewError(f"review not pending (status={status})")
     if version != expected_version:
@@ -276,8 +329,8 @@ def reverse_bout_match_review(
     expected_version: int,
     observed_at: datetime | None = None,
 ) -> OddsBoutMatchReview:
-    """Reverse an approved/rejected review back to pending; supersede active alias if any."""
-    from mma_model.odds.reconcile import supersede_provider_aliases
+    """Reverse an approved/rejected review; supersede only this review's alias."""
+    from mma_model.odds.reconcile import supersede_provider_alias_if_active
 
     actor_text = (actor or "").strip()
     if not actor_text:
@@ -289,7 +342,7 @@ def reverse_bout_match_review(
     committed = _committed_review_snapshot(session, review_id)
     if committed is None:
         raise OddsBoutMatchReviewError(f"review not found: {review_id}")
-    status, version, decision_bout_id = committed
+    status, version, decision_bout_id, activated_alias_id, _alias_ver = committed
     if status not in {"approved", "rejected"}:
         raise OddsBoutMatchReviewError(
             f"only approved/rejected reviews reverse (status={status})"
@@ -298,24 +351,29 @@ def reverse_bout_match_review(
         raise OddsBoutMatchReviewError(
             f"stale review version: expected {expected_version}, got {version}"
         )
-    if status == "approved":
-        supersede_provider_aliases(
-            session,
-            provider=review.provider,
-            external_event_id=review.external_event_id,
-            observed_at=stamp,
-        )
-        if decision_bout_id:
-            apply_bout_lifecycle(
+    reversed_owned_alias = False
+    preserved_newer_alias = False
+    if status == "approved" and activated_alias_id:
+        owned = session.get(OddsProviderEventAlias, activated_alias_id)
+        if owned is not None and owned.status == "active":
+            reversed_owned_alias = supersede_provider_alias_if_active(
                 session,
-                bout_id=decision_bout_id,
-                lifecycle=OddsBoutLifecycleState.REVIEW_BLOCKED,
-                evidence_kind="odds_bout_match_review_reversed",
+                alias_id=activated_alias_id,
                 observed_at=stamp,
-                provider=review.provider,
-                external_event_id=review.external_event_id,
-                detail=f"review_id={review_id}",
             )
+            if reversed_owned_alias and decision_bout_id:
+                apply_bout_lifecycle(
+                    session,
+                    bout_id=decision_bout_id,
+                    lifecycle=OddsBoutLifecycleState.REVIEW_BLOCKED,
+                    evidence_kind="odds_bout_match_review_reversed",
+                    observed_at=stamp,
+                    provider=review.provider,
+                    external_event_id=review.external_event_id,
+                    detail=f"review_id={review_id}",
+                )
+        else:
+            preserved_newer_alias = True
     result = session.execute(
         update(OddsBoutMatchReview)
         .where(
@@ -329,6 +387,16 @@ def reverse_bout_match_review(
             decided_by=actor_text,
             decided_at=stamp,
             updated_at=stamp,
+            evidence_json=dump_evidence(
+                {
+                    **json.loads(review.evidence_json or "{}"),
+                    "reversal": {
+                        "reversed_owned_alias": reversed_owned_alias,
+                        "preserved_newer_alias": preserved_newer_alias,
+                        "activated_alias_id": activated_alias_id,
+                    },
+                }
+            ),
         )
     )
     if result.rowcount != 1:
@@ -352,5 +420,7 @@ def review_as_dict(review: OddsBoutMatchReview) -> dict[str, Any]:
         "candidate_bout_ids": list(_parse_candidates(review.candidate_bout_ids_json)),
         "reason": review.reason,
         "decision_bout_id": review.decision_bout_id,
+        "activated_alias_id": review.activated_alias_id,
+        "activated_alias_version": review.activated_alias_version,
         "decided_by": review.decided_by,
     }

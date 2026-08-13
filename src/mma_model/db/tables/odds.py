@@ -340,7 +340,7 @@ class OddsManualPriceObservation(Base):
 
 _ALIAS_STATUS_SQL = "'active', 'superseded'"
 _MATCH_STATUS_SQL = "'matched', 'unmatched', 'ambiguous_blocked'"
-_MATCH_RULE_SQL = "'provider_id', 'participant_pair'"
+_MATCH_RULE_SQL = "'provider_id', 'participant_pair', 'manual_review'"
 _BOUT_LIFECYCLE_SQL = (
     "'active', 'stale', 'missing_unknown', 'locked', "
     "'cancelled', 'replaced', 'review_blocked'"
@@ -399,6 +399,10 @@ class OddsBoutMatchReview(Base):
     decision_bout_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("canonical_bouts.id"), nullable=True, index=True
     )
+    activated_alias_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    activated_alias_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     decided_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -414,7 +418,7 @@ class OddsProviderEventAlias(Base):
 
     Replacements supersede prior alias versions and never rewrite quote rows.
     Exactly one active alias per (provider, external_event_id) is enforced by a
-    partial unique index (see migration 0015).
+    partial unique index (see migration 0014).
     """
 
     __tablename__ = "odds_provider_event_aliases"

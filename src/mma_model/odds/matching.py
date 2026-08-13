@@ -24,13 +24,17 @@ from mma_model.db.tables.core import (
     CanonicalFighter,
     FighterAlias,
 )
-from mma_model.db.tables.odds import OddsProviderEventAlias
 from mma_model.identity.normalize import normalize_person_name
-from mma_model.odds.lifecycle import OddsBoutLifecycleState, resolve_match_lifecycle
+from mma_model.odds.lifecycle import (
+    OddsBoutLifecycleState,
+    alias_effective_at,
+    resolve_match_lifecycle,
+)
 from mma_model.odds.types import PROVIDER_THE_ODDS_API
 
 MATCH_RULE_PROVIDER_ID: Final[str] = "provider_id"
 MATCH_RULE_PARTICIPANT_PAIR: Final[str] = "participant_pair"
+MATCH_RULE_MANUAL_REVIEW: Final[str] = "manual_review"
 MATCH_STATUS_MATCHED: Final[str] = "matched"
 MATCH_STATUS_UNMATCHED: Final[str] = "unmatched"
 MATCH_STATUS_AMBIGUOUS: Final[str] = "ambiguous_blocked"
@@ -40,19 +44,20 @@ EXPECTED_MATCHING_CONTRACT_VERSION: Final[str] = "1.0.0"
 EXPECTED_MATCHING_SCHEMA_VERSION: Final[int] = 1
 MATCHING_FILENAME: Final[str] = "matching_v1.yaml"
 PINNED_MATCHING_CONTRACT_HASH: Final[str] = (
-    "ada7d61aea144b2691f38529735b8cf07b6af358b96d0b9e20b7c3417332a982"
+    "f5406f7c5600646c3ab33c7767c2f4a881ef6abf6beea6fe891f06f248906305"
 )
 
+# Live/upcoming matching only. Historical reconstruction is a separate mode.
+_ACTIVE_BOUT_STATUSES: Final[frozenset[str]] = frozenset({"scheduled", "upcoming"})
+_ACTIVE_EVENT_STATUSES: Final[frozenset[str]] = frozenset({"scheduled", "upcoming"})
 _INACTIVE_BOUT_STATUSES: Final[frozenset[str]] = frozenset(
     {"cancelled", "canceled", "replaced"}
-)
-_ACTIVE_BOUT_STATUSES: Final[frozenset[str]] = frozenset(
-    {"scheduled", "upcoming", "occurred", "completed"}
 )
 _DWCS_SERIES: Final[frozenset[str]] = frozenset({"dwcs", "dwcs_brazil"})
 _REQUIRED_MATCH_RULES: Final[tuple[str, ...]] = (
     MATCH_RULE_PROVIDER_ID,
     MATCH_RULE_PARTICIPANT_PAIR,
+    MATCH_RULE_MANUAL_REVIEW,
 )
 _REQUIRED_MATCH_STATUSES: Final[tuple[str, ...]] = (
     MATCH_STATUS_MATCHED,
@@ -290,9 +295,11 @@ def _event_is_dwcs(event: CanonicalEvent | None) -> bool:
 
 
 def _bout_is_active(bout: CanonicalBout) -> bool:
-    return bout.status not in _INACTIVE_BOUT_STATUSES and (
-        bout.status in _ACTIVE_BOUT_STATUSES or bout.status not in _INACTIVE_BOUT_STATUSES
-    )
+    return bout.status in _ACTIVE_BOUT_STATUSES
+
+
+def _event_is_active(event: CanonicalEvent) -> bool:
+    return event.status in _ACTIVE_EVENT_STATUSES
 
 
 def validate_linked_bout(
@@ -305,7 +312,7 @@ def validate_linked_bout(
     max_delta_minutes: int,
     require_dwcs: bool = True,
 ) -> tuple[bool, str]:
-    """Return (ok, reason) for a provider-ID candidate bout."""
+    """Return (ok, reason) for a provider-ID / review candidate bout."""
     bout = session.get(CanonicalBout, bout_id)
     if bout is None:
         return False, "linked bout missing"
@@ -318,6 +325,8 @@ def validate_linked_bout(
         return False, "linked event missing"
     if require_dwcs and not _event_is_dwcs(event):
         return False, f"linked event series not DWCS ({event.series!r})"
+    if not _event_is_active(event):
+        return False, f"linked event not active ({event.status})"
     if event.scheduled_start_at is None:
         return False, "linked event missing scheduled_start_at"
     if not bout_covers_provider_names(session, bout, home_team, away_team):
@@ -336,17 +345,20 @@ def _lookup_provider_id_candidate(
     *,
     provider: str,
     external_event_id: str,
+    as_of: datetime,
 ) -> tuple[str | None, str | None]:
-    """Return (bout_id, source_kind) for stored provider ID. Alias wins over BoutSourceId."""
-    active_alias = session.scalar(
-        select(OddsProviderEventAlias).where(
-            OddsProviderEventAlias.provider == provider,
-            OddsProviderEventAlias.external_event_id == external_event_id,
-            OddsProviderEventAlias.status == "active",
-        )
+    """Return (bout_id, source_kind) for stored provider ID at as_of.
+
+    Alias effective at the decision cutoff wins over immutable BoutSourceId.
+    """
+    alias = alias_effective_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=as_of,
     )
-    if active_alias is not None:
-        return active_alias.bout_id, "active_alias"
+    if alias is not None:
+        return alias.bout_id, "alias_effective_at"
     source = session.scalar(
         select(BoutSourceId).where(
             BoutSourceId.source == provider,
@@ -371,7 +383,8 @@ def _candidate_bouts_for_participants(
     """Scope to active DWCS events in the time window, then exact participants."""
     commence = as_utc_sqlite(commence_time)
     event_stmt = select(CanonicalEvent).where(
-        CanonicalEvent.scheduled_start_at.is_not(None)
+        CanonicalEvent.scheduled_start_at.is_not(None),
+        CanonicalEvent.status.in_(tuple(_ACTIVE_EVENT_STATUSES)),
     )
     if require_dwcs:
         event_stmt = event_stmt.where(CanonicalEvent.series.in_(tuple(_DWCS_SERIES)))
@@ -388,6 +401,7 @@ def _candidate_bouts_for_participants(
             max_delta_minutes=max_delta_minutes,
         )
         and (not require_dwcs or _event_is_dwcs(event))
+        and _event_is_active(event)
     ]
     if not scoped_event_ids:
         return []
@@ -395,7 +409,7 @@ def _candidate_bouts_for_participants(
     bouts = session.scalars(
         select(CanonicalBout).where(
             CanonicalBout.event_id.in_(scoped_event_ids),
-            CanonicalBout.status.notin_(tuple(_INACTIVE_BOUT_STATUSES)),
+            CanonicalBout.status.in_(tuple(_ACTIVE_BOUT_STATUSES)),
         )
     ).all()
     return [
@@ -442,6 +456,7 @@ def match_provider_event(
         session,
         provider=provider,
         external_event_id=external_event_id,
+        as_of=stamp,
     )
     if stored_bout_id is not None:
         ok, reason = validate_linked_bout(

@@ -7,35 +7,35 @@
       "bout_id": "golden-bout-kunneman-kropschot",
       "fighter_a": "Jon Kunneman",
       "fighter_b": "Joseph Kropschot",
-      "scheduled_start": "2026-08-12T00:15:00Z",
+      "scheduled_start": "2026-08-12T00:00:00Z",
       "status": "scheduled"
     },
     {
       "bout_id": "golden-bout-hasan-saikia",
       "fighter_a": "Bilal Hasan",
       "fighter_b": "Mridul Saikia",
-      "scheduled_start": "2026-08-12T01:15:00Z",
+      "scheduled_start": "2026-08-12T00:05:00Z",
       "status": "scheduled"
     },
     {
       "bout_id": "golden-bout-wint-adams",
       "fighter_a": "Anthony Wint",
       "fighter_b": "Matt Adams",
-      "scheduled_start": "2026-08-12T02:15:00Z",
+      "scheduled_start": "2026-08-12T00:10:00Z",
       "status": "scheduled"
     },
     {
       "bout_id": "golden-bout-alsaghir-escarrega",
       "fighter_a": "Abe Alsaghir",
       "fighter_b": "Fabrizio Escarrega",
-      "scheduled_start": "2026-08-12T01:45:00Z",
+      "scheduled_start": "2026-08-12T00:15:00Z",
       "status": "scheduled"
     },
     {
       "bout_id": "golden-bout-mulumba-pagliarulo",
       "fighter_a": "Ananias Mulumba",
       "fighter_b": "Tom Pagliarulo",
-      "scheduled_start": "2026-08-12T00:05:00Z",
+      "scheduled_start": "2026-08-12T00:20:00Z",
       "status": "scheduled"
     }
   ],
@@ -43,35 +43,35 @@
     {
       "id": "prov-kunneman-kropschot",
       "sport_key": "mma_mixed_martial_arts",
-      "commence_time": "2026-08-12T00:15:00Z",
+      "commence_time": "2026-08-12T00:00:00Z",
       "home_team": "Joseph Kropschot",
       "away_team": "Jon Kunneman"
     },
     {
       "id": "prov-hasan-saikia",
       "sport_key": "mma_mixed_martial_arts",
-      "commence_time": "2026-08-12T01:15:00Z",
+      "commence_time": "2026-08-12T00:05:00Z",
       "home_team": "Bilal Hasan",
       "away_team": "Mridul Saikia"
     },
     {
       "id": "prov-wint-adams",
       "sport_key": "mma_mixed_martial_arts",
-      "commence_time": "2026-08-12T02:15:00Z",
+      "commence_time": "2026-08-12T00:10:00Z",
       "home_team": "Matt Adams",
       "away_team": "Anthony Wint"
     },
     {
       "id": "prov-alsaghir-escarrega",
       "sport_key": "mma_mixed_martial_arts",
-      "commence_time": "2026-08-12T01:45:00Z",
+      "commence_time": "2026-08-12T00:15:00Z",
       "home_team": "Abe Alsaghir",
       "away_team": "Fabrizio Escarrega"
     },
     {
       "id": "prov-mulumba-pagliarulo",
       "sport_key": "mma_mixed_martial_arts",
-      "commence_time": "2026-08-12T00:05:00Z",
+      "commence_time": "2026-08-12T00:20:00Z",
       "home_team": "Tom Pagliarulo",
       "away_team": "Ananias Mulumba"
     }

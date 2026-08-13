@@ -46,6 +46,54 @@ _TERMINAL_EXIT_EVIDENCE: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Fail-closed allowlists: unknown evidence kinds are rejected.
+LIFECYCLE_EVIDENCE_KINDS: Final[dict[str, frozenset[str]]] = {
+    "active": frozenset(
+        {
+            "match_provider_id",
+            "match_participant_pair",
+            "match_manual_review",
+            "odds_bout_match_review_approved",
+            "explicit_lifecycle_reactivation",
+            "operator_lifecycle_clear",
+            "provider_unlock_signal",
+        }
+    ),
+    "stale": frozenset({"quote_age_exceeds_stale_after_minutes"}),
+    "missing_unknown": frozenset(
+        {
+            "provider_market_absent",
+            "no_quotes_for_matched_event",
+        }
+    ),
+    "locked": frozenset({"provider_lock_signal"}),
+    "cancelled": frozenset({"canonical_bout_cancelled"}),
+    "replaced": frozenset({"canonical_bout_replaced"}),
+    "review_blocked": frozenset(
+        {
+            "odds_bout_match_review_reversed",
+            "ambiguous_match_blocked",
+            "stored_provider_id_unsafe",
+            "replacement_match_blocked",
+        }
+    ),
+}
+
+_PROVIDER_IDENTITY_EVIDENCE: Final[frozenset[str]] = frozenset(
+    {
+        "provider_lock_signal",
+        "provider_unlock_signal",
+        "provider_market_absent",
+    }
+)
+
+_CANONICAL_IDENTITY_EVIDENCE: Final[frozenset[str]] = frozenset(
+    {
+        "canonical_bout_cancelled",
+        "canonical_bout_replaced",
+    }
+)
+
 
 class OddsBoutLifecycleState(StrEnum):
     """Explicit bout/line lifecycle for matched odds (no inferred locks)."""
@@ -94,14 +142,62 @@ def _as_utc_sqlite(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def alias_effective_at(
+    session: Session,
+    *,
+    provider: str,
+    external_event_id: str,
+    as_of: datetime,
+) -> OddsProviderEventAlias | None:
+    """Resolve the alias version effective at as_of (PIT; status-independent)."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    rows = list(
+        session.scalars(
+            select(OddsProviderEventAlias).where(
+                OddsProviderEventAlias.provider == provider,
+                OddsProviderEventAlias.external_event_id == external_event_id,
+            )
+        ).all()
+    )
+    effective: list[OddsProviderEventAlias] = []
+    for row in rows:
+        created = _as_utc_sqlite(row.created_at)
+        if created > cutoff:
+            continue
+        if row.superseded_at is not None and _as_utc_sqlite(row.superseded_at) <= cutoff:
+            continue
+        effective.append(row)
+    if not effective:
+        return None
+    return max(
+        effective,
+        key=lambda row: (int(row.alias_version), _as_utc_sqlite(row.created_at)),
+    )
+
+
+def alias_quote_lower_bound(alias: OddsProviderEventAlias | None) -> datetime | None:
+    """Lower bound for quote visibility under an alias version.
+
+    First alias version for an external ID includes prior quotes for that event.
+    Only reused-ID replacement versions (alias_version > 1) establish a cutoff.
+    """
+    if alias is None:
+        return None
+    if int(alias.alias_version) <= 1:
+        return None
+    return _as_utc_sqlite(alias.created_at)
+
+
 def latest_bout_lifecycle(
     session: Session,
     *,
     bout_id: str,
+    as_of: datetime,
     provider: str | None = None,
     external_event_id: str | None = None,
 ) -> OddsBoutLifecycleObservation | None:
-    """Latest explicit lifecycle row for a bout (optionally scoped to provider event)."""
+    """Latest explicit lifecycle row at/before as_of (PIT-safe)."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
     stmt = select(OddsBoutLifecycleObservation).where(
         OddsBoutLifecycleObservation.bout_id == bout_id
     )
@@ -115,7 +211,11 @@ def latest_bout_lifecycle(
             (OddsBoutLifecycleObservation.external_event_id == external_event_id)
             | (OddsBoutLifecycleObservation.external_event_id.is_(None))
         )
-    rows = list(session.scalars(stmt).all())
+    rows = [
+        row
+        for row in session.scalars(stmt).all()
+        if _as_utc_sqlite(row.observed_at) <= cutoff
+    ]
     if not rows:
         return None
 
@@ -125,39 +225,35 @@ def latest_bout_lifecycle(
     return max(rows, key=_sort_key)
 
 
-def active_alias_created_at(
+def quotes_visible_under_alias_at(
     session: Session,
     *,
     provider: str,
     external_event_id: str,
-) -> datetime | None:
-    """Created-at of the active provider-event alias (quote cutoff for reuse)."""
-    row = session.scalar(
-        select(OddsProviderEventAlias).where(
-            OddsProviderEventAlias.provider == provider,
-            OddsProviderEventAlias.external_event_id == external_event_id,
-            OddsProviderEventAlias.status == "active",
-        )
-    )
-    if row is None:
-        return None
-    return _as_utc_sqlite(row.created_at)
-
-
-def quotes_visible_under_active_alias(
-    session: Session,
-    *,
-    provider: str,
-    external_event_id: str,
+    as_of: datetime,
 ) -> list[OddsQuote]:
-    """Quotes belonging to the current alias version.
-
-    When a provider external ID is reused across replacement versions, older
-    quotes remain in history but are not exposed under the active alias.
-    """
-    cutoff = active_alias_created_at(
-        session, provider=provider, external_event_id=external_event_id
+    """Quotes visible for the alias effective at as_of (PIT + version cutoff)."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    alias = alias_effective_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=cutoff,
     )
+    if alias is None:
+        prior = session.scalars(
+            select(OddsProviderEventAlias).where(
+                OddsProviderEventAlias.provider == provider,
+                OddsProviderEventAlias.external_event_id == external_event_id,
+            )
+        ).all()
+        # Between superseded versions (or after cancel of alias) — do not expose
+        # prior-version quotes without an effective alias at as_of.
+        if any(_as_utc_sqlite(row.created_at) <= cutoff for row in prior):
+            return []
+        lower = None
+    else:
+        lower = alias_quote_lower_bound(alias)
     rows = list(
         session.scalars(
             select(OddsQuote).where(
@@ -166,9 +262,36 @@ def quotes_visible_under_active_alias(
             )
         ).all()
     )
-    if cutoff is None:
-        return rows
-    return [row for row in rows if _as_utc_sqlite(row.observed_at) >= cutoff]
+    visible: list[OddsQuote] = []
+    for row in rows:
+        observed = _as_utc_sqlite(row.observed_at)
+        if observed > cutoff:
+            continue
+        if lower is not None and observed < lower:
+            continue
+        if row.source_updated_at is not None:
+            source = _as_utc_sqlite(row.source_updated_at)
+            if source > cutoff:
+                continue
+        visible.append(row)
+    return visible
+
+
+def quotes_visible_under_active_alias(
+    session: Session,
+    *,
+    provider: str,
+    external_event_id: str,
+    as_of: datetime | None = None,
+) -> list[OddsQuote]:
+    """Compatibility wrapper: default as_of is now (UTC)."""
+    stamp = as_of if as_of is not None else datetime.now(UTC)
+    return quotes_visible_under_alias_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=stamp,
+    )
 
 
 def latest_quote_timestamp(
@@ -176,16 +299,24 @@ def latest_quote_timestamp(
     *,
     provider: str,
     external_event_id: str,
+    as_of: datetime,
 ) -> datetime | None:
-    """Latest observed/source timestamp for quotes on the active alias version."""
-    rows = quotes_visible_under_active_alias(
-        session, provider=provider, external_event_id=external_event_id
+    """Latest observed/source timestamp for quotes visible at as_of."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    rows = quotes_visible_under_alias_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=cutoff,
     )
     stamps: list[datetime] = []
     for row in rows:
-        stamps.append(_as_utc_sqlite(row.observed_at))
+        observed = _as_utc_sqlite(row.observed_at)
+        stamps.append(observed)
         if row.source_updated_at is not None:
-            stamps.append(_as_utc_sqlite(row.source_updated_at))
+            source = _as_utc_sqlite(row.source_updated_at)
+            if source <= cutoff:
+                stamps.append(source)
     if not stamps:
         return None
     return max(stamps)
@@ -199,12 +330,15 @@ def quote_is_stale(
     observed_at: datetime,
     stale_after_minutes: int,
 ) -> bool:
+    as_of = _require_aware_utc(observed_at, field="observed_at")
     latest = latest_quote_timestamp(
-        session, provider=provider, external_event_id=external_event_id
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=as_of,
     )
     if latest is None:
         return False
-    as_of = _require_aware_utc(observed_at, field="observed_at")
     return as_of - latest > timedelta(minutes=stale_after_minutes)
 
 
@@ -218,27 +352,36 @@ def resolve_match_lifecycle(
     stale_after_minutes: int,
 ) -> tuple[OddsBoutLifecycleState, bool]:
     """Resolve effective lifecycle for a successful match without overriding terminals."""
+    as_of = _require_aware_utc(observed_at, field="observed_at")
     latest = latest_bout_lifecycle(
         session,
         bout_id=bout_id,
+        as_of=as_of,
         provider=provider,
         external_event_id=external_event_id,
     )
     if latest is not None and latest.lifecycle in TERMINAL_LIFECYCLES:
-        state = OddsBoutLifecycleState(latest.lifecycle)
-        return state, False
+        return OddsBoutLifecycleState(latest.lifecycle), False
+
+    visible = quotes_visible_under_alias_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=as_of,
+    )
+    if not visible:
+        return OddsBoutLifecycleState.MISSING_UNKNOWN, False
 
     if quote_is_stale(
         session,
         provider=provider,
         external_event_id=external_event_id,
-        observed_at=observed_at,
+        observed_at=as_of,
         stale_after_minutes=stale_after_minutes,
     ):
         return OddsBoutLifecycleState.STALE, False
 
     if latest is not None and latest.lifecycle == OddsBoutLifecycleState.STALE.value:
-        # Stale remains until a fresher quote exists (quote_is_stale False above).
         return OddsBoutLifecycleState.ACTIVE, True
 
     if latest is not None and latest.lifecycle in VALUE_BLOCKING_LIFECYCLES:
@@ -269,6 +412,33 @@ def _lifecycle_dedupe_key(
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _validate_lifecycle_evidence(
+    *,
+    lifecycle: OddsBoutLifecycleState,
+    evidence_kind: str,
+    provider: str | None,
+    external_event_id: str | None,
+) -> None:
+    kind = (evidence_kind or "").strip()
+    if not kind:
+        raise ValueError("lifecycle evidence_kind is required (no inferred locks)")
+    allowed = LIFECYCLE_EVIDENCE_KINDS.get(lifecycle.value)
+    if allowed is None or kind not in allowed:
+        raise ValueError(
+            f"unknown or disallowed evidence_kind {kind!r} for lifecycle "
+            f"{lifecycle.value!r}"
+        )
+    if kind in _PROVIDER_IDENTITY_EVIDENCE and (
+        not (provider or "").strip() or not (external_event_id or "").strip()
+    ):
+        raise ValueError(
+            f"evidence_kind {kind!r} requires provider and external_event_id"
+        )
+    if kind in _CANONICAL_IDENTITY_EVIDENCE:
+        # Canonical cancellation/replacement is bout-scoped; provider ids optional.
+        pass
+
+
 def apply_bout_lifecycle(
     session: Session,
     *,
@@ -287,25 +457,24 @@ def apply_bout_lifecycle(
     Returns ``None`` when an ACTIVE transition is refused because a terminal
     lifecycle is already in force and ``allow_terminal_override`` is false.
     """
-    kind = (evidence_kind or "").strip()
-    if not kind:
-        raise ValueError("lifecycle evidence_kind is required (no inferred locks)")
+    _validate_lifecycle_evidence(
+        lifecycle=lifecycle,
+        evidence_kind=evidence_kind,
+        provider=provider,
+        external_event_id=external_event_id,
+    )
+    kind = evidence_kind.strip()
     if price_decimal is not None:
         raise ValueError(
             "refusing lifecycle price_decimal forward-fill; "
             "lifecycle rows never store prices"
         )
     stamp = _require_aware_utc(observed_at, field="observed_at")
-    if lifecycle is OddsBoutLifecycleState.LOCKED and kind in {
-        "inferred",
-        "guess",
-        "assumed",
-    }:
-        raise ValueError("refusing inferred lock without provider evidence")
 
     latest = latest_bout_lifecycle(
         session,
         bout_id=bout_id,
+        as_of=stamp,
         provider=provider,
         external_event_id=external_event_id,
     )
