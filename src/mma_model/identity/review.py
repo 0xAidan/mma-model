@@ -352,6 +352,77 @@ def _upsert_source_mapping(
     return row
 
 
+def _claim_decision_transition(
+    session: Session,
+    *,
+    review_id: str,
+    decision: ReviewDecision,
+    canonical_id: str | None,
+    actor: str,
+    stamp: datetime,
+    version: int,
+    prior_mapping_json: str | None,
+) -> bool:
+    """Atomically claim pending → approved/rejected. True if this session won."""
+    new_status = "approved" if decision == "approve" else "rejected"
+    values: dict[str, Any] = {
+        "status": new_status,
+        "decision_canonical_id": canonical_id if decision == "approve" else None,
+        "decided_by": actor,
+        "decided_at": stamp,
+        "updated_at": stamp,
+        "version": version + 1,
+    }
+    if decision == "approve":
+        values["prior_mapping_json"] = prior_mapping_json
+    result = session.execute(
+        update(IdentityReviewQueue)
+        .where(
+            IdentityReviewQueue.id == review_id,
+            IdentityReviewQueue.status == "pending",
+            IdentityReviewQueue.version == version,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    return int(result.rowcount or 0) == 1
+
+
+def _finish_idempotent_decision(
+    session: Session,
+    review: IdentityReviewQueue,
+    *,
+    decision: ReviewDecision,
+    canonical_id: str | None,
+) -> IdentityReviewQueue:
+    """Sync ORM to committed terminal state for a same-decision replay."""
+    latest = _committed_review_snapshot(session, review.id)
+    if latest is None:
+        raise ReviewDecisionError(f"review_id not found: {review.id}")
+    status, version, decided_canonical = latest
+    if decision == "approve" and status == "approved":
+        if canonical_id and decided_canonical == canonical_id:
+            _sync_review_from_committed(
+                review,
+                status=status,
+                version=version,
+                decision_canonical_id=decided_canonical,
+            )
+            return review
+        raise ReviewDecisionError("review already approved with different canonical_id")
+    if decision == "reject" and status == "rejected":
+        _sync_review_from_committed(
+            review,
+            status=status,
+            version=version,
+            decision_canonical_id=decided_canonical,
+        )
+        return review
+    raise ReviewDecisionError(
+        f"concurrent review update rejected (status={status!r}, version={version})"
+    )
+
+
 def apply_review_decision(
     session: Session,
     *,
@@ -401,6 +472,11 @@ def apply_review_decision(
         )
 
     before = review.decision_canonical_id
+    claim_version = int(review.version)
+    prior_mapping_json: str | None = None
+    after: str | None
+    action: str
+
     if decision == "approve":
         if not canonical_id or not str(canonical_id).strip():
             raise ReviewDecisionError("approve requires explicit canonical_id")
@@ -425,28 +501,48 @@ def apply_review_decision(
                 raise ReviewDecisionError(
                     "existing source mapping conflicts with approve canonical_id"
                 )
-        else:
-            _upsert_source_mapping(
-                session,
-                fighter_id=canonical_id,
-                source=review.source,
-                external_id=review.external_id,
-            )
-        review.prior_mapping_json = json.dumps(prior, sort_keys=True) if prior else "null"
-        review.status = "approved"
-        review.decision_canonical_id = canonical_id
+        prior_mapping_json = json.dumps(prior, sort_keys=True) if prior else "null"
         after = canonical_id
         action = "approved"
     else:
-        review.status = "rejected"
-        review.decision_canonical_id = None
+        canonical_id = None
         after = None
         action = "rejected"
 
-    review.decided_by = actor
-    review.decided_at = stamp
-    review.updated_at = stamp
-    review.version = int(review.version) + 1
+    # Claim the status/version transition BEFORE mapping or evidence side effects.
+    claimed = _claim_decision_transition(
+        session,
+        review_id=review.id,
+        decision=decision,
+        canonical_id=canonical_id,
+        actor=actor,
+        stamp=stamp,
+        version=claim_version,
+        prior_mapping_json=prior_mapping_json,
+    )
+    if not claimed:
+        return _finish_idempotent_decision(
+            session, review, decision=decision, canonical_id=canonical_id
+        )
+
+    _sync_review_from_committed(
+        review,
+        status="approved" if decision == "approve" else "rejected",
+        version=claim_version + 1,
+        decision_canonical_id=canonical_id,
+    )
+    set_committed_value(review, "decided_by", actor)
+    set_committed_value(review, "decided_at", stamp)
+    set_committed_value(review, "updated_at", stamp)
+    if decision == "approve":
+        set_committed_value(review, "prior_mapping_json", prior_mapping_json)
+        _upsert_source_mapping(
+            session,
+            fighter_id=str(canonical_id),
+            source=review.source,
+            external_id=review.external_id,
+        )
+
     evidence = _write_evidence(
         session,
         action=action,
