@@ -1167,11 +1167,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Disposable SQLite URL for decision audit (never live data/mma.db)",
     )
-    p_mretrain.add_argument(
-        "--health-ok",
-        action="store_true",
-        help="Explicit strict-health pass for activation gates (tests/ops)",
-    )
     p_mpromote = model_sub.add_parser(
         "promote",
         help="Promote a shadow candidate after frozen evaluator gates (DWCS-402)",
@@ -1208,11 +1203,6 @@ def main(argv: list[str] | None = None) -> int:
         "--reason",
         default="manual promote after gates",
         help="Promotion reason recorded in the decision ledger",
-    )
-    p_mpromote.add_argument(
-        "--health-ok",
-        action="store_true",
-        help="Explicit strict-health pass for activation gates",
     )
     p_mpromote.add_argument(
         "--artifact",
@@ -3002,7 +2992,6 @@ def main(argv: list[str] | None = None) -> int:
                         registry_path=Path(args.registry),
                         artifacts_dir=Path(args.artifacts_dir),
                         actor="cli.retrain",
-                        health_ok=True if args.health_ok else None,
                     )
                     session.commit()
             except (HoldoutLockedError, TrainError, ArtifactError, ValueError) as exc:
@@ -3047,7 +3036,6 @@ def main(argv: list[str] | None = None) -> int:
                         reason=str(args.reason),
                         actor="cli.promote",
                         artifact_path=Path(args.artifact) if args.artifact else None,
-                        health_ok=True if args.health_ok else None,
                     )
                     session.commit()
             except PromotionEvaluateRequiredError as exc:

@@ -632,7 +632,7 @@ def handle_retrain(
             artifacts_dir=artifacts_dir,
             actor="jobs.retrain",
             train_runner=context.get("train_runner"),  # type: ignore[arg-type]
-            health_ok=context.get("health_ok"),  # type: ignore[arg-type]
+            health_result=context.get("health_result"),  # type: ignore[arg-type]
             health_gate=context.get("health_gate"),  # type: ignore[arg-type]
             backtest_ok=context.get("backtest_ok"),  # type: ignore[arg-type]
             calibration_ok=context.get("calibration_ok"),  # type: ignore[arg-type]

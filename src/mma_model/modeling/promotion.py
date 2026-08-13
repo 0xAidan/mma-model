@@ -175,14 +175,17 @@ def assert_artifact_activation_ready(loaded: LoadedArtifact) -> dict[str, Any]:
 def default_health_gate(
     *,
     coverage_report: CoverageReport | None = None,
-    health_ok: bool | None = None,
     health_result: GateResult | None = None,
 ) -> GateVerdict:
-    """Fail closed unless an explicit health pass is supplied."""
+    """Fail closed unless a real coverage report or GateResult is supplied.
+
+    There is no boolean shortcut and no CLI ``--health-ok`` / ``--force`` path.
+    """
     details: dict[str, Any] = {"gate": "strict_health"}
     if health_result is not None:
         details["blocker_codes"] = list(health_result.blocker_codes)
         details["exit_code"] = health_result.exit_code
+        details["source"] = "health_result"
         return GateVerdict(
             ok=bool(health_result.ok),
             health_ok=bool(health_result.ok),
@@ -193,29 +196,14 @@ def default_health_gate(
         result = evaluate_strict_gates(coverage_report)
         details["blocker_codes"] = list(result.blocker_codes)
         details["exit_code"] = result.exit_code
+        details["source"] = "coverage_report"
         return GateVerdict(
             ok=bool(result.ok),
             health_ok=bool(result.ok),
             evaluator_hash=PINNED_CONTRACT_HASH,
             details=details,
         )
-    if health_ok is True:
-        details["source"] = "explicit_health_ok"
-        return GateVerdict(
-            ok=True,
-            health_ok=True,
-            evaluator_hash=PINNED_CONTRACT_HASH,
-            details=details,
-        )
-    if health_ok is False:
-        details["source"] = "explicit_health_fail"
-        return GateVerdict(
-            ok=False,
-            health_ok=False,
-            evaluator_hash=PINNED_CONTRACT_HASH,
-            details=details,
-        )
-    details["reason"] = "health_gate_required"
+    details["reason"] = "health_evidence_required"
     return GateVerdict(
         ok=False,
         health_ok=False,
@@ -228,13 +216,16 @@ def evaluate_activation_gates(
     artifact_path: Path,
     *,
     coverage_report: CoverageReport | None = None,
-    health_ok: bool | None = None,
     health_result: GateResult | None = None,
     health_gate: HealthGateFn | None = None,
     backtest_ok: bool | None = None,
     calibration_ok: bool | None = None,
 ) -> GateVerdict:
-    """Run artifact + frozen evaluator + health + backtest + calibration gates."""
+    """Run artifact + frozen evaluator + health + backtest + calibration gates.
+
+    Missing ``backtest_ok`` / ``calibration_ok`` fail closed. Health passes only
+    via ``coverage_report``, ``health_result``, or an injected ``health_gate``.
+    """
     try:
         loaded = load_artifact(Path(artifact_path))
     except (ArtifactError, UntrustedArtifactError, OSError) as exc:
@@ -244,37 +235,50 @@ def evaluate_activation_gates(
     runner = health_gate if health_gate is not None else default_health_gate
     health = runner(
         coverage_report=coverage_report,
-        health_ok=health_ok,
         health_result=health_result,
     )
     details: dict[str, Any] = {
         "artifact": artifact_details,
-        "backtest": {"ok": backtest_ok if backtest_ok is not None else True},
+        "backtest": {"ok": backtest_ok},
         "calibration": {
-            "ok": calibration_ok if calibration_ok is not None else True,
+            "ok": calibration_ok,
             "calibrated": loaded.calibrated,
         },
         "health": health.to_dict(),
     }
-    if backtest_ok is False:
-        details["backtest"]["reason"] = "backtest_gate_failed"
+    if backtest_ok is not True:
+        details["backtest"]["reason"] = (
+            "backtest_evidence_required"
+            if backtest_ok is None
+            else "backtest_gate_failed"
+        )
         return GateVerdict(
             ok=False,
             health_ok=health.health_ok,
             evaluator_hash=PINNED_CONTRACT_HASH,
             details=details,
         )
-    if calibration_ok is False:
-        details["calibration"]["reason"] = "calibration_gate_failed"
+    if calibration_ok is not True:
+        details["calibration"]["reason"] = (
+            "calibration_evidence_required"
+            if calibration_ok is None
+            else "calibration_gate_failed"
+        )
         return GateVerdict(
             ok=False,
             health_ok=health.health_ok,
             evaluator_hash=PINNED_CONTRACT_HASH,
             details=details,
         )
-    ok = bool(health.ok)
+    if not health.ok:
+        return GateVerdict(
+            ok=False,
+            health_ok=health.health_ok,
+            evaluator_hash=PINNED_CONTRACT_HASH,
+            details=details,
+        )
     return GateVerdict(
-        ok=ok,
+        ok=True,
         health_ok=health.health_ok,
         evaluator_hash=PINNED_CONTRACT_HASH,
         details=details,

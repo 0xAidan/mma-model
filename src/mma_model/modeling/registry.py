@@ -450,7 +450,6 @@ def retrain_fixed_spec(
     actor: str = "system",
     train_runner: TrainRunner | None = None,
     coverage_report: CoverageReport | None = None,
-    health_ok: bool | None = None,
     health_result: GateResult | None = None,
     health_gate: HealthGateFn | None = None,
     backtest_ok: bool | None = None,
@@ -609,7 +608,6 @@ def retrain_fixed_spec(
         verdict = evaluate_activation_gates(
             stored,
             coverage_report=coverage_report,
-            health_ok=health_ok,
             health_result=health_result,
             health_gate=health_gate,
             backtest_ok=backtest_ok,
@@ -725,7 +723,6 @@ def promote_candidate(
     actor: str = "cli",
     artifact_path: Path | None = None,
     coverage_report: CoverageReport | None = None,
-    health_ok: bool | None = None,
     health_result: GateResult | None = None,
     health_gate: HealthGateFn | None = None,
     backtest_ok: bool | None = None,
@@ -754,7 +751,6 @@ def promote_candidate(
         verdict = evaluate_activation_gates(
             path,
             coverage_report=coverage_report,
-            health_ok=health_ok,
             health_result=health_result,
             health_gate=health_gate,
             backtest_ok=backtest_ok,
