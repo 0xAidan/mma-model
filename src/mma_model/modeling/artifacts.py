@@ -31,8 +31,21 @@ from mma_model.quality.schema import sha256_canonical
 
 RIDGE_SPEC_FILENAME: Final = "ridge_v1.yaml"
 ARTIFACT_SCHEMA_VERSION: Final = "dwcs_artifact_v1"
+CALIBRATED_ARTIFACT_SCHEMA_VERSION: Final = "dwcs_artifact_v1.1"
+CALIBRATION_SCHEMA_VERSION: Final = "dwcs_calibration_v1"
+BOOTSTRAP_SCHEMA_VERSION: Final = "dwcs_bootstrap_v1"
+ACCEPTED_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset(
+    {ARTIFACT_SCHEMA_VERSION, CALIBRATED_ARTIFACT_SCHEMA_VERSION}
+)
 PAYLOAD_KIND: Final = "standardized_ridge_logistic_v1"
 ESTIMATOR_KIND: Final = "standardized_ridge_logistic"
+PRODUCTION_BOOTSTRAP_REPLICATES: Final = 200
+CALIBRATION_EVALUATION_SCOPE: Final = "calibration_fit_oof_apparent"
+CALIBRATOR_SOURCE_FIXED_OOF: Final = "prior_time_oof_fixed"
+BOOTSTRAP_PREDICTION_SCOPE: Final = "fixed_target_refit_distribution"
+EV_SEMANTICS_BINARY_MONEYLINE: Final = "exhaustive_binary_moneyline"
+EV_SEMANTICS_JOINT_VOID: Final = "joint_void_mass"
+JOINT_EV_OMISSION_REASON: Final = "joint_void_mass_requires_settlement_aware_ev"
 RIDGE_SPEC_ID: Final = "ridge_v1"
 RIDGE_CONTRACT_ID: Final = "dwcs_model_spec"
 EXPECTED_RIDGE_SCHEMA_VERSION: Final = 1
@@ -387,8 +400,8 @@ class RidgePredictor:
     spec_hash: str
     spec_version: str
 
-    def raw_win_prob(self, values: Sequence[float]) -> float:
-        """P(A wins) from scaler + logistic only. No swap averaging."""
+    def raw_logit(self, values: Sequence[float]) -> float:
+        """Linear predictor logit from scaler + coefficients. No swap averaging."""
         if tuple(self.feature_names) != FEATURE_NAMES:
             raise ArtifactFeatureOrderMismatchError(
                 f"{_kind_label(ArtifactKind.FEATURE_ORDER)} mismatch on predictor"
@@ -409,13 +422,30 @@ class RidgePredictor:
             if not math.isfinite(number):
                 raise UntrustedArtifactError("prediction vector contains a non-finite number")
             logit += weight * ((number - mean) / scale)
-        return _logistic(logit)
+        if not math.isfinite(logit):
+            raise UntrustedArtifactError("raw logit is not finite")
+        return float(logit)
+
+    def raw_win_prob(self, values: Sequence[float]) -> float:
+        """P(A wins) from scaler + logistic only. No swap averaging."""
+        return _logistic(self.raw_logit(values))
 
     def swap_safe_win_prob(self, values: Sequence[float]) -> float:
         """Average p(x) and 1-p(swap(x)) as a serving-time guard."""
         p_raw = self.raw_win_prob(values)
         p_swap = self.raw_win_prob(swap_values(values))
         return 0.5 * (p_raw + (1.0 - p_swap))
+
+    def identity_hash(self) -> str:
+        return sha256_canonical(
+            {
+                "coef": list(self.coef),
+                "intercept": self.intercept,
+                "kind": ESTIMATOR_KIND,
+                "scaler_mean": list(self.scaler_mean),
+                "scaler_scale": list(self.scaler_scale),
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -438,9 +468,12 @@ class ArtifactManifest:
     cutoff_policy: str
     metrics: dict[str, Any]
     payload_sha256: str
+    calibrated: bool = False
+    calibration: dict[str, Any] | None = None
+    bootstrap: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "code_commit": self.code_commit,
             "code_commit_reason": self.code_commit_reason,
             "code_hash": self.code_hash,
@@ -460,6 +493,11 @@ class ArtifactManifest:
             "splits_config_hash": self.splits_config_hash,
             "train_sample_ids": list(self.train_sample_ids),
         }
+        if self.calibrated or self.calibration is not None or self.bootstrap is not None:
+            payload["bootstrap"] = self.bootstrap
+            payload["calibrated"] = self.calibrated
+            payload["calibration"] = self.calibration
+        return payload
 
 
 def manifest_from_mapping(payload: Mapping[str, Any]) -> ArtifactManifest:
@@ -475,6 +513,15 @@ def manifest_from_mapping(payload: Mapping[str, Any]) -> ArtifactManifest:
     max_ts = payload.get("max_train_timestamp")
     if max_ts is not None and not isinstance(max_ts, str):
         raise ArtifactError("manifest max_train_timestamp must be a string or null")
+    calibration = payload.get("calibration")
+    if calibration is not None and not isinstance(calibration, dict):
+        raise UntrustedArtifactError("manifest calibration must be an object or null")
+    bootstrap = payload.get("bootstrap")
+    if bootstrap is not None and not isinstance(bootstrap, dict):
+        raise UntrustedArtifactError("manifest bootstrap must be an object or null")
+    calibrated = payload.get("calibrated", False)
+    if calibrated is not True and calibrated is not False:
+        raise UntrustedArtifactError("manifest calibrated must be a boolean")
     return ArtifactManifest(
         schema_version=str(payload.get("schema_version", "")),
         model_id=str(payload.get("model_id", "")),
@@ -494,6 +541,9 @@ def manifest_from_mapping(payload: Mapping[str, Any]) -> ArtifactManifest:
         cutoff_policy=str(payload.get("cutoff_policy", "")),
         metrics=dict(metrics),
         payload_sha256=str(payload.get("payload_sha256", "")),
+        calibrated=bool(calibrated),
+        calibration=None if calibration is None else dict(calibration),
+        bootstrap=None if bootstrap is None else dict(bootstrap),
     )
 
 
@@ -512,12 +562,336 @@ class LoadedArtifact:
     manifest: ArtifactManifest
     payload_path: Path
     manifest_path: Path
+    oof_predictions: tuple[dict[str, Any], ...] = ()
+    oof_exclusions: tuple[dict[str, Any], ...] = ()
+    calibrated: bool = False
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> bytes:
     blob = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     path.write_bytes(blob)
     return blob
+
+
+def write_json_document(path: Path, payload: Mapping[str, Any]) -> bytes:
+    """Public JSON writer for calibrated sidecars. Never pickle."""
+    return _write_json(path, payload)
+
+
+def _require_int(value: object, *, field: str, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UntrustedArtifactError(f"{field} must be an integer")
+    if minimum is not None and value < minimum:
+        raise UntrustedArtifactError(f"{field} must be >= {minimum}")
+    return value
+
+
+def _require_finite_number(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UntrustedArtifactError(f"{field} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise UntrustedArtifactError(f"{field} must be a finite number")
+    return number
+
+
+def _require_string_list(value: object, *, field: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise UntrustedArtifactError(f"{field} must be a list of strings")
+    return [str(item) for item in value]
+
+
+def _require_matching_id_hash(
+    ids: Sequence[str],
+    stored: object,
+    *,
+    field: str,
+    key: str,
+) -> str:
+    digest = _require_sha256(stored, field=field, kind=ArtifactKind.DATA)
+    expected = sha256_canonical({key: list(ids)})
+    if digest != expected:
+        raise UntrustedArtifactError(f"{field} does not match {key}")
+    return digest
+
+
+def _require_schema_version(value: object) -> str:
+    text = str(value or "")
+    if text not in ACCEPTED_ARTIFACT_SCHEMA_VERSIONS:
+        raise UntrustedArtifactError(
+            f"unknown artifact schema {text!r}; "
+            f"expected one of {sorted(ACCEPTED_ARTIFACT_SCHEMA_VERSIONS)}"
+        )
+    return text
+
+
+def verify_calibration_metadata(payload: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Fail closed on malformed calibrator metadata. ``None`` means uncalibrated."""
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise UntrustedArtifactError("calibration metadata must be an object")
+    if str(payload.get("schema_version", "")) != CALIBRATION_SCHEMA_VERSION:
+        raise UntrustedArtifactError(
+            f"calibration schema_version must be {CALIBRATION_SCHEMA_VERSION}"
+        )
+    kind = str(payload.get("type", ""))
+    if kind == "sigmoid":
+        a = _require_finite_number(payload.get("a"), field="calibration.a")
+        b = _require_finite_number(payload.get("b"), field="calibration.b")
+        if payload.get("temperature") not in (None,):
+            raise UntrustedArtifactError("sigmoid calibration must not set temperature")
+        del a, b
+    elif kind == "temperature":
+        temperature = _require_finite_number(
+            payload.get("temperature"), field="calibration.temperature"
+        )
+        if temperature <= 0.0:
+            raise UntrustedArtifactError("temperature T must be finite and > 0")
+        if payload.get("a") not in (None,) or payload.get("b") not in (None,):
+            raise UntrustedArtifactError("temperature calibration must not set sigmoid a/b")
+    else:
+        raise UntrustedArtifactError(f"unknown calibration type {kind!r}")
+    n_fit = _require_int(payload.get("n_fitting_oof"), field="n_fitting_oof", minimum=1)
+    event_ids = _require_string_list(
+        payload.get("fitting_event_ids"), field="fitting_event_ids"
+    )
+    sample_ids = _require_string_list(
+        payload.get("fitting_sample_ids"), field="fitting_sample_ids"
+    )
+    if n_fit != len(sample_ids):
+        raise UntrustedArtifactError("n_fitting_oof must equal len(fitting_sample_ids)")
+    n_events = _require_int(
+        payload.get("n_fitting_events"), field="n_fitting_events", minimum=1
+    )
+    if n_events != len(event_ids):
+        raise UntrustedArtifactError("n_fitting_events must equal len(fitting_event_ids)")
+    _require_matching_id_hash(
+        event_ids,
+        payload.get("fitting_event_ids_hash"),
+        field="fitting_event_ids_hash",
+        key="fitting_event_ids",
+    )
+    _require_matching_id_hash(
+        sample_ids,
+        payload.get("fitting_sample_ids_hash"),
+        field="fitting_sample_ids_hash",
+        key="fitting_sample_ids",
+    )
+    contract_hash = _require_sha256(
+        payload.get("contract_hash"), field="contract_hash", kind=ArtifactKind.CONTRACT
+    )
+    if contract_hash != PINNED_CONTRACT_HASH:
+        raise UntrustedArtifactError("calibration contract_hash must match the frozen digest")
+    if str(payload.get("evaluation_scope", "")) != CALIBRATION_EVALUATION_SCOPE:
+        raise UntrustedArtifactError(
+            f"calibration evaluation_scope must be {CALIBRATION_EVALUATION_SCOPE}"
+        )
+    if payload.get("independent_post_calibration_evaluation") is not False:
+        raise UntrustedArtifactError(
+            "independent_post_calibration_evaluation must be false; "
+            "pre/post metrics are fitting diagnostics"
+        )
+    expected = _require_int(payload.get("oof_n_expected"), field="oof_n_expected", minimum=0)
+    emitted = _require_int(payload.get("oof_n_emitted"), field="oof_n_emitted", minimum=0)
+    excluded = _require_int(payload.get("oof_n_excluded"), field="oof_n_excluded", minimum=0)
+    if emitted + excluded != expected:
+        raise UntrustedArtifactError(
+            "calibration OOF counts do not reconcile: "
+            f"expected={expected} emitted={emitted} excluded={excluded}"
+        )
+    if emitted != n_fit:
+        raise UntrustedArtifactError("n_fitting_oof must equal oof_n_emitted")
+    if not event_ids:
+        raise UntrustedArtifactError("fitting_event_ids must be non-empty")
+    metrics_pre = payload.get("metrics_pre")
+    metrics_post = payload.get("metrics_post")
+    if not isinstance(metrics_pre, dict) or not isinstance(metrics_post, dict):
+        raise UntrustedArtifactError("calibration metrics_pre/metrics_post must be objects")
+    return dict(payload)
+
+
+def verify_bootstrap_metadata(
+    payload: Mapping[str, Any] | None,
+    *,
+    require_production: bool = False,
+) -> dict[str, Any] | None:
+    """Fail closed on malformed event-block bootstrap metadata."""
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise UntrustedArtifactError("bootstrap metadata must be an object")
+    if str(payload.get("schema_version", "")) != BOOTSTRAP_SCHEMA_VERSION:
+        raise UntrustedArtifactError(
+            f"bootstrap schema_version must be {BOOTSTRAP_SCHEMA_VERSION}"
+        )
+    if str(payload.get("sampling_unit", "")) != "event":
+        raise UntrustedArtifactError("bootstrap sampling_unit must be 'event'")
+    n_replicates = _require_int(
+        payload.get("n_replicates"), field="n_replicates", minimum=1
+    )
+    n_successful = _require_int(
+        payload.get("n_successful"), field="n_successful", minimum=0
+    )
+    n_attempts = _require_int(payload.get("n_attempts"), field="n_attempts", minimum=0)
+    n_rejected = _require_int(payload.get("n_rejected"), field="n_rejected", minimum=0)
+    seed = _require_int(payload.get("seed"), field="seed", minimum=0)
+    del seed
+    if n_successful != n_replicates:
+        raise UntrustedArtifactError("bootstrap n_successful must equal n_replicates")
+    if n_attempts < n_successful:
+        raise UntrustedArtifactError("bootstrap n_attempts must be >= n_successful")
+    if n_rejected != n_attempts - n_successful:
+        raise UntrustedArtifactError("bootstrap n_rejected must equal attempts minus successes")
+    max_attempts = _require_int(payload.get("max_attempts"), field="max_attempts", minimum=1)
+    if max_attempts < n_successful:
+        raise UntrustedArtifactError("bootstrap max_attempts must be >= n_successful")
+    if n_attempts > max_attempts:
+        raise UntrustedArtifactError("bootstrap n_attempts must be <= max_attempts")
+    reasons = payload.get("rejection_reasons")
+    if not isinstance(reasons, list) or not all(isinstance(item, str) for item in reasons):
+        raise UntrustedArtifactError("bootstrap rejection_reasons must be a list of strings")
+    if len(reasons) != n_rejected:
+        raise UntrustedArtifactError("bootstrap rejection_reasons length must equal n_rejected")
+    if payload.get("calibrator_refit_per_replicate") is not False:
+        raise UntrustedArtifactError("calibrator_refit_per_replicate must be false")
+    if str(payload.get("calibrator_source", "")) != CALIBRATOR_SOURCE_FIXED_OOF:
+        raise UntrustedArtifactError(
+            f"calibrator_source must be {CALIBRATOR_SOURCE_FIXED_OOF}"
+        )
+    if str(payload.get("prediction_scope", "")) != BOOTSTRAP_PREDICTION_SCOPE:
+        raise UntrustedArtifactError(
+            f"prediction_scope must be {BOOTSTRAP_PREDICTION_SCOPE}"
+        )
+    if payload.get("oob") is not False:
+        raise UntrustedArtifactError("bootstrap oob must be false")
+    production = payload.get("production_qualified", False)
+    if production is not True and production is not False:
+        raise UntrustedArtifactError("bootstrap production_qualified must be a boolean")
+    if production is True or require_production:
+        if n_successful != PRODUCTION_BOOTSTRAP_REPLICATES:
+            raise UntrustedArtifactError(
+                "production-qualified bootstrap must have "
+                f"{PRODUCTION_BOOTSTRAP_REPLICATES} successful refits"
+            )
+        if n_replicates != PRODUCTION_BOOTSTRAP_REPLICATES:
+            raise UntrustedArtifactError(
+                "production-qualified bootstrap n_replicates must be "
+                f"{PRODUCTION_BOOTSTRAP_REPLICATES}"
+            )
+    event_ids = _require_string_list(payload.get("event_ids"), field="event_ids")
+    if not event_ids:
+        raise UntrustedArtifactError("bootstrap event_ids must be non-empty")
+    n_events = payload.get("n_events")
+    if n_events is None:
+        n_events = len(event_ids)
+    n_events = _require_int(n_events, field="n_events", minimum=1)
+    if n_events != len(event_ids):
+        raise UntrustedArtifactError("bootstrap n_events must equal len(event_ids)")
+    _require_matching_id_hash(
+        event_ids,
+        payload.get("event_ids_hash"),
+        field="event_ids_hash",
+        key="event_ids",
+    )
+    cal_event_ids = _require_string_list(
+        payload.get("calibrator_fitting_event_ids"),
+        field="calibrator_fitting_event_ids",
+    )
+    cal_sample_ids = _require_string_list(
+        payload.get("calibrator_fitting_sample_ids"),
+        field="calibrator_fitting_sample_ids",
+    )
+    if not cal_event_ids or not cal_sample_ids:
+        raise UntrustedArtifactError("bootstrap calibrator fitting ids must be non-empty")
+    _require_matching_id_hash(
+        cal_event_ids,
+        payload.get("calibrator_fitting_event_ids_hash"),
+        field="calibrator_fitting_event_ids_hash",
+        key="fitting_event_ids",
+    )
+    _require_matching_id_hash(
+        cal_sample_ids,
+        payload.get("calibrator_fitting_sample_ids_hash"),
+        field="calibrator_fitting_sample_ids_hash",
+        key="fitting_sample_ids",
+    )
+    contract_hash = _require_sha256(
+        payload.get("contract_hash"), field="contract_hash", kind=ArtifactKind.CONTRACT
+    )
+    if contract_hash != PINNED_CONTRACT_HASH:
+        raise UntrustedArtifactError("bootstrap contract_hash must match the frozen digest")
+    _require_sha256(
+        payload.get("estimator_hash"), field="estimator_hash", kind=ArtifactKind.CONFIG
+    )
+    _require_sha256(payload.get("config_hash"), field="config_hash", kind=ArtifactKind.CONFIG)
+    _require_sha256(payload.get("data_hash"), field="data_hash", kind=ArtifactKind.DATA)
+    ev_semantics = str(payload.get("ev_semantics", ""))
+    if ev_semantics not in {EV_SEMANTICS_BINARY_MONEYLINE, EV_SEMANTICS_JOINT_VOID}:
+        raise UntrustedArtifactError("bootstrap ev_semantics is unknown")
+    ev_reason = payload.get("ev_omission_reason")
+    if ev_semantics == EV_SEMANTICS_JOINT_VOID:
+        if ev_reason != JOINT_EV_OMISSION_REASON:
+            raise UntrustedArtifactError(
+                "joint bootstrap must omit EV with "
+                f"{JOINT_EV_OMISSION_REASON}"
+            )
+    elif ev_reason not in (None,):
+        raise UntrustedArtifactError("binary moneyline bootstrap must not set ev_omission_reason")
+    targets = payload.get("targets")
+    if not isinstance(targets, dict) or not targets:
+        raise UntrustedArtifactError("bootstrap targets must be a non-empty object")
+    ev_keys = ("ev05", "ev25", "ev50", "ev75", "ev95")
+    for target_id, summary in targets.items():
+        if not isinstance(target_id, str) or not target_id:
+            raise UntrustedArtifactError("bootstrap target ids must be non-empty strings")
+        if not isinstance(summary, dict):
+            raise UntrustedArtifactError(f"bootstrap target {target_id!r} must be an object")
+        for key in ("p05", "p25", "p50", "p75", "p95"):
+            _require_finite_number(summary.get(key), field=f"bootstrap.{target_id}.{key}")
+        price = summary.get("observed_price")
+        if ev_semantics == EV_SEMANTICS_JOINT_VOID:
+            for key in ev_keys:
+                if key in summary and summary[key] is not None:
+                    raise UntrustedArtifactError(
+                        f"bootstrap target {target_id!r} must not emit "
+                        "price*p-1 EV for joint void mass"
+                    )
+            continue
+        if price is None:
+            for key in ev_keys:
+                if key in summary and summary[key] is not None:
+                    raise UntrustedArtifactError(
+                        f"bootstrap target {target_id!r} must not invent EV without a price"
+                    )
+            continue
+        price_value = _require_finite_number(
+            price, field=f"bootstrap.{target_id}.observed_price"
+        )
+        if price_value <= 1.0:
+            raise UntrustedArtifactError(
+                f"bootstrap target {target_id!r} decimal price must be > 1.0"
+            )
+        for key in ev_keys:
+            _require_finite_number(summary.get(key), field=f"bootstrap.{target_id}.{key}")
+    return dict(payload)
+
+
+def verify_optional_calibration_payload(payload: Mapping[str, Any]) -> None:
+    """Uncalibrated artifacts stay loadable; present calibration must be valid."""
+    calibrated = payload.get("calibrated", False)
+    if calibrated is not True and calibrated is not False and calibrated is not None:
+        raise UntrustedArtifactError("calibrated must be a boolean")
+    calibration = payload.get("calibration")
+    bootstrap = payload.get("bootstrap")
+    if calibrated is True:
+        verify_calibration_metadata(calibration)
+        verify_bootstrap_metadata(bootstrap)
+        return
+    if calibration is not None:
+        verify_calibration_metadata(calibration)
+    if bootstrap is not None:
+        verify_bootstrap_metadata(bootstrap, require_production=False)
 
 
 def _classes_from_json(value: object) -> tuple[int, ...]:
@@ -549,7 +923,7 @@ def _intercept_from_json(value: object) -> float:
 
 def predictor_from_mapping(payload: Mapping[str, Any]) -> RidgePredictor:
     """Validate JSON payload schema/types/shapes/finiteness; no pickle."""
-    if payload.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+    if payload.get("schema_version") not in ACCEPTED_ARTIFACT_SCHEMA_VERSIONS:
         raise UntrustedArtifactError(
             f"unknown artifact schema {payload.get('schema_version')!r}"
         )
@@ -634,6 +1008,8 @@ def save_artifact(
     code_commit_reason: str,
     model_id: str = EXPECTED_MODEL_ID,
     spec_id: str = RIDGE_SPEC_ID,
+    oof_predictions: Sequence[Mapping[str, Any]] = (),
+    oof_exclusions: Sequence[Mapping[str, Any]] = (),
 ) -> SavedArtifact:
     """Serialize a JSON ridge payload and write a verified sidecar manifest."""
     if tuple(predictor.feature_names) != FEATURE_NAMES:
@@ -700,6 +1076,8 @@ def save_artifact(
         "feature_names": list(FEATURE_NAMES),
         "feature_spec_hash": live_spec,
         "model_id": model_id,
+        "oof_exclusions": [dict(item) for item in oof_exclusions],
+        "oof_predictions": [dict(item) for item in oof_predictions],
         "payload_kind": PAYLOAD_KIND,
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         "spec_hash": live_spec,
@@ -745,11 +1123,7 @@ def save_artifact(
 
 
 def _verify_manifest(manifest: ArtifactManifest, payload_bytes: bytes) -> None:
-    if manifest.schema_version != ARTIFACT_SCHEMA_VERSION:
-        raise UntrustedArtifactError(
-            f"unknown artifact schema {manifest.schema_version!r}; "
-            f"expected {ARTIFACT_SCHEMA_VERSION}"
-        )
+    _require_schema_version(manifest.schema_version)
     digest = sha256_bytes(payload_bytes)
     payload_digest = _require_sha256(
         manifest.payload_sha256, field="payload_sha256", kind=ArtifactKind.CHECKSUM
@@ -810,6 +1184,13 @@ def _verify_manifest(manifest: ArtifactManifest, payload_bytes: bytes) -> None:
     _require_sha256(manifest.code_hash, field="code_hash", kind=ArtifactKind.CODE)
     _require_code_commit(manifest.code_commit)
     _require_reason(manifest.code_commit_reason)
+    verify_optional_calibration_payload(
+        {
+            "bootstrap": manifest.bootstrap,
+            "calibrated": manifest.calibrated,
+            "calibration": manifest.calibration,
+        }
+    )
 
 
 def load_artifact(payload_path: Path) -> LoadedArtifact:
@@ -862,10 +1243,27 @@ def load_artifact(payload_path: Path) -> LoadedArtifact:
         raise ArtifactSpecMismatchError(
             f"{_kind_label(ArtifactKind.CODE)} commit mismatch inside payload"
         )
+    verify_optional_calibration_payload(loaded)
+    oof = loaded.get("oof_predictions", [])
+    if oof is None:
+        oof = []
+    if not isinstance(oof, list):
+        raise UntrustedArtifactError("oof_predictions must be a list")
+    exclusions = loaded.get("oof_exclusions", [])
+    if exclusions is None:
+        exclusions = []
+    if not isinstance(exclusions, list):
+        raise UntrustedArtifactError("oof_exclusions must be a list")
+    calibrated = loaded.get("calibrated", False) is True
     return LoadedArtifact(
         payload=loaded,
         predictor=predictor,
         manifest=manifest,
         payload_path=target,
         manifest_path=side,
+        oof_predictions=tuple(dict(item) for item in oof if isinstance(item, dict)),
+        oof_exclusions=tuple(
+            dict(item) for item in exclusions if isinstance(item, dict)
+        ),
+        calibrated=calibrated,
     )

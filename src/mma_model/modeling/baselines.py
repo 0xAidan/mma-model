@@ -14,6 +14,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, Never
 
@@ -41,6 +42,7 @@ from mma_model.features.spec import FEATURE_NAMES, SPEC_VERSION, spec_hash, swap
 from mma_model.labels.outcomes import WinnerSide, training_label
 from mma_model.modeling.artifacts import (
     ARTIFACT_SCHEMA_VERSION,
+    ESTIMATOR_KIND,
     LoadedArtifact,
     RidgeModelSpec,
     RidgePredictor,
@@ -51,6 +53,8 @@ from mma_model.modeling.artifacts import (
     save_artifact,
 )
 from mma_model.modeling.splits import (
+    FoldKind,
+    FoldMetadata,
     FoldPlan,
     FoldRole,
     HoldoutLockedError,
@@ -62,6 +66,7 @@ from mma_model.modeling.splits import (
     tuning_folds,
     validation_folds,
 )
+from mma_model.quality.schema import sha256_canonical
 from mma_model.value.devig import IncompleteMarketSet, try_proportional_devig
 
 SWAP_ATOL: Final = 1e-8
@@ -80,6 +85,58 @@ SESSION_NO_VIG_NOTE: Final = (
 
 class TrainError(ValueError):
     """Ordinary baseline training cannot proceed."""
+
+
+class RidgeOofSkipReason(StrEnum):
+    EMPTY_TRAIN = "empty_train"
+    EMPTY_TEST = "empty_test"
+    ONE_CLASS = "one_class"
+
+
+@dataclass(frozen=True)
+class RidgeOofExclusion:
+    fold_id: str
+    fold_kind: str
+    test_event_ids: tuple[str, ...]
+    reason_code: RidgeOofSkipReason
+    n_train: int
+    n_test: int
+    test_bout_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fold_id": self.fold_id,
+            "fold_kind": self.fold_kind,
+            "n_test": self.n_test,
+            "n_train": self.n_train,
+            "reason_code": self.reason_code.value,
+            "test_bout_ids": list(self.test_bout_ids),
+            "test_event_ids": list(self.test_event_ids),
+        }
+
+
+@dataclass(frozen=True)
+class RidgeOofCollection:
+    predictions: tuple[dict[str, Any], ...]
+    exclusions: tuple[RidgeOofExclusion, ...]
+    n_expected: int
+    n_emitted: int
+
+    def excluded_bouts(self) -> int:
+        return sum(item.n_test for item in self.exclusions)
+
+    def reconcile(self) -> None:
+        if self.n_emitted != len(self.predictions):
+            raise TrainError(
+                f"n_oof_emitted {self.n_emitted} != {len(self.predictions)} prediction rows"
+            )
+        excluded = self.excluded_bouts()
+        if self.n_emitted + excluded != self.n_expected:
+            raise TrainError(
+                "OOF counts do not reconcile: "
+                f"n_oof_expected={self.n_expected} n_oof_emitted={self.n_emitted} "
+                f"n_oof_excluded_bouts={excluded}"
+            )
 
 
 class MissingNoVig:
@@ -661,25 +718,132 @@ def _score_baseline(
     raise TrainError(f"unhandled baseline name: {name!r}")
 
 
-def _oof_pairs(
+def _fold_kind(fold: FoldMetadata) -> str:
+    return fold.kind.value if isinstance(fold.kind, FoldKind) else str(fold.kind)
+
+
+def ridge_oof_payload(
+    model: FittedRidge,
+    sample: LabeledSample,
+    *,
+    fold: FoldMetadata,
+) -> dict[str, Any]:
+    y = _label_to_y(sample.binary_winner)
+    raw_p = predict_ridge_raw(model, sample.values)
+    raw_logit = model.predictor.raw_logit(sample.values)
+    train_event_ids = list(fold.train_event_ids)
+    return {
+        "bout_id": sample.sample_id,
+        "estimator_hash": model.predictor.identity_hash(),
+        "estimator_kind": ESTIMATOR_KIND,
+        "event_id": sample.event_id,
+        "fold_id": fold.fold_id,
+        "fold_kind": _fold_kind(fold),
+        "model_id": "M1",
+        "raw_logit": raw_logit,
+        "raw_probability": raw_p,
+        "test_cutoff": sample.cutoff.isoformat(),
+        "train_event_ids": train_event_ids,
+        "train_event_ids_hash": sha256_canonical({"train_event_ids": train_event_ids}),
+        "train_max_timestamp": (
+            fold.max_train_timestamp.isoformat()
+            if fold.max_train_timestamp is not None
+            else None
+        ),
+        "y": y,
+    }
+
+
+def _ridge_oof_exclusion(
+    fold: FoldMetadata,
+    *,
+    reason_code: RidgeOofSkipReason,
+    n_train: int,
+    n_test: int,
+    test_bout_ids: Sequence[str],
+) -> RidgeOofExclusion:
+    return RidgeOofExclusion(
+        fold_id=fold.fold_id,
+        fold_kind=_fold_kind(fold),
+        test_event_ids=tuple(fold.test_event_ids),
+        reason_code=reason_code,
+        n_train=n_train,
+        n_test=n_test,
+        test_bout_ids=tuple(test_bout_ids),
+    )
+
+
+def _collect_ridge_oof(
     plan: FoldPlan,
     samples: Sequence[LabeledSample],
     spec: RidgeModelSpec,
-) -> tuple[list[int], list[float], list[LabeledSample]]:
-    y_all: list[int] = []
-    p_all: list[float] = []
-    scored: list[LabeledSample] = []
+) -> RidgeOofCollection:
+    rows: list[dict[str, Any]] = []
+    exclusions: list[RidgeOofExclusion] = []
+    n_expected = 0
     for fold in plan.folds:
         train = _samples_for_events(samples, fold.train_event_ids)
         test = _samples_for_ids(samples, fold.test_bout_ids)
-        if not train or not test:
+        n_train = len(train)
+        n_test = len(test)
+        n_expected += n_test
+        test_bout_ids = tuple(sample.sample_id for sample in test)
+        if n_train == 0:
+            exclusions.append(
+                _ridge_oof_exclusion(
+                    fold,
+                    reason_code=RidgeOofSkipReason.EMPTY_TRAIN,
+                    n_train=n_train,
+                    n_test=n_test,
+                    test_bout_ids=test_bout_ids,
+                )
+            )
             continue
-        model = fit_ridge(train, spec)
+        if n_test == 0:
+            exclusions.append(
+                _ridge_oof_exclusion(
+                    fold,
+                    reason_code=RidgeOofSkipReason.EMPTY_TEST,
+                    n_train=n_train,
+                    n_test=n_test,
+                    test_bout_ids=test_bout_ids,
+                )
+            )
+            continue
+        try:
+            model = fit_ridge(train, spec)
+        except TrainError:
+            exclusions.append(
+                _ridge_oof_exclusion(
+                    fold,
+                    reason_code=RidgeOofSkipReason.ONE_CLASS,
+                    n_train=n_train,
+                    n_test=n_test,
+                    test_bout_ids=test_bout_ids,
+                )
+            )
+            continue
         for sample in test:
-            y_all.append(_label_to_y(sample.binary_winner))
-            p_all.append(predict_ridge_win_prob(model, sample.values))
-            scored.append(sample)
-    return y_all, p_all, scored
+            rows.append(ridge_oof_payload(model, sample, fold=fold))
+    collected = RidgeOofCollection(
+        predictions=tuple(rows),
+        exclusions=tuple(exclusions),
+        n_expected=n_expected,
+        n_emitted=len(rows),
+    )
+    collected.reconcile()
+    return collected
+
+
+def _merge_ridge_oof(parts: Sequence[RidgeOofCollection]) -> RidgeOofCollection:
+    merged = RidgeOofCollection(
+        predictions=tuple(row for part in parts for row in part.predictions),
+        exclusions=tuple(item for part in parts for item in part.exclusions),
+        n_expected=sum(part.n_expected for part in parts),
+        n_emitted=sum(part.n_emitted for part in parts),
+    )
+    merged.reconcile()
+    return merged
 
 
 def _final_refit_samples(
@@ -721,9 +885,15 @@ def _fold_metrics(
     inner: FoldPlan,
     outer: FoldPlan,
 ) -> dict[str, Any]:
-    tune_y, tune_p, tune_rows = _oof_pairs(inner, samples, spec)
-    val_y, val_p, val_rows = _oof_pairs(outer, samples, spec)
-    scored = tuple(tune_rows + val_rows)
+    tune_oof = _collect_ridge_oof(inner, samples, spec)
+    val_oof = _collect_ridge_oof(outer, samples, spec)
+    oof = _merge_ridge_oof((tune_oof, val_oof))
+    by_id = {sample.sample_id: sample for sample in samples}
+    tune_y = [int(row["y"]) for row in tune_oof.predictions]
+    tune_p = [float(row["raw_probability"]) for row in tune_oof.predictions]
+    val_y = [int(row["y"]) for row in val_oof.predictions]
+    val_p = [float(row["raw_probability"]) for row in val_oof.predictions]
+    scored = tuple(by_id[str(row["bout_id"])] for row in oof.predictions)
     metrics: dict[str, Any] = {
         "tuning": _metric_block(tune_y, tune_p) if tune_y else _empty_metric_block(),
         "validation": _metric_block(val_y, val_p) if val_y else _empty_metric_block(),
@@ -733,7 +903,14 @@ def _fold_metrics(
             "sequential_rating": _score_baseline("sequential_rating", scored),
         },
         "n_labeled": len(samples),
-        "n_oof": len(scored),
+        "n_oof": oof.n_emitted,
+        "n_oof_emitted": oof.n_emitted,
+        "n_oof_excluded_bouts": oof.excluded_bouts(),
+        "n_oof_excluded_folds": len(oof.exclusions),
+        "n_oof_expected": oof.n_expected,
+        "oof_exclusions": [item.to_dict() for item in oof.exclusions],
+        "oof_fold_kinds": sorted({item["fold_kind"] for item in oof.predictions}),
+        "oof_predictions": list(oof.predictions),
     }
     _assert_no_holdout_betting_keys(metrics)
     return metrics
@@ -783,6 +960,8 @@ def train_ridge_m1(
         code_commit_reason=code_commit_reason,
         model_id=spec.model_id,
         spec_id=spec.spec_id,
+        oof_predictions=metrics.get("oof_predictions") or (),
+        oof_exclusions=metrics.get("oof_exclusions") or (),
     )
     return TrainReport(
         model_id=spec.model_id,

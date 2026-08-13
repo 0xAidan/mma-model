@@ -82,6 +82,7 @@ from mma_model.markets.derive import UnsupportedScheduleError
 from mma_model.modeling.artifacts import (
     ArtifactError,
     RidgeSpecError,
+    UntrustedArtifactError,
     load_artifact,
     load_feature_vector,
     load_ridge_spec,
@@ -93,6 +94,7 @@ from mma_model.modeling.baselines import (
     run_protocol_train,
     train_from_session,
 )
+from mma_model.modeling.calibration import CalibrationError, CalibrationLeakageError
 from mma_model.modeling.joint import (
     PAYLOAD_KIND as JOINT_PAYLOAD_KIND,
     EarlyTechnicalOutcomeError,
@@ -107,6 +109,12 @@ from mma_model.modeling.joint import (
     protocol_joint_feature_vector,
     run_protocol_joint_train,
     train_joint_from_session,
+)
+from mma_model.modeling.uncertainty import (
+    DEFAULT_BOOTSTRAP_REPLICATES,
+    DEFAULT_BOOTSTRAP_SEED,
+    BootstrapError,
+    run_model_calibrate,
 )
 from mma_model.modeling.splits import (
     HoldoutLockedError,
@@ -880,6 +888,54 @@ def main(argv: list[str] | None = None) -> int:
         "--bout-id",
         default=None,
         help="Protocol bout id when --fixture protocol is set",
+    )
+    p_mcal = model_sub.add_parser(
+        "calibrate",
+        help="Fit prior-time OOF calibration and event-block bootstrap (DWCS-305)",
+    )
+    p_mcal.add_argument(
+        "--artifact",
+        type=Path,
+        required=True,
+        help="Versioned JSON ridge or joint artifact from model train",
+    )
+    p_mcal.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("config/evaluation/dwcs_v1.json"),
+        help="Evaluation contract path (hash-verified; never mutated)",
+    )
+    p_mcal.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Calibrated artifact path (default: <stem>.calibrated.json)",
+    )
+    p_mcal.add_argument(
+        "--database-url",
+        default=None,
+        help="Optional disposable SQLite URL (never live data/mma.db)",
+    )
+    p_mcal.add_argument(
+        "--fixture",
+        choices=("protocol",),
+        default="protocol",
+        help="Reconstruct source samples without live DB (default: protocol)",
+    )
+    p_mcal.add_argument(
+        "--bootstrap-replicates",
+        type=int,
+        default=DEFAULT_BOOTSTRAP_REPLICATES,
+        help=(
+            "Event-block refits (production default 200). "
+            "Values other than 200 mark the artifact non-production"
+        ),
+    )
+    p_mcal.add_argument(
+        "--bootstrap-seed",
+        type=int,
+        default=None,
+        help="Pinned bootstrap seed (default: module default)",
     )
 
     args = p.parse_args(argv)
@@ -2236,6 +2292,88 @@ def main(argv: list[str] | None = None) -> int:
                     indent=2,
                 )
             )
+            return 0
+        if args.model_cmd == "calibrate":
+            try:
+                contract = load_evaluation_contract(path=Path(args.contract))
+            except EvaluationContractError as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            n_replicates = int(args.bootstrap_replicates)
+            if n_replicates < 1:
+                print("model configuration error: --bootstrap-replicates must be >= 1")
+                return EXIT_INTERNAL
+            seed = (
+                DEFAULT_BOOTSTRAP_SEED
+                if args.bootstrap_seed is None
+                else int(args.bootstrap_seed)
+            )
+            engine = None
+            try:
+                if args.database_url is not None:
+                    db_url = str(args.database_url).strip()
+                    if not db_url:
+                        print("model configuration error: empty --database-url")
+                        return EXIT_INTERNAL
+                    default_url = get_settings().mma_database_url
+                    if is_prohibited_live_url(db_url, default_url=default_url):
+                        print(
+                            "model configuration error: refusing live data/mma.db; "
+                            "pass an explicit disposable --database-url or --fixture protocol"
+                        )
+                        return EXIT_INTERNAL
+                    engine = open_readonly_sqlite_engine(db_url)
+                    session_factory = readonly_session_factory(engine)
+                    with session_factory() as session:
+                        report = run_model_calibrate(
+                            artifact_path=Path(args.artifact),
+                            output_path=args.output,
+                            fixture=None,
+                            session=session,
+                            n_replicates=n_replicates,
+                            seed=seed,
+                            contract=contract,
+                        )
+                elif args.fixture == "protocol":
+                    report = run_model_calibrate(
+                        artifact_path=Path(args.artifact),
+                        output_path=args.output,
+                        fixture="protocol",
+                        n_replicates=n_replicates,
+                        seed=seed,
+                        contract=contract,
+                    )
+                else:
+                    print(
+                        "model configuration error: pass --fixture protocol or a "
+                        "disposable --database-url"
+                    )
+                    return EXIT_INTERNAL
+            except CoverageDatabaseError as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            except HoldoutLockedError as exc:
+                print(f"model holdout locked: {exc}")
+                return EXIT_INTERNAL
+            except CalibrationLeakageError as exc:
+                print(f"model calibration leakage: {exc}")
+                return EXIT_INTERNAL
+            except (
+                CalibrationError,
+                BootstrapError,
+                ArtifactError,
+                UntrustedArtifactError,
+                TrainError,
+                SplitError,
+                JointError,
+                ValueError,
+            ) as exc:
+                print(f"model configuration error: {exc}")
+                return EXIT_INTERNAL
+            finally:
+                if engine is not None:
+                    engine.dispose()
+            print(json.dumps(report.to_dict(), indent=2))
             return 0
         if args.model_cmd != "train":
             print(f"model configuration error: unknown command {args.model_cmd!r}")
