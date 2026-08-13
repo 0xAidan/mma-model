@@ -9,21 +9,30 @@ from mma_model.odds.manual_price import (
     PriceSourceKind,
     compute_exact_ev,
     parse_manual_price_observation,
+    validate_market_selection,
 )
 from mma_model.odds.normalize import normalize_odds_payload
 from mma_model.odds.price_guidance import (
     FALLBACK_LABEL,
     PriceGuidanceRow,
+    PriceGuidanceSelectionError,
     build_price_guidance,
     build_unpriced_price_targets,
 )
 from mma_model.odds.provider_decision import (
+    CONTRACT_ID,
     DECISION_PATH_REFERENCE_FALLBACK,
+    EXPECTED_CONTRACT_VERSION,
+    PINNED_ODDS_DECISION_HASH,
     LicensedBookmakerAdapterError,
+    OddsDecisionError,
+    OddsDecisionHashMismatch,
     Phase0OddsDecision,
     licensed_bookmaker_adapter_authorized,
+    load_odds_decision_contract,
     load_odds_source_config,
     load_phase0_odds_decision,
+    package_decision_resource_path,
     require_licensed_bookmaker_adapter,
 )
 from mma_model.odds.snapshot import run_odds_audit, run_odds_snapshot
@@ -38,18 +47,24 @@ from mma_model.odds.types import (
 )
 
 __all__ = [
+    "CONTRACT_ID",
     "DECISION_PATH_REFERENCE_FALLBACK",
+    "EXPECTED_CONTRACT_VERSION",
     "FALLBACK_LABEL",
     "MANUAL_SOURCE_LABEL",
+    "PINNED_ODDS_DECISION_HASH",
     "PROVIDER_THE_ODDS_API",
     "EntitlementFailure",
     "LicensedBookmakerAdapterError",
     "LineLifecycleState",
     "NormalizedQuote",
     "ObservedPrice",
+    "OddsDecisionError",
+    "OddsDecisionHashMismatch",
     "OddsQuoteStore",
     "Phase0OddsDecision",
     "PriceGuidanceRow",
+    "PriceGuidanceSelectionError",
     "PriceSourceKind",
     "QuotaHeaders",
     "QuoteAvailability",
@@ -60,12 +75,15 @@ __all__ = [
     "compute_exact_ev",
     "fetch_mma_odds",
     "licensed_bookmaker_adapter_authorized",
+    "load_odds_decision_contract",
     "load_odds_source_config",
     "load_phase0_odds_decision",
     "normalize_odds_payload",
+    "package_decision_resource_path",
     "parse_manual_price_observation",
     "require_licensed_bookmaker_adapter",
     "run_bookmaker_audit",
     "run_odds_audit",
     "run_odds_snapshot",
+    "validate_market_selection",
 ]

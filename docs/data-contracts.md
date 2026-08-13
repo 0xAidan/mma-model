@@ -255,15 +255,16 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 
 | Field | Value |
 |-------|--------|
-| **Phase 0 gate** | Committed `output/research/odds-coverage-summary.json` → `decision.path=the_odds_api_reference_fallback` |
+| **Authoritative contract** | Packaged `mma_model/odds/odds_decision_v1.yaml` (`PINNED_ODDS_DECISION_HASH`) |
+| **Plan-visible path** | `config/sources/odds.yaml` (symlink to packaged file) |
+| **Phase 0 gate** | Packaged decision + optional checkout cross-check of `output/research/odds-coverage-summary.json` → `decision.path=the_odds_api_reference_fallback` |
 | **Licensed adapter** | **Not authorized.** Bet365×DWCS was `scoped_absent`; OpticOdds / SportsGameOdds / SportsDataIO were `not_configured`. Do not invent automated bookmaker adapters. |
-| **Config** | `config/sources/odds.yaml` |
 | **Manual prices** | `user_observed` (non-automated); `mma_model.odds.manual_price` |
-| **Guidance** | `mma_model.odds.price_guidance` — fair / actionable / strong-value always for qualified unpriced selections |
-| **Exact EV** | Only when an available observed price exists (`compute_exact_ev`); never synthetic ROI/CLV |
-| **Lifecycle** | Explicit `available` / `unknown` / `suspended` / `locked` / `removed` / `entitlement_failed` — no forward-fill |
-| **Storage** | `odds_manual_price_observations` (append-only); migration `0013_odds_manual_prices` |
-| **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance …`; `mma-model odds record-manual-price …` |
+| **Guidance** | `mma_model.odds.price_guidance` — catalog-validated selection; observation must match family/outcome/line; fair / actionable / strong-value for qualified unpriced rows |
+| **Exact EV** | Only when an available observed price exists on a qualified + gates-pass selection (`compute_exact_ev`); never synthetic ROI/CLV |
+| **Lifecycle** | Explicit `available` / `unknown` / `suspended` / `locked` / `removed` / `entitlement_failed` — no forward-fill; `attempted_provider` required for entitlement failures |
+| **Storage** | `odds_manual_price_observations` (append-only); migrations `0013_odds_manual_prices`, `0014_odds_manual_integrity` |
+| **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance … [--line-point]`; `mma-model odds record-manual-price …` |
 | **Prohibited** | Sportsbook website scraping, credential/cookie storage, Bet365 claims for reference consensus |
 
 ## Governing product rule (odds)

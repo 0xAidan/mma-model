@@ -219,13 +219,51 @@ _MANUAL_PRICE_PROVENANCE_SQL = (
     "lifecycle != 'available' AND price_decimal IS NULL"
     ")"
 )
+_MANUAL_ATTEMPTED_PROVIDER_SQL = (
+    "("
+    "lifecycle = 'entitlement_failed' "
+    "AND attempted_provider IS NOT NULL "
+    "AND length(trim(attempted_provider)) > 0"
+    ") OR ("
+    "lifecycle != 'entitlement_failed' AND attempted_provider IS NULL"
+    ")"
+)
+# Keep in sync with DWCS-200 catalog (moneyline/totals/goes_distance/method/
+# fighter_by_method/exact_round + totals points 1.5/2.5 only).
+_MANUAL_FAMILY_OUTCOME_LINE_SQL = (
+    "("
+    "market_family = 'moneyline' AND outcome_key IN ('fighter_a', 'fighter_b') "
+    "AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'totals' AND outcome_key IN ('over', 'under') "
+    "AND line_point IN (1.5, 2.5)"
+    ") OR ("
+    "market_family = 'goes_distance' "
+    "AND outcome_key IN ('goes_distance', 'inside_distance') "
+    "AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'method' "
+    "AND outcome_key IN ('ko_tko', 'submission', 'decision', 'other_stoppage') "
+    "AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'fighter_by_method' AND outcome_key IN ("
+    "'a_ko_tko', 'a_submission', 'a_other_stoppage', 'a_decision', "
+    "'b_ko_tko', 'b_submission', 'b_other_stoppage', 'b_decision'"
+    ") AND line_point IS NULL"
+    ") OR ("
+    "market_family = 'exact_round' "
+    "AND outcome_key IN ('round_1', 'round_2', 'round_3', 'round_4', 'round_5') "
+    "AND line_point IS NULL"
+    ")"
+)
 
 
 class OddsManualPriceObservation(Base):
     """Append-only user-observed (non-automated) price / lifecycle observations.
 
     Exact EV confirmation may use these rows. Locked/removed/entitlement-failed
-    rows never store a forward-filled price.
+    rows never store a forward-filled price. ``attempted_provider`` is required
+    only for ``entitlement_failed``.
     """
 
     __tablename__ = "odds_manual_price_observations"
@@ -251,6 +289,22 @@ class OddsManualPriceObservation(Base):
             _MANUAL_PRICE_PROVENANCE_SQL,
             name="ck_odds_manual_price_provenance",
         ),
+        CheckConstraint(
+            _MANUAL_ATTEMPTED_PROVIDER_SQL,
+            name="ck_odds_manual_attempted_provider",
+        ),
+        CheckConstraint(
+            _MANUAL_FAMILY_OUTCOME_LINE_SQL,
+            name="ck_odds_manual_family_outcome_line",
+        ),
+        CheckConstraint(
+            "length(trim(bookmaker_key)) > 0",
+            name="ck_odds_manual_bookmaker_key_nonempty",
+        ),
+        CheckConstraint(
+            "length(trim(region)) > 0",
+            name="ck_odds_manual_region_nonempty",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -265,6 +319,9 @@ class OddsManualPriceObservation(Base):
     line_point: Mapped[float | None] = mapped_column(Float, nullable=True)
     price_decimal: Mapped[float | None] = mapped_column(Float, nullable=True)
     lifecycle: Mapped[str] = mapped_column(String(32), index=True)
+    attempted_provider: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     source_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

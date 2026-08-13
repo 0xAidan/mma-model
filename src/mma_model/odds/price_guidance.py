@@ -24,14 +24,19 @@ from mma_model.odds.manual_price import (
     ObservedPrice,
     PriceSourceKind,
     compute_exact_ev,
+    validate_market_selection,
 )
 
 FALLBACK_LABEL = "non-automated sportsbook-agnostic price targets"
 
 
+class PriceGuidanceSelectionError(ValueError):
+    """Invalid selection catalog identity or observation mismatch."""
+
+
 @dataclass(frozen=True)
 class PriceGuidanceRow:
-    """One selection's guidance: thresholds always (when qualified), EV only if priced."""
+    """One selection's guidance: thresholds when qualified; EV only if priced."""
 
     market_family: MarketFamily
     outcome_key: OutcomeKey
@@ -79,6 +84,27 @@ class PriceGuidanceRow:
         }
 
 
+def assert_observation_matches_selection(
+    observed: ObservedPrice,
+    *,
+    family: MarketFamily,
+    outcome_key: OutcomeKey,
+    line_point: float | None,
+) -> None:
+    """Require observed market/outcome/line identity to match the guidance row."""
+    if not observed.matches_selection(
+        family=family,
+        outcome_key=outcome_key,
+        line_point=line_point,
+    ):
+        raise PriceGuidanceSelectionError(
+            "observed price selection mismatch: "
+            f"guidance=({family.value}, {outcome_key.value}, {line_point!r}) "
+            f"observed=({observed.market_family.value}, "
+            f"{observed.outcome_key.value}, {observed.line_point!r})"
+        )
+
+
 def build_price_guidance(
     *,
     family: MarketFamily,
@@ -93,10 +119,24 @@ def build_price_guidance(
 ) -> PriceGuidanceRow:
     """Build guidance for one selection.
 
-    Unpriced / locked / removed / entitlement-failed rows still publish
-    sportsbook-agnostic thresholds when qualified. Exact EV appears only when an
-    available observed price exists.
+    Selection identity is always validated against the DWCS-200 catalog.
+    When an observation is supplied it must match family/outcome/line_point
+    exactly before classification or exact EV. Exact EV is suppressed for
+    non-qualified or failed-gate selections.
     """
+    try:
+        validate_market_selection(family, outcome_key, line_point)
+    except ValueError as exc:
+        raise PriceGuidanceSelectionError(str(exc)) from exc
+
+    if observed is not None:
+        assert_observation_matches_selection(
+            observed,
+            family=family,
+            outcome_key=outcome_key,
+            line_point=line_point,
+        )
+
     offered_for_classification: float | None = None
     lifecycle = LineLifecycleState.UNKNOWN
     if observed is not None:
@@ -117,8 +157,6 @@ def build_price_guidance(
         prob_ev_positive=prob_ev_positive,
     )
 
-    # Qualified unpriced/locked/entitlement paths should still expose thresholds
-    # even when classification is price_target / no_bet for other reasons.
     thresholds = recommendation.thresholds
     if thresholds is None and gates_pass and maturity is MarketMaturity.QUALIFIED:
         thresholds = compute_price_thresholds(p50, p25, family=family)
@@ -133,10 +171,12 @@ def build_price_guidance(
                 offered_decimal=None,
             )
 
+    product_eligible = gates_pass and maturity is MarketMaturity.QUALIFIED
     exact_ev: float | None = None
     exact_ev_available = False
     if (
-        observed is not None
+        product_eligible
+        and observed is not None
         and observed.lifecycle is LineLifecycleState.AVAILABLE
         and observed.price_decimal is not None
     ):
@@ -154,7 +194,6 @@ def build_price_guidance(
             source_label = observed.provider or "reference_provider"
             automated_line = True
         claims_bet365 = observed.bookmaker_key.lower().startswith("bet365")
-        # Reference consensus books must not be claimed as Bet365.
         if (
             observed.source_kind is PriceSourceKind.REFERENCE_PROVIDER
             and not observed.bookmaker_key.lower().startswith("bet365")
@@ -164,9 +203,7 @@ def build_price_guidance(
     return PriceGuidanceRow(
         market_family=family,
         outcome_key=outcome_key,
-        line_point=line_point if line_point is not None else (
-            None if observed is None else observed.line_point
-        ),
+        line_point=line_point,
         maturity=maturity,
         recommendation=recommendation,
         thresholds=thresholds,
@@ -187,6 +224,8 @@ def build_unpriced_price_targets(
     """Emit fair/actionable/strong-value rows for qualified unpriced selections."""
     rows: list[PriceGuidanceRow] = []
     for item in selections:
+        line_raw = item.get("line_point")
+        line_point = None if line_raw in (None, "") else float(line_raw)
         rows.append(
             build_price_guidance(
                 family=_as_family(item["market_family"]),
@@ -196,7 +235,7 @@ def build_unpriced_price_targets(
                 p25=float(item["p25"]),
                 gates_pass=bool(item.get("gates_pass", True)),
                 observed=None,
-                line_point=item.get("line_point"),
+                line_point=line_point,
                 prob_ev_positive=item.get("prob_ev_positive"),
             )
         )

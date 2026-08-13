@@ -8,8 +8,9 @@ from mma_model.domain.markets import MarketFamily, MarketMaturity, OutcomeKey
 from mma_model.odds.manual_price import MANUAL_SOURCE_LABEL
 from mma_model.odds.price_guidance import build_unpriced_price_targets
 from mma_model.odds.provider_decision import (
+    PINNED_ODDS_DECISION_HASH,
     assert_no_sportsbook_scraper_modules,
-    load_odds_source_config,
+    load_odds_decision_contract,
     load_phase0_odds_decision,
 )
 
@@ -20,7 +21,7 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
     Does not invent a licensed bookmaker adapter when Phase 0 did not authorize one.
     """
     decision = load_phase0_odds_decision()
-    config = load_odds_source_config()
+    config = load_odds_decision_contract()
     scraper_ok = True
     scraper_error: str | None = None
     try:
@@ -62,8 +63,12 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
             "rationale": decision.rationale,
             "evidence_path": decision.evidence_path,
             "trial_providers": decision.trial_providers,
+            "contract_version": decision.contract_version,
+            "content_hash": decision.content_hash,
+            "pinned_hash": PINNED_ODDS_DECISION_HASH,
         },
         "config_path": "config/sources/odds.yaml",
+        "packaged_contract": "mma_model/odds/odds_decision_v1.yaml",
         "fallback": {
             "sportsbook_agnostic_required": True,
             "manual_observation_source": MANUAL_SOURCE_LABEL,
@@ -74,8 +79,17 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
             ),
         },
         "prohibited": list(config.get("prohibited") or []),
+        "odds_package_scraper_heuristic": {
+            "scope": "mma_model.odds package modules only",
+            "hit": not scraper_ok,
+            "error": scraper_error,
+            "note": (
+                "Filename/text heuristics are a scoped package check, not proof "
+                "that no scraper exists elsewhere in the repository."
+            ),
+        },
+        # Backward-compatible boolean for operators; see scoped note above.
         "scraper_paths_present": not scraper_ok,
-        "scraper_error": scraper_error,
         "next_dwcs": {
             "requested": bool(next_dwcs),
             "note": (
@@ -87,7 +101,8 @@ def run_bookmaker_audit(*, next_dwcs: bool = False) -> dict[str, Any]:
         "product_note": (
             "Exact bookmaker lines are optional enrichment. Sportsbook-agnostic "
             "fair / actionable / strong-value guidance is mandatory. Exact EV "
-            "only after a timestamped observed or user_observed price. Reference "
-            "odds are never mislabeled as Bet365."
+            "only after a timestamped observed or user_observed price on a "
+            "qualified/gates-pass selection. Reference odds are never mislabeled "
+            "as Bet365."
         ),
     }

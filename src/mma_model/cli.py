@@ -39,7 +39,10 @@ from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.manual_price import parse_manual_price_observation
 from mma_model.odds.normalize import parse_single_region
-from mma_model.odds.price_guidance import build_price_guidance
+from mma_model.odds.price_guidance import (
+    PriceGuidanceSelectionError,
+    build_price_guidance,
+)
 from mma_model.odds.snapshot import (
     OddsConfigurationError,
     OddsOfflineModeError,
@@ -223,6 +226,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_odds_guide.add_argument("--family", default="moneyline")
     p_odds_guide.add_argument("--outcome", default="fighter_a")
+    p_odds_guide.add_argument(
+        "--line-point",
+        type=float,
+        default=None,
+        help="Required for totals (1.5 or 2.5); rejected for non-line markets",
+    )
     p_odds_guide.add_argument("--p50", type=float, required=True)
     p_odds_guide.add_argument("--p25", type=float, required=True)
     p_odds_guide.add_argument(
@@ -561,22 +570,34 @@ def main(argv: list[str] | None = None) -> int:
 
         if odds_cmd == "price-guidance":
             try:
+                family = MarketFamily(args.family)
+                line_point = getattr(args, "line_point", None)
+                if family is MarketFamily.TOTALS and line_point is None:
+                    raise ValueError("--line-point is required for totals")
+                if family is not MarketFamily.TOTALS and line_point is not None:
+                    raise ValueError("--line-point is only valid for totals")
                 observed = None
                 obs_path = getattr(args, "observation_json", None)
                 if obs_path is not None:
                     payload = json.loads(Path(obs_path).read_text(encoding="utf-8"))
                     observed = parse_manual_price_observation(payload)
                 row = build_price_guidance(
-                    family=MarketFamily(args.family),
+                    family=family,
                     outcome_key=OutcomeKey(args.outcome),
                     maturity=MarketMaturity(args.maturity),
                     p50=float(args.p50),
                     p25=float(args.p25),
                     gates_pass=True,
                     observed=observed,
+                    line_point=line_point,
                     prob_ev_positive=getattr(args, "prob_ev_positive", None),
                 )
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
+            except (
+                OSError,
+                ValueError,
+                json.JSONDecodeError,
+                PriceGuidanceSelectionError,
+            ) as exc:
                 print(str(exc))
                 return 2
             print(json.dumps(row.as_dict(), indent=2))

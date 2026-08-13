@@ -285,6 +285,7 @@ class OddsQuoteStore:
                     line_point=obs.line_point,
                     price_decimal=obs.price_decimal,
                     lifecycle=obs.lifecycle.value,
+                    attempted_provider=obs.attempted_provider,
                     observed_at=obs.observed_at,
                     source_updated_at=obs.source_updated_at,
                     event_external_id=obs.event_external_id,

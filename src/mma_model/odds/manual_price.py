@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any, Final
@@ -42,7 +42,6 @@ class LineLifecycleState(StrEnum):
     ENTITLEMENT_FAILED = "entitlement_failed"
 
 
-# States that may carry a numeric offered price.
 _PRICED_STATES: Final[frozenset[LineLifecycleState]] = frozenset(
     {LineLifecycleState.AVAILABLE}
 )
@@ -50,6 +49,31 @@ _PRICED_STATES: Final[frozenset[LineLifecycleState]] = frozenset(
 
 class EntitlementFailure(ValueError):
     """Raised when constructing an entitlement failure without using the recorder."""
+
+
+def validate_market_selection(
+    family: MarketFamily,
+    outcome_key: OutcomeKey,
+    line_point: float | None,
+) -> None:
+    """Reject family/outcome/line combinations outside the DWCS-200 catalog."""
+    assert_known_outcome(family, outcome_key)
+    catalog = catalog_for_family(family)
+    if not catalog.is_valid_line_point(line_point):
+        if catalog.requires_line_point():
+            raise ValueError(
+                f"market family {family.value!r} requires a canonical line_point "
+                f"in {catalog.line_points!r} (got {line_point!r})"
+            )
+        raise ValueError(
+            f"market family {family.value!r} rejects line_point "
+            f"(got {line_point!r}; expected null)"
+        )
+
+
+def _normalize_utc(value: datetime, *, field: str) -> datetime:
+    """Require aware datetime and return UTC (for frozen dataclass assignment)."""
+    return ensure_utc(value, field=field).astimezone(UTC)
 
 
 @dataclass(frozen=True)
@@ -72,15 +96,16 @@ class ObservedPrice:
     event_external_id: str | None
     settlement_identity: str | None
     detail: str | None = None
-    prior_price_decimal: float | None = None
+    attempted_provider: str | None = None
 
     def __post_init__(self) -> None:
-        assert_known_outcome(self.market_family, self.outcome_key)
-        catalog = catalog_for_family(self.market_family)
-        if not catalog.is_valid_line_point(self.line_point):
-            raise ValueError(
-                f"invalid line_point {self.line_point!r} for {self.market_family}"
-            )
+        if not str(self.bookmaker_key).strip():
+            raise ValueError("bookmaker_key must be non-empty")
+        if not str(self.region).strip():
+            raise ValueError("region must be non-empty")
+        validate_market_selection(
+            self.market_family, self.outcome_key, self.line_point
+        )
         if self.source_kind is PriceSourceKind.USER_OBSERVED and self.automated:
             raise ValueError("user_observed prices must set automated=False")
         if self.source_kind is PriceSourceKind.USER_OBSERVED and self.provider is not None:
@@ -90,15 +115,33 @@ class ObservedPrice:
                 raise ValueError(
                     "available observations require price_decimal > 1.0"
                 )
-        else:
-            if self.price_decimal is not None:
+        elif self.price_decimal is not None:
+            raise ValueError(
+                f"{self.lifecycle.value} observations must not carry price_decimal "
+                "(no forward-fill)"
+            )
+
+        if self.lifecycle is LineLifecycleState.ENTITLEMENT_FAILED:
+            if not (self.attempted_provider and str(self.attempted_provider).strip()):
                 raise ValueError(
-                    f"{self.lifecycle.value} observations must not carry price_decimal "
-                    "(no forward-fill)"
+                    "entitlement_failed requires non-empty attempted_provider"
                 )
-        ensure_utc(self.observed_at, field="observed_at")
+        elif self.attempted_provider is not None:
+            raise ValueError(
+                "attempted_provider is only valid for entitlement_failed lifecycle"
+            )
+
+        object.__setattr__(
+            self,
+            "observed_at",
+            _normalize_utc(self.observed_at, field="observed_at"),
+        )
         if self.source_updated_at is not None:
-            ensure_utc(self.source_updated_at, field="source_updated_at")
+            object.__setattr__(
+                self,
+                "source_updated_at",
+                _normalize_utc(self.source_updated_at, field="source_updated_at"),
+            )
 
     @property
     def dedupe_key(self) -> str:
@@ -106,12 +149,13 @@ class ObservedPrice:
             [
                 self.source_kind.value,
                 self.provider or "",
+                self.attempted_provider or "",
                 self.bookmaker_key,
                 self.region,
                 self.event_external_id or "",
                 self.market_family.value,
                 self.outcome_key.value,
-                "" if self.line_point is None else f"{self.line_point:.4f}",
+                "" if self.line_point is None else f"{float(self.line_point):.4f}",
                 self.lifecycle.value,
                 self.observed_at.isoformat(),
                 "" if self.price_decimal is None else f"{self.price_decimal:.6f}",
@@ -124,6 +168,7 @@ class ObservedPrice:
             "source_kind": self.source_kind.value,
             "automated": self.automated,
             "provider": self.provider,
+            "attempted_provider": self.attempted_provider,
             "bookmaker_key": self.bookmaker_key,
             "bookmaker_title": self.bookmaker_title,
             "region": self.region,
@@ -142,6 +187,23 @@ class ObservedPrice:
             "price_decimal": self.price_decimal,
             "detail": self.detail,
         }
+
+    def matches_selection(
+        self,
+        *,
+        family: MarketFamily,
+        outcome_key: OutcomeKey,
+        line_point: float | None,
+    ) -> bool:
+        if self.market_family is not family:
+            return False
+        if self.outcome_key is not outcome_key:
+            return False
+        if self.line_point is None and line_point is None:
+            return True
+        if self.line_point is None or line_point is None:
+            return False
+        return float(self.line_point) == float(line_point)
 
     @classmethod
     def entitlement_failed(cls, **_kwargs: Any) -> ObservedPrice:
@@ -167,6 +229,9 @@ class ObservedPrice:
         event_external_id: str | None = None,
         settlement_identity: str | None = None,
     ) -> ObservedPrice:
+        attempted = str(provider).strip()
+        if not attempted:
+            raise ValueError("entitlement failure requires non-empty provider")
         return cls(
             source_kind=PriceSourceKind.USER_OBSERVED,
             automated=False,
@@ -179,11 +244,12 @@ class ObservedPrice:
             line_point=line_point,
             price_decimal=None,
             lifecycle=LineLifecycleState.ENTITLEMENT_FAILED,
-            observed_at=ensure_utc(observed_at, field="observed_at"),
+            observed_at=observed_at,
             source_updated_at=None,
             event_external_id=event_external_id,
             settlement_identity=settlement_identity,
-            detail=f"provider={provider}: {detail}",
+            detail=detail,
+            attempted_provider=attempted,
         )
 
     @classmethod
@@ -220,15 +286,12 @@ class ObservedPrice:
             line_point=line_point,
             price_decimal=price_decimal,
             lifecycle=LineLifecycleState.AVAILABLE,
-            observed_at=ensure_utc(observed_at, field="observed_at"),
-            source_updated_at=(
-                None
-                if source_updated_at is None
-                else ensure_utc(source_updated_at, field="source_updated_at")
-            ),
+            observed_at=observed_at,
+            source_updated_at=source_updated_at,
             event_external_id=event_external_id,
             settlement_identity=settlement_identity,
             detail="reference odds; never Bet365",
+            attempted_provider=None,
         )
 
 
@@ -246,6 +309,15 @@ def compute_exact_ev(model_prob: float, offered_decimal: float) -> float:
 
 def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
     """Parse a user-entered numeric price / book / time observation."""
+    if "prior_price_decimal" in payload and payload.get("prior_price_decimal") not in (
+        None,
+        "",
+    ):
+        raise ValueError(
+            "prior_price_decimal is not accepted (no forward-fill / silent drop); "
+            "record a prior AVAILABLE observation separately if needed"
+        )
+
     bookmaker_key = str(payload.get("bookmaker_key") or "").strip()
     if not bookmaker_key:
         raise ValueError("manual observation requires bookmaker_key")
@@ -255,7 +327,9 @@ def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
 
     family = MarketFamily(str(payload["market_family"]))
     outcome = OutcomeKey(str(payload["outcome_key"]))
-    assert_known_outcome(family, outcome)
+    line_point_raw = payload.get("line_point")
+    line_point = None if line_point_raw in (None, "") else float(line_point_raw)
+    validate_market_selection(family, outcome, line_point)
 
     raw_lifecycle = payload.get("lifecycle") or LineLifecycleState.AVAILABLE.value
     lifecycle = LineLifecycleState(str(raw_lifecycle))
@@ -267,20 +341,34 @@ def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
         payload.get("source_updated_at"), field="source_updated_at"
     )
 
-    line_point_raw = payload.get("line_point")
-    line_point = None if line_point_raw in (None, "") else float(line_point_raw)
-
-    prior_raw = payload.get("prior_price_decimal")
-    prior_price = None if prior_raw in (None, "") else float(prior_raw)
-
     price_raw = payload.get("price_decimal")
+    price_present = price_raw not in (None, "")
     if lifecycle is LineLifecycleState.AVAILABLE:
-        if price_raw in (None, ""):
+        if not price_present:
             raise ValueError("available manual observation requires price_decimal")
         price_decimal = float(price_raw)
     else:
-        # Explicit non-priced states: ignore any accidental price field.
+        if price_present:
+            raise ValueError(
+                f"{lifecycle.value} observations must not include price_decimal "
+                "(reject forward-fill; omit the field)"
+            )
         price_decimal = None
+
+    attempted_provider = _optional_str(payload.get("attempted_provider"))
+    if lifecycle is LineLifecycleState.ENTITLEMENT_FAILED:
+        if not attempted_provider:
+            # Allow `provider` alias only for entitlement parse convenience.
+            attempted_provider = _optional_str(payload.get("provider"))
+        if not attempted_provider:
+            raise ValueError(
+                "entitlement_failed requires attempted_provider "
+                "(or provider alias in JSON)"
+            )
+    elif attempted_provider is not None:
+        raise ValueError(
+            "attempted_provider is only valid when lifecycle=entitlement_failed"
+        )
 
     title = payload.get("bookmaker_title")
     return ObservedPrice(
@@ -300,11 +388,12 @@ def parse_manual_price_observation(payload: Mapping[str, Any]) -> ObservedPrice:
         event_external_id=_optional_str(payload.get("event_external_id")),
         settlement_identity=_optional_str(payload.get("settlement_identity")),
         detail=_optional_str(payload.get("detail")),
-        prior_price_decimal=prior_price,
+        attempted_provider=attempted_provider,
     )
 
 
 def _optional_str(value: object) -> str | None:
     if value is None or value == "":
         return None
-    return str(value)
+    text = str(value).strip()
+    return text or None
