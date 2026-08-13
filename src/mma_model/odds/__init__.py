@@ -1,5 +1,10 @@
 """Odds package exports (DWCS-201 / DWCS-202 / DWCS-203)."""
 
+from mma_model.domain.quote_eligibility import (
+    QUOTE_ELIGIBILITY_DECISION_VERSION,
+    RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS,
+    compute_quote_eligibility_decision_identity,
+)
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.bookmaker_keys import (
     BET365_BOOKMAKER_ALIASES,
@@ -134,6 +139,8 @@ __all__ = [
     "PriceSourceKind",
     "QuotaHeaders",
     "AvailabilityNote",
+    "QUOTE_ELIGIBILITY_DECISION_VERSION",
+    "RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS",
     "QuoteAvailability",
     "QuoteBlockReason",
     "QuoteEligibilityDecision",
@@ -148,6 +155,7 @@ __all__ = [
     "canonical_selection_identity",
     "classify_quote_value_eligibility",
     "compute_exact_ev",
+    "compute_quote_eligibility_decision_identity",
     "enqueue_bout_match_review",
     "fetch_mma_odds",
     "is_bet365_bookmaker_key",

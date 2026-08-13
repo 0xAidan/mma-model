@@ -24,6 +24,13 @@ from mma_model.odds.types import (
     QuoteAvailability,
     UnknownMarketObservation,
 )
+from mma_model.value.errors import InvalidOddsError
+from mma_model.value.odds import (
+    american_to_decimal as strict_american_to_decimal,
+)
+from mma_model.value.odds import (
+    round_decimal_for_display,
+)
 
 _OUTCOME_NAME_ALIASES: Mapping[str, OutcomeKey] = {
     "over": OutcomeKey.OVER,
@@ -80,14 +87,29 @@ def parse_utc_datetime(value: object, *, field: str = "timestamp") -> datetime |
 
 
 def american_to_decimal(price: float | int) -> float:
-    """Convert American odds to decimal; pass through values already decimal-like."""
-    american = float(price)
-    if american >= 100:
-        return round(1.0 + american / 100.0, 6)
-    if american <= -100:
-        return round(1.0 + 100.0 / abs(american), 6)
-    if american > 1.0:
-        return round(american, 6)
+    """Strict American→decimal for known-American provider prices.
+
+    Values in ``(-100, 100)`` are rejected. Decimal pass-through belongs only on
+    ``coerce_unknown_odds_price_to_decimal`` for explicitly unlabeled/legacy
+    inputs — never on the typed ``odds_format='american'`` path.
+    """
+    try:
+        return round_decimal_for_display(strict_american_to_decimal(float(price)))
+    except InvalidOddsError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def coerce_unknown_odds_price_to_decimal(price: float | int) -> float:
+    """Legacy/unknown-format coercion: American when |price|>=100, else decimal.
+
+    Explicitly labeled for unlabeled historical inputs. Do not use when
+    ``odds_format`` is known.
+    """
+    numeric = float(price)
+    if numeric >= 100 or numeric <= -100:
+        return american_to_decimal(numeric)
+    if numeric > 1.0:
+        return round(numeric, 6)
     raise ValueError(f"unrecognized odds price: {price!r}")
 
 
@@ -103,6 +125,8 @@ def decimal_price(price: object, *, odds_format: str) -> float:
         return round(numeric, 6)
     if fmt == "american":
         return american_to_decimal(numeric)
+    if fmt in {"unknown", "legacy", "auto"}:
+        return coerce_unknown_odds_price_to_decimal(numeric)
     raise ValueError(f"unsupported odds_format: {odds_format!r}")
 
 

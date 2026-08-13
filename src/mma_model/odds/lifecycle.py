@@ -19,6 +19,11 @@ from mma_model.db.tables.odds import (
     OddsQuote,
 )
 from mma_model.domain.markets import MarketFamily, OutcomeKey
+from mma_model.domain.quote_eligibility import (
+    LIFECYCLE_UNRESOLVED,
+    QUOTE_ELIGIBILITY_DECISION_VERSION,
+    compute_quote_eligibility_decision_identity,
+)
 from mma_model.odds.manual_price import canonical_selection_identity
 
 VALUE_BLOCKING_LIFECYCLES: Final[frozenset[str]] = frozenset(
@@ -163,7 +168,12 @@ class AvailabilityNote(StrEnum):
 
 @dataclass(frozen=True)
 class QuoteEligibilityDecision:
-    """Per-quote value gate (book/region/market/outcome/line)."""
+    """Per-quote value gate (book/region/market/outcome/line).
+
+    Temporal/state fields are authoritative outputs of resolution at ``as_of``:
+    ``evaluated_at``, quote availability, lifecycle, decision version, and
+    content identity. Callers must not relabel an older decision as current.
+    """
 
     quote_id: int
     eligible: bool
@@ -177,6 +187,11 @@ class QuoteEligibilityDecision:
     outcome_key: str
     line_point: float | None
     freshness_at: datetime | None
+    evaluated_at: datetime
+    quote_availability_at_decision: str
+    lifecycle_state_at_decision: str
+    decision_version: str
+    decision_identity: str
     resolved_bout_id: str | None = None
     availability_note: AvailabilityNote = AvailabilityNote.NONE
 
@@ -196,6 +211,11 @@ class QuoteEligibilityDecision:
             "freshness_at": (
                 self.freshness_at.isoformat() if self.freshness_at is not None else None
             ),
+            "evaluated_at": self.evaluated_at.isoformat(),
+            "quote_availability_at_decision": self.quote_availability_at_decision,
+            "lifecycle_state_at_decision": self.lifecycle_state_at_decision,
+            "decision_version": self.decision_version,
+            "decision_identity": self.decision_identity,
             "resolved_bout_id": self.resolved_bout_id,
             "availability_note": self.availability_note.value,
         }
@@ -799,6 +819,65 @@ def _quote_selection_identity(quote: OddsQuote) -> str:
     return canonical_selection_identity(family, outcome, quote.line_point)
 
 
+def _build_quote_eligibility_decision(
+    *,
+    quote: OddsQuote,
+    evaluated_at: datetime,
+    eligible: bool,
+    status: QuoteValueEligibility,
+    reason: QuoteBlockReason,
+    detail: str,
+    selection_identity: str,
+    freshness_at: datetime | None,
+    lifecycle_state_at_decision: str,
+    resolved_bout_id: str | None = None,
+    availability_note: AvailabilityNote = AvailabilityNote.NONE,
+) -> QuoteEligibilityDecision:
+    """Populate every temporal/state field; identity is derived (never caller-set)."""
+    cutoff = _require_aware_utc(evaluated_at, field="evaluated_at")
+    freshness = (
+        None
+        if freshness_at is None
+        else _require_aware_utc(freshness_at, field="freshness_at")
+    )
+    availability = str(quote.availability)
+    lifecycle = str(lifecycle_state_at_decision).strip() or LIFECYCLE_UNRESOLVED
+    version = QUOTE_ELIGIBILITY_DECISION_VERSION
+    identity = compute_quote_eligibility_decision_identity(
+        quote_id=int(quote.id),
+        evaluated_at=cutoff,
+        eligible=bool(eligible),
+        reason=reason.value,
+        selection_identity=selection_identity,
+        resolved_bout_id=resolved_bout_id,
+        quote_availability_at_decision=availability,
+        quote_freshness_at=freshness,
+        lifecycle_state_at_decision=lifecycle,
+        decision_version=version,
+    )
+    return QuoteEligibilityDecision(
+        quote_id=int(quote.id),
+        eligible=bool(eligible),
+        status=status,
+        reason=reason,
+        detail=detail,
+        selection_identity=selection_identity,
+        bookmaker_key=quote.bookmaker_key,
+        region=quote.region,
+        market_family=quote.market_family,
+        outcome_key=quote.outcome_key,
+        line_point=quote.line_point,
+        freshness_at=freshness,
+        evaluated_at=cutoff,
+        quote_availability_at_decision=availability,
+        lifecycle_state_at_decision=lifecycle,
+        decision_version=version,
+        decision_identity=identity,
+        resolved_bout_id=resolved_bout_id,
+        availability_note=availability_note,
+    )
+
+
 def resolve_quote_value_eligibility(
     session: Session,
     *,
@@ -814,22 +893,37 @@ def resolve_quote_value_eligibility(
     (must be MATCHED to the same bout as the effective alias). An old alias that
     remains after a newer ambiguous/unmatched decision is never value authority.
     Caller ``bout_id`` / ``match_status`` may only further restrict, never grant.
+
+    Every return path sets authoritative ``evaluated_at`` (= ``as_of``), quote
+    availability at decision, lifecycle state, decision version, and content
+    identity derived during resolution (not caller-supplied).
     """
     cutoff = _require_aware_utc(as_of, field="as_of")
     caller_status = (match_status or "").strip()
     selection = _quote_selection_identity(quote)
-    base = dict(
-        quote_id=int(quote.id),
-        selection_identity=selection,
-        bookmaker_key=quote.bookmaker_key,
-        region=quote.region,
-        market_family=quote.market_family,
-        outcome_key=quote.outcome_key,
-        line_point=quote.line_point,
-        freshness_at=quote_authoritative_freshness(quote, as_of=cutoff),
-        availability_note=AvailabilityNote.NONE,
-        resolved_bout_id=None,
-    )
+    freshness = quote_authoritative_freshness(quote, as_of=cutoff)
+
+    def _blocked(
+        reason: QuoteBlockReason,
+        detail: str,
+        *,
+        lifecycle: str = LIFECYCLE_UNRESOLVED,
+        resolved_bout_id: str | None = None,
+        availability_note: AvailabilityNote = AvailabilityNote.NONE,
+    ) -> QuoteEligibilityDecision:
+        return _build_quote_eligibility_decision(
+            quote=quote,
+            evaluated_at=cutoff,
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=reason,
+            detail=detail,
+            selection_identity=selection,
+            freshness_at=freshness,
+            lifecycle_state_at_decision=lifecycle,
+            resolved_bout_id=resolved_bout_id,
+            availability_note=availability_note,
+        )
 
     visible = quotes_visible_under_alias_at(
         session,
@@ -838,12 +932,9 @@ def resolve_quote_value_eligibility(
         as_of=cutoff,
     )
     if not any(int(row.id) == int(quote.id) for row in visible):
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.NOT_VISIBLE,
-            detail="quote not visible under alias at as_of",
-            **base,
+        return _blocked(
+            QuoteBlockReason.NOT_VISIBLE,
+            "quote not visible under alias at as_of",
         )
 
     alias = alias_effective_at(
@@ -853,12 +944,9 @@ def resolve_quote_value_eligibility(
         as_of=cutoff,
     )
     if alias is None:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.UNMATCHED,
-            detail="no effective alias at as_of for quote value eligibility",
-            **base,
+        return _blocked(
+            QuoteBlockReason.UNMATCHED,
+            "no effective alias at as_of for quote value eligibility",
         )
 
     latest_match = latest_match_observation_at(
@@ -868,108 +956,51 @@ def resolve_quote_value_eligibility(
         as_of=cutoff,
     )
     if latest_match is None:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.UNMATCHED,
-            detail="no persisted match decision at as_of",
+        return _blocked(
+            QuoteBlockReason.UNMATCHED,
+            "no persisted match decision at as_of",
             resolved_bout_id=alias.bout_id,
-            availability_note=AvailabilityNote.NONE,
-            quote_id=int(quote.id),
-            selection_identity=selection,
-            bookmaker_key=quote.bookmaker_key,
-            region=quote.region,
-            market_family=quote.market_family,
-            outcome_key=quote.outcome_key,
-            line_point=quote.line_point,
-            freshness_at=base["freshness_at"],
         )
     if latest_match.match_status != _MATCHED_STATUS:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.LATEST_MATCH_NOT_MATCHED,
-            detail=(
+        return _blocked(
+            QuoteBlockReason.LATEST_MATCH_NOT_MATCHED,
+            (
                 f"latest match_status={latest_match.match_status!r} "
                 f"(reason={latest_match.reason!r}) blocks quote value"
             ),
             resolved_bout_id=alias.bout_id,
-            availability_note=AvailabilityNote.NONE,
-            quote_id=int(quote.id),
-            selection_identity=selection,
-            bookmaker_key=quote.bookmaker_key,
-            region=quote.region,
-            market_family=quote.market_family,
-            outcome_key=quote.outcome_key,
-            line_point=quote.line_point,
-            freshness_at=base["freshness_at"],
         )
     if latest_match.bout_id != alias.bout_id:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.ALIAS_BOUT_MISMATCH,
-            detail=(
+        return _blocked(
+            QuoteBlockReason.ALIAS_BOUT_MISMATCH,
+            (
                 f"latest matched bout_id={latest_match.bout_id!r} != "
                 f"alias.bout_id={alias.bout_id!r}"
             ),
             resolved_bout_id=alias.bout_id,
-            availability_note=AvailabilityNote.NONE,
-            quote_id=int(quote.id),
-            selection_identity=selection,
-            bookmaker_key=quote.bookmaker_key,
-            region=quote.region,
-            market_family=quote.market_family,
-            outcome_key=quote.outcome_key,
-            line_point=quote.line_point,
-            freshness_at=base["freshness_at"],
         )
 
     # Caller inputs may only further restrict; never grant over persisted state.
     if caller_status and caller_status != _MATCHED_STATUS:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.CALLER_MATCH_RESTRICT,
-            detail=(
+        return _blocked(
+            QuoteBlockReason.CALLER_MATCH_RESTRICT,
+            (
                 f"caller match_status={caller_status!r} further restricts "
                 "despite persisted matched decision"
             ),
             resolved_bout_id=alias.bout_id,
-            availability_note=AvailabilityNote.NONE,
-            quote_id=int(quote.id),
-            selection_identity=selection,
-            bookmaker_key=quote.bookmaker_key,
-            region=quote.region,
-            market_family=quote.market_family,
-            outcome_key=quote.outcome_key,
-            line_point=quote.line_point,
-            freshness_at=base["freshness_at"],
         )
     if bout_id is not None and bout_id != alias.bout_id:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.ALIAS_BOUT_MISMATCH,
-            detail=(
+        return _blocked(
+            QuoteBlockReason.ALIAS_BOUT_MISMATCH,
+            (
                 f"caller bout_id={bout_id!r} != alias.bout_id={alias.bout_id!r} "
                 f"(alias_version={alias.alias_version})"
             ),
             resolved_bout_id=alias.bout_id,
-            availability_note=AvailabilityNote.NONE,
-            quote_id=int(quote.id),
-            selection_identity=selection,
-            bookmaker_key=quote.bookmaker_key,
-            region=quote.region,
-            market_family=quote.market_family,
-            outcome_key=quote.outcome_key,
-            line_point=quote.line_point,
-            freshness_at=base["freshness_at"],
         )
 
     resolved_bout_id = alias.bout_id
-    base["resolved_bout_id"] = resolved_bout_id
-
     bout_life = latest_bout_lifecycle(
         session,
         bout_id=resolved_bout_id,
@@ -977,13 +1008,17 @@ def resolve_quote_value_eligibility(
         provider=quote.provider,
         external_event_id=quote.external_event_id,
     )
+    bout_lifecycle = (
+        bout_life.lifecycle
+        if bout_life is not None
+        else OddsBoutLifecycleState.ACTIVE.value
+    )
     if bout_life is not None and bout_life.lifecycle in TERMINAL_LIFECYCLES:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.BOUT_TERMINAL,
-            detail=f"bout lifecycle={bout_life.lifecycle}",
-            **base,
+        return _blocked(
+            QuoteBlockReason.BOUT_TERMINAL,
+            f"bout lifecycle={bout_life.lifecycle}",
+            lifecycle=bout_lifecycle,
+            resolved_bout_id=resolved_bout_id,
         )
 
     selection_life = latest_selection_lifecycle(
@@ -998,12 +1033,11 @@ def resolve_quote_value_eligibility(
         selection_life is not None
         and selection_life.lifecycle == OddsBoutLifecycleState.LOCKED.value
     ):
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.SELECTION_LOCKED,
-            detail=f"selection locked ({selection_life.evidence_kind})",
-            **base,
+        return _blocked(
+            QuoteBlockReason.SELECTION_LOCKED,
+            f"selection locked ({selection_life.evidence_kind})",
+            lifecycle=OddsBoutLifecycleState.LOCKED.value,
+            resolved_bout_id=resolved_bout_id,
         )
 
     quote_evidence = quote_availability_evidence_at(quote, as_of=cutoff)
@@ -1019,52 +1053,44 @@ def resolve_quote_value_eligibility(
         quote_evidence_at=quote_evidence,
     )
     if unknown is not None:
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.MARKET_UNKNOWN,
-            detail=(
+        return _blocked(
+            QuoteBlockReason.MARKET_UNKNOWN,
+            (
                 f"availability unknown for {quote.bookmaker_key}/"
                 f"{quote.provider_market_key} (preserved UNKNOWN)"
             ),
-            availability_note=AvailabilityNote.UNKNOWN_BLOCKING,
+            lifecycle=bout_lifecycle,
             resolved_bout_id=resolved_bout_id,
-            quote_id=int(quote.id),
-            selection_identity=selection,
-            bookmaker_key=quote.bookmaker_key,
-            region=quote.region,
-            market_family=quote.market_family,
-            outcome_key=quote.outcome_key,
-            line_point=quote.line_point,
-            freshness_at=base["freshness_at"],
+            availability_note=AvailabilityNote.UNKNOWN_BLOCKING,
         )
 
     availability_note = AvailabilityNote.NONE
     if prior_unknown_cleared_by_quote(session, quote=quote, as_of=cutoff):
         availability_note = AvailabilityNote.RECOVERED_BY_NEWER_QUOTE
-    base["availability_note"] = availability_note
 
     if quote.availability != "available":
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.QUOTE_UNAVAILABLE,
-            detail=f"quote availability={quote.availability}",
-            **base,
+        return _blocked(
+            QuoteBlockReason.QUOTE_UNAVAILABLE,
+            f"quote availability={quote.availability}",
+            lifecycle=bout_lifecycle,
+            resolved_bout_id=resolved_bout_id,
+            availability_note=availability_note,
         )
 
     if quote_row_is_stale(
         quote, as_of=cutoff, stale_after_minutes=stale_after_minutes
     ):
-        return QuoteEligibilityDecision(
-            eligible=False,
-            status=QuoteValueEligibility.BLOCKED,
-            reason=QuoteBlockReason.STALE,
-            detail="quote authoritative freshness exceeds stale_after_minutes",
-            **base,
+        return _blocked(
+            QuoteBlockReason.STALE,
+            "quote authoritative freshness exceeds stale_after_minutes",
+            lifecycle=bout_lifecycle,
+            resolved_bout_id=resolved_bout_id,
+            availability_note=availability_note,
         )
 
-    return QuoteEligibilityDecision(
+    return _build_quote_eligibility_decision(
+        quote=quote,
+        evaluated_at=cutoff,
         eligible=True,
         status=QuoteValueEligibility.ELIGIBLE,
         reason=QuoteBlockReason.NONE,
@@ -1076,7 +1102,11 @@ def resolve_quote_value_eligibility(
                 else ""
             )
         ),
-        **base,
+        selection_identity=selection,
+        freshness_at=freshness,
+        lifecycle_state_at_decision=bout_lifecycle,
+        resolved_bout_id=resolved_bout_id,
+        availability_note=availability_note,
     )
 
 

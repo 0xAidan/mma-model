@@ -98,9 +98,14 @@ here in DWCS-001.
    plus optional `user_observed` prices for exact EV. DWCS-203 attaches provider
    events to canonical bouts via exact provider IDs / participant pairs, versions
    aliases through replacements/cancellations, and blocks ambiguous or
-   non-active lifecycles from value calculations. Missing Bet365 must not block
-   sportsbook-agnostic price targets; reference quotes are never labeled as
-   Bet365.
+   non-active lifecycles from value calculations. DWCS-204 centralizes validated
+   odds/probability math, exhaustive complete-set proportional de-vig (exact-round
+   round-only sets are non-exhaustive and must not be silently de-vigged as fair),
+   fair/actionable/
+   strong-value thresholds, and priced-only EV/CLV/flat-profit/quarter-Kelly
+   (hard 1% bankroll cap) behind typed provenance evidence and method/version
+   identity. Missing Bet365 must not block sportsbook-agnostic price targets;
+   reference quotes are never labeled as Bet365.
 
 ## Consequences
 

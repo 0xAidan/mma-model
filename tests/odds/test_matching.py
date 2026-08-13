@@ -4018,6 +4018,11 @@ def test_quote_eligibility_rejects_wrong_bout_vs_alias(tmp_path: Path) -> None:
     )
     assert ok.eligible is True
     assert ok.resolved_bout_id == "new-bout-alias"
+    assert ok.evaluated_at == OBSERVED + timedelta(minutes=2)
+    assert ok.decision_version == "quote_eligibility_v1"
+    assert ok.decision_identity.startswith("qe_v1:")
+    assert ok.lifecycle_state_at_decision
+    assert ok.quote_availability_at_decision == new_quote.availability
 
     # Historical PIT: at pre-replacement as_of, alias is old bout.
     old_quote = session.scalars(
