@@ -3,6 +3,8 @@
 The random ``train_test_split`` path is a compatibility wrapper. Metrics are
 labeled ``deprecated_random_split_not_betting_evidence`` and must not be read
 as holdout betting evidence. Use ``mma-model model train`` (DWCS-303).
+Legacy ``predict-fight`` cannot load versioned JSON artifacts; use
+``mma-model model predict``.
 """
 
 from __future__ import annotations
@@ -24,7 +26,9 @@ from mma_model.predict.dataset import FEATURE_NAMES, build_training_arrays
 DEPRECATED_RANDOM_SPLIT_KEY = "deprecated_random_split_not_betting_evidence"
 DEPRECATED_RANDOM_SPLIT_NOTE = (
     "sklearn train_test_split is not betting evidence; "
-    "use event-grouped folds via mma-model model train (DWCS-303)"
+    "use event-grouped folds via mma-model model train (DWCS-303). "
+    "Legacy predict-fight cannot load versioned JSON artifacts; "
+    "use mma-model model predict"
 )
 
 

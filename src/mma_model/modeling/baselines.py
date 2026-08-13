@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from mma_model.domain.markets import MarketFamily
 from mma_model.dwcs.classification import SeriesVariant
+from mma_model.evaluation.contract import EvaluationContract
 from mma_model.features.as_of import cutoff_for_event, implied_event_start
 from mma_model.features.builder import FeatureBuilder
 from mma_model.features.snapshot import (
@@ -42,9 +43,11 @@ from mma_model.modeling.artifacts import (
     ARTIFACT_SCHEMA_VERSION,
     LoadedArtifact,
     RidgeModelSpec,
+    RidgePredictor,
     SavedArtifact,
     compute_code_hash,
     load_ridge_spec,
+    resolve_code_commit,
     save_artifact,
 )
 from mma_model.modeling.splits import (
@@ -68,6 +71,11 @@ RATING_DIFF_INDEX: Final = FEATURE_NAMES.index("rating_diff")
 RATING_SD_SUM_INDEX: Final = FEATURE_NAMES.index("rating_sd_sum")
 LABEL_LAG: Final = timedelta(hours=6)
 FORBIDDEN_HOLDOUT_METRIC_FRAGMENTS: Final = ("_holdout", "holdout_")
+ORDINARY_TRAIN_ROLES: Final = frozenset({FoldRole.DEVELOPMENT, FoldRole.VALIDATION})
+SESSION_NO_VIG_NOTE: Final = (
+    "session/db train does not join timestamped pre-cutoff quotes; "
+    "the no-vig market baseline stays explicit missing until odds plumbing exists"
+)
 
 
 class TrainError(ValueError):
@@ -109,10 +117,19 @@ class LabeledSample:
 
 @dataclass(frozen=True)
 class FittedRidge:
-    pipeline: Pipeline
-    feature_names: tuple[str, ...]
-    spec_hash: str
-    spec_version: str
+    predictor: RidgePredictor
+
+    @property
+    def feature_names(self) -> tuple[str, ...]:
+        return self.predictor.feature_names
+
+    @property
+    def spec_hash(self) -> str:
+        return self.predictor.spec_hash
+
+    @property
+    def spec_version(self) -> str:
+        return self.predictor.spec_version
 
 
 @dataclass(frozen=True)
@@ -127,10 +144,14 @@ class TrainReport:
     config_hash: str
     data_hash: str
     code_hash: str
+    code_commit: str
+    code_commit_reason: str
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
             "artifact_path": str(self.artifact.payload_path.resolve()),
+            "code_commit": self.code_commit,
+            "code_commit_reason": self.code_commit_reason,
             "code_hash": self.code_hash,
             "config_hash": self.config_hash,
             "contract_hash": self.contract_hash,
@@ -230,13 +251,31 @@ def _label_to_y(winner: WinnerSide) -> int:
     raise TrainError(f"unhandled binary winner: {never_winner!r}")
 
 
-def _swap_safe_predict(pipeline: Pipeline, values: Sequence[float]) -> float:
-    """Average p(x) and 1-p(swap(x)) so A/B predictions sum to 1 within 1e-8."""
-    x = np.asarray([list(values)], dtype=np.float64)
-    x_swap = np.asarray([list(swap_values(values))], dtype=np.float64)
-    p = float(pipeline.predict_proba(x)[0, 1])
-    p_swap = float(pipeline.predict_proba(x_swap)[0, 1])
-    return 0.5 * (p + (1.0 - p_swap))
+def _predictor_from_pipeline(pipeline: Pipeline) -> RidgePredictor:
+    if "scaler" not in pipeline.named_steps or "clf" not in pipeline.named_steps:
+        raise TrainError("fitted pipeline missing scaler or logistic step")
+    scaler = pipeline.named_steps["scaler"]
+    clf = pipeline.named_steps["clf"]
+    n_features = len(FEATURE_NAMES)
+    mean = tuple(float(x) for x in np.asarray(scaler.mean_, dtype=np.float64).ravel())
+    scale = tuple(float(x) for x in np.asarray(scaler.scale_, dtype=np.float64).ravel())
+    coef = tuple(float(x) for x in np.asarray(clf.coef_, dtype=np.float64).ravel())
+    intercept = float(np.asarray(clf.intercept_, dtype=np.float64).ravel()[0])
+    classes = tuple(int(x) for x in np.asarray(clf.classes_).ravel())
+    if len(mean) != n_features or len(scale) != n_features or len(coef) != n_features:
+        raise TrainError("fitted ridge shape does not match FEATURE_NAMES")
+    if classes != (0, 1):
+        raise TrainError(f"fitted ridge classes must be (0, 1), got {classes!r}")
+    return RidgePredictor(
+        feature_names=FEATURE_NAMES,
+        scaler_mean=mean,
+        scaler_scale=scale,
+        coef=coef,
+        intercept=intercept,
+        classes=classes,
+        spec_hash=spec_hash(),
+        spec_version=SPEC_VERSION,
+    )
 
 
 def fit_ridge(
@@ -283,12 +322,16 @@ def fit_ridge(
             message=r".*penalty.*",
         )
         pipeline.fit(x, y_arr)
-    return FittedRidge(
-        pipeline=pipeline,
-        feature_names=FEATURE_NAMES,
-        spec_hash=spec_hash(),
-        spec_version=SPEC_VERSION,
-    )
+    return FittedRidge(predictor=_predictor_from_pipeline(pipeline))
+
+
+def predict_ridge_raw(model: FittedRidge, values: Sequence[float]) -> float:
+    """Direct scaler+logistic P(A). Used to test fitted-model complementarity."""
+    if tuple(model.feature_names) != FEATURE_NAMES:
+        raise TrainError("fitted ridge feature order does not match FEATURE_NAMES")
+    if len(values) != len(FEATURE_NAMES):
+        raise TrainError("prediction vector length does not match FEATURE_NAMES")
+    return model.predictor.raw_win_prob(values)
 
 
 def predict_ridge_win_prob(model: FittedRidge, values: Sequence[float]) -> float:
@@ -296,16 +339,19 @@ def predict_ridge_win_prob(model: FittedRidge, values: Sequence[float]) -> float
         raise TrainError("fitted ridge feature order does not match FEATURE_NAMES")
     if len(values) != len(FEATURE_NAMES):
         raise TrainError("prediction vector length does not match FEATURE_NAMES")
-    return _swap_safe_predict(model.pipeline, values)
+    return model.predictor.swap_safe_win_prob(values)
+
+
+def predict_loaded_ridge_raw(loaded: LoadedArtifact, values: Sequence[float]) -> float:
+    if len(values) != len(FEATURE_NAMES):
+        raise TrainError("prediction vector length does not match FEATURE_NAMES")
+    return loaded.predictor.raw_win_prob(values)
 
 
 def predict_loaded_ridge(loaded: LoadedArtifact, values: Sequence[float]) -> float:
-    pipeline = loaded.payload.get("pipeline")
-    if not isinstance(pipeline, Pipeline):
-        raise TrainError("artifact payload missing sklearn pipeline")
     if len(values) != len(FEATURE_NAMES):
         raise TrainError("prediction vector length does not match FEATURE_NAMES")
-    return _swap_safe_predict(pipeline, values)
+    return loaded.predictor.swap_safe_win_prob(values)
 
 
 def _metric_block(y_true: Sequence[int], probs: Sequence[float]) -> dict[str, float | int]:
@@ -329,12 +375,30 @@ def labeled_samples_from_snapshot(
     cards: Sequence[SplitCard],
     *,
     odds_by_bout: Mapping[str, PreCutoffMoneyline] | None = None,
+    allowed_roles: frozenset[FoldRole] | None = None,
+    allow_holdout: bool = False,
+    contract: EvaluationContract | None = None,
 ) -> tuple[LabeledSample, ...]:
-    """Build PIT features at the card cutoff; labels from post-card training_label."""
+    """Build PIT features at the card cutoff; labels from post-card training_label.
+
+    Ordinary callers omit holdout. Locked 2025 cards are dropped before
+    ``training_label`` or ``FeatureBuilder.build`` runs.
+    """
+    roles = allowed_roles if allowed_roles is not None else ORDINARY_TRAIN_ROLES
+    if FoldRole.HOLDOUT in roles and not allow_holdout:
+        raise HoldoutLockedError(
+            "2025 holdout is locked; ordinary labeling must not read holdout cards"
+        )
+    groups = {group.event_id: group for group in group_cards(cards, contract)}
+    eligible = [
+        card
+        for card in cards
+        if card.event_id in groups and groups[card.event_id].role in roles
+    ]
     builder = FeatureBuilder(snapshot)
     quotes = odds_by_bout or {}
     samples: list[LabeledSample] = []
-    for card in cards:
+    for card in eligible:
         cutoff = cutoff_for_event(card)
         label_at = implied_event_start(cutoff) + LABEL_LAG
         for bout_id in card.bout_ids:
@@ -621,8 +685,9 @@ def _oof_pairs(
 def _final_refit_samples(
     samples: Sequence[LabeledSample],
     cards: Sequence[SplitCard],
+    contract: EvaluationContract | None = None,
 ) -> tuple[LabeledSample, ...]:
-    groups = {group.event_id: group for group in group_cards(cards)}
+    groups = {group.event_id: group for group in group_cards(cards, contract)}
     eligible: list[LabeledSample] = []
     for sample in samples:
         group = groups.get(sample.event_id)
@@ -682,30 +747,28 @@ def train_ridge_m1(
     output_path: Path,
     require_target_cards: bool = False,
     include_holdout: bool = False,
+    contract: EvaluationContract | None = None,
 ) -> TrainReport:
     """Fit M1 through DWCS-302 folds and refit on development+validation only."""
     if include_holdout or spec.ordinary_allow_holdout:
         raise HoldoutLockedError(
             "2025 holdout is locked; ordinary train must not enable sealed holdout"
         )
-    inner = tuning_folds(cards, require_target_cards=require_target_cards)
-    outer = validation_folds(cards, require_target_cards=require_target_cards)
+    inner = tuning_folds(
+        cards, require_target_cards=require_target_cards, contract=contract
+    )
+    outer = validation_folds(
+        cards, require_target_cards=require_target_cards, contract=contract
+    )
     metrics = _fold_metrics(spec=spec, samples=samples, inner=inner, outer=outer)
-    final_rows = _final_refit_samples(samples, cards)
+    final_rows = _final_refit_samples(samples, cards, contract)
     model = fit_ridge(final_rows, spec)
-    payload = {
-        "feature_names": list(FEATURE_NAMES),
-        "model_id": spec.model_id,
-        "pipeline": model.pipeline,
-        "schema_version": ARTIFACT_SCHEMA_VERSION,
-        "spec_hash": model.spec_hash,
-        "spec_version": model.spec_version,
-    }
     train_ids = tuple(sample.sample_id for sample in final_rows)
     max_ts = _max_timestamp(final_rows)
     code_hash = compute_code_hash(extra_paths=[Path(__file__)])
+    code_commit, code_commit_reason = resolve_code_commit()
     saved = save_artifact(
-        payload,
+        model.predictor,
         output_path,
         train_sample_ids=train_ids,
         max_train_timestamp=max_ts,
@@ -716,6 +779,8 @@ def train_ridge_m1(
         splits_config_hash=outer.config_hash,
         data_hash=outer.data_hash,
         code_hash=code_hash,
+        code_commit=code_commit,
+        code_commit_reason=code_commit_reason,
         model_id=spec.model_id,
         spec_id=spec.spec_id,
     )
@@ -730,6 +795,8 @@ def train_ridge_m1(
         config_hash=spec.content_hash,
         data_hash=outer.data_hash,
         code_hash=code_hash,
+        code_commit=code_commit,
+        code_commit_reason=code_commit_reason,
     )
 
 
@@ -742,8 +809,20 @@ def train_from_snapshot(
     odds_by_bout: Mapping[str, PreCutoffMoneyline] | None = None,
     require_target_cards: bool = False,
     include_holdout: bool = False,
+    contract: EvaluationContract | None = None,
 ) -> TrainReport:
-    samples = labeled_samples_from_snapshot(snapshot, cards, odds_by_bout=odds_by_bout)
+    if include_holdout:
+        raise HoldoutLockedError(
+            "2025 holdout is locked; ordinary train must not enable sealed holdout"
+        )
+    samples = labeled_samples_from_snapshot(
+        snapshot,
+        cards,
+        odds_by_bout=odds_by_bout,
+        allowed_roles=ORDINARY_TRAIN_ROLES,
+        allow_holdout=False,
+        contract=contract,
+    )
     if not samples:
         raise TrainError("no binary-labeled bouts (draws/NC are excluded from the fit)")
     return train_ridge_m1(
@@ -752,7 +831,8 @@ def train_from_snapshot(
         spec=spec,
         output_path=output_path,
         require_target_cards=require_target_cards,
-        include_holdout=include_holdout,
+        include_holdout=False,
+        contract=contract,
     )
 
 
@@ -762,17 +842,26 @@ def train_from_session(
     spec: RidgeModelSpec,
     output_path: Path,
     include_holdout: bool = False,
+    contract: EvaluationContract | None = None,
 ) -> TrainReport:
+    """Train from a canonical DB snapshot.
+
+    Timestamped odds quotes are not joined here, so the no-vig market baseline
+    stays explicit missing rather than a fabricated 0.5.
+    """
     cards = cards_from_session(session)
     snapshot = snapshot_from_session(session)
-    return train_from_snapshot(
+    report = train_from_snapshot(
         snapshot,
         cards,
         spec=spec,
         output_path=output_path,
         require_target_cards=True,
         include_holdout=include_holdout,
+        contract=contract,
     )
+    report.metrics["no_vig_note"] = SESSION_NO_VIG_NOTE
+    return report
 
 
 def run_protocol_train(
@@ -780,6 +869,7 @@ def run_protocol_train(
     spec: RidgeModelSpec | None = None,
     output_path: Path,
     include_holdout: bool = False,
+    contract: EvaluationContract | None = None,
 ) -> TrainReport:
     resolved = spec if spec is not None else load_ridge_spec()
     cards, snapshot, odds = protocol_training_universe()
@@ -791,7 +881,31 @@ def run_protocol_train(
         odds_by_bout=odds,
         require_target_cards=False,
         include_holdout=include_holdout,
+        contract=contract,
     )
+
+
+def protocol_feature_vector(bout_id: str) -> tuple[tuple[str, ...], tuple[float, ...]]:
+    """PIT feature row for a protocol-fixture bout (no holdout labels)."""
+    cards, snapshot, _odds = protocol_training_universe()
+    card = next((item for item in cards if bout_id in item.bout_ids), None)
+    if card is None:
+        raise TrainError(f"unknown protocol bout_id {bout_id!r}")
+    groups = {group.event_id: group for group in group_cards(cards)}
+    role = groups[card.event_id].role
+    if role is FoldRole.HOLDOUT:
+        raise HoldoutLockedError("refusing protocol feature vector for locked 2025 holdout")
+    cutoff = cutoff_for_event(card)
+    bout = snapshot.bout_by_id(bout_id)
+    if bout is None:
+        raise TrainError(f"protocol snapshot missing bout {bout_id!r}")
+    row = FeatureBuilder(snapshot).build(
+        bout.fighter_a_id,
+        bout.fighter_b_id,
+        cutoff,
+        bout_id=bout_id,
+    )
+    return row.names, row.values
 
 
 def predict_m0_bundle(

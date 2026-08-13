@@ -1,17 +1,19 @@
 """Versioned model artifacts with sidecar manifests (DWCS-303).
 
-Production loading never trusts a bare pickle. A sidecar JSON manifest must
-carry schema version, hashes, feature order, train IDs, cutoff policy, metrics,
-and the SHA-256 of the payload bytes. Checksum, feature-order, or spec mismatch
-fails with a typed error.
+Production loading never executes pickle. New M1 payloads are JSON: scaler
+parameters and logistic coefficients plus validated metadata. A sidecar
+manifest carries schema version, hashes, feature order, train IDs, cutoff
+policy, metrics, code commit, and the SHA-256 of the payload bytes.
+Checksum, feature-order, schema, or hash mismatch fails with a typed error.
 """
 
 from __future__ import annotations
 
 import hashlib
-import io
 import json
+import math
 import re
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,16 +22,17 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Final, Never
 
-import joblib
 import yaml
 
 from mma_model.backtest.contract import PINNED_FEATURE_SPEC_HASH, PINNED_SPLITS_CONFIG_HASH
 from mma_model.evaluation.contract import PINNED_CONTRACT_HASH, compute_contract_hash
-from mma_model.features.spec import FEATURE_NAMES, SPEC_VERSION, spec_hash
+from mma_model.features.spec import FEATURE_NAMES, SPEC_VERSION, spec_hash, swap_values
 from mma_model.quality.schema import sha256_canonical
 
 RIDGE_SPEC_FILENAME: Final = "ridge_v1.yaml"
 ARTIFACT_SCHEMA_VERSION: Final = "dwcs_artifact_v1"
+PAYLOAD_KIND: Final = "standardized_ridge_logistic_v1"
+ESTIMATOR_KIND: Final = "standardized_ridge_logistic"
 RIDGE_SPEC_ID: Final = "ridge_v1"
 RIDGE_CONTRACT_ID: Final = "dwcs_model_spec"
 EXPECTED_RIDGE_SCHEMA_VERSION: Final = 1
@@ -37,13 +40,15 @@ EXPECTED_RIDGE_SPEC_VERSION: Final = "1.0.0"
 EXPECTED_MODEL_ID: Final = "M1"
 EXPECTED_CUTOFF_POLICY: Final = "scheduled_minus_60m"
 EXPECTED_FINAL_REFIT: Final = "development_and_validation"
+UNKNOWN_CODE_COMMIT: Final = "unknown"
 # Canonical JSON digest of packaged ridge_v1.yaml. Update only with spec_version.
 PINNED_RIDGE_SPEC_HASH: Final = (
     "cf4a679519e5fccda46176e40be253525afe4951cfbaa7d91cbd92b0e724d61a"
 )
 
-
 SHA256_HEX: Final = re.compile(r"^[0-9a-f]{64}$")
+GIT_COMMIT_HEX: Final = re.compile(r"^[0-9a-f]{40}$")
+REQUIRED_LOGISTIC_CLASSES: Final = (0, 1)
 
 
 class ArtifactKind(StrEnum):
@@ -62,7 +67,7 @@ class ArtifactError(ValueError):
 
 
 class UntrustedArtifactError(ArtifactError):
-    """Bare pickle / joblib without a verified sidecar manifest."""
+    """Missing sidecar, non-JSON payload, or schema/type failure."""
 
 
 class ArtifactChecksumMismatchError(ArtifactError):
@@ -115,12 +120,57 @@ def _require_sha256(value: object, *, field: str, kind: ArtifactKind) -> str:
     return text
 
 
+def _require_code_commit(value: object) -> str:
+    text = str(value or "")
+    if text == UNKNOWN_CODE_COMMIT:
+        return text
+    if GIT_COMMIT_HEX.fullmatch(text):
+        return text
+    raise UntrustedArtifactError(
+        "code_commit must be a 40-char git SHA or the token 'unknown'"
+    )
+
+
+def _require_reason(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise UntrustedArtifactError("code_commit_reason must be a non-empty string")
+    return value.strip()
+
+
+def _require_finite_floats(value: object, *, n: int, field: str) -> tuple[float, ...]:
+    if not isinstance(value, list) or len(value) != n:
+        raise UntrustedArtifactError(f"{field} must be a list of {n} finite numbers")
+    out: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise UntrustedArtifactError(f"{field} contains a non-numeric entry")
+        number = float(item)
+        if not math.isfinite(number):
+            raise UntrustedArtifactError(f"{field} contains a non-finite number")
+        out.append(number)
+    return tuple(out)
+
+
+def _require_positive_scales(values: Sequence[float], *, field: str) -> tuple[float, ...]:
+    for item in values:
+        if item <= 0.0:
+            raise UntrustedArtifactError(f"{field} entries must be finite and > 0")
+    return tuple(values)
+
+
+def _logistic(x: float) -> float:
+    if x >= 0.0:
+        return 1.0 / (1.0 + math.exp(-x))
+    exp_x = math.exp(x)
+    return exp_x / (1.0 + exp_x)
+
+
 def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
 def manifest_path_for(payload_path: Path) -> Path:
-    """Sidecar path: ``ridge_v1.joblib`` → ``ridge_v1.manifest.json``."""
+    """Sidecar path: ``ridge_v1.json`` → ``ridge_v1.manifest.json``."""
     resolved = Path(payload_path)
     return resolved.with_name(resolved.stem + ".manifest.json")
 
@@ -295,6 +345,79 @@ def compute_code_hash(*, extra_paths: Sequence[Path] | None = None) -> str:
     return sha256_canonical({"files": rows})
 
 
+def resolve_code_commit(*, repo_root: Path | None = None) -> tuple[str, str]:
+    """Return ``(commit, reason)`` from git without a shell string.
+
+    Uses argv ``git rev-parse HEAD`` only. Missing git, a timeout, or a
+    non-SHA reply becomes ``unknown`` plus an explicit reason.
+    """
+    root = repo_root if repo_root is not None else Path(__file__).resolve().parents[3]
+    git_dir = root / ".git"
+    if not git_dir.exists():
+        return UNKNOWN_CODE_COMMIT, "no_git_directory"
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return UNKNOWN_CODE_COMMIT, f"git_unavailable:{type(exc).__name__}"
+    if completed.returncode != 0:
+        return UNKNOWN_CODE_COMMIT, "git_rev_parse_failed"
+    sha = completed.stdout.strip().lower()
+    if not GIT_COMMIT_HEX.fullmatch(sha):
+        return UNKNOWN_CODE_COMMIT, "git_rev_parse_unrecognized"
+    return sha, "git_rev_parse_head"
+
+
+@dataclass(frozen=True)
+class RidgePredictor:
+    """In-memory M1 predictor built from validated JSON numeric arrays."""
+
+    feature_names: tuple[str, ...]
+    scaler_mean: tuple[float, ...]
+    scaler_scale: tuple[float, ...]
+    coef: tuple[float, ...]
+    intercept: float
+    classes: tuple[int, ...]
+    spec_hash: str
+    spec_version: str
+
+    def raw_win_prob(self, values: Sequence[float]) -> float:
+        """P(A wins) from scaler + logistic only. No swap averaging."""
+        if tuple(self.feature_names) != FEATURE_NAMES:
+            raise ArtifactFeatureOrderMismatchError(
+                f"{_kind_label(ArtifactKind.FEATURE_ORDER)} mismatch on predictor"
+            )
+        if len(values) != len(FEATURE_NAMES):
+            raise ArtifactFeatureOrderMismatchError(
+                "prediction vector length does not match FEATURE_NAMES"
+            )
+        logit = self.intercept
+        for value, mean, scale, weight in zip(
+            values,
+            self.scaler_mean,
+            self.scaler_scale,
+            self.coef,
+            strict=True,
+        ):
+            number = float(value)
+            if not math.isfinite(number):
+                raise UntrustedArtifactError("prediction vector contains a non-finite number")
+            logit += weight * ((number - mean) / scale)
+        return _logistic(logit)
+
+    def swap_safe_win_prob(self, values: Sequence[float]) -> float:
+        """Average p(x) and 1-p(swap(x)) as a serving-time guard."""
+        p_raw = self.raw_win_prob(values)
+        p_swap = self.raw_win_prob(swap_values(values))
+        return 0.5 * (p_raw + (1.0 - p_swap))
+
+
 @dataclass(frozen=True)
 class ArtifactManifest:
     schema_version: str
@@ -307,6 +430,8 @@ class ArtifactManifest:
     splits_config_hash: str
     data_hash: str
     code_hash: str
+    code_commit: str
+    code_commit_reason: str
     feature_names: tuple[str, ...]
     train_sample_ids: tuple[str, ...]
     max_train_timestamp: str | None
@@ -316,6 +441,8 @@ class ArtifactManifest:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "code_commit": self.code_commit,
+            "code_commit_reason": self.code_commit_reason,
             "code_hash": self.code_hash,
             "config_hash": self.config_hash,
             "contract_hash": self.contract_hash,
@@ -359,6 +486,8 @@ def manifest_from_mapping(payload: Mapping[str, Any]) -> ArtifactManifest:
         splits_config_hash=str(payload.get("splits_config_hash", "")),
         data_hash=str(payload.get("data_hash", "")),
         code_hash=str(payload.get("code_hash", "")),
+        code_commit=_require_code_commit(payload.get("code_commit", "")),
+        code_commit_reason=_require_reason(payload.get("code_commit_reason", "")),
         feature_names=tuple(names),
         train_sample_ids=tuple(sample_ids),
         max_train_timestamp=max_ts,
@@ -379,20 +508,117 @@ class SavedArtifact:
 @dataclass(frozen=True)
 class LoadedArtifact:
     payload: dict[str, Any]
+    predictor: RidgePredictor
     manifest: ArtifactManifest
     payload_path: Path
     manifest_path: Path
 
 
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+def _write_json(path: Path, payload: Mapping[str, Any]) -> bytes:
+    blob = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    path.write_bytes(blob)
+    return blob
+
+
+def _classes_from_json(value: object) -> tuple[int, ...]:
+    if not isinstance(value, list) or len(value) != 2:
+        raise UntrustedArtifactError("logistic.classes must be [0, 1]")
+    classes: list[int] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise UntrustedArtifactError("logistic.classes must be [0, 1]")
+        classes.append(item)
+    parsed = tuple(classes)
+    if parsed != REQUIRED_LOGISTIC_CLASSES:
+        raise UntrustedArtifactError("logistic.classes must be [0, 1]")
+    return parsed
+
+
+def _intercept_from_json(value: object) -> float:
+    if isinstance(value, list):
+        if len(value) != 1:
+            raise UntrustedArtifactError("logistic.intercept must be one finite number")
+        value = value[0]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UntrustedArtifactError("logistic.intercept must be a finite number")
+    intercept = float(value)
+    if not math.isfinite(intercept):
+        raise UntrustedArtifactError("logistic.intercept must be a finite number")
+    return intercept
+
+
+def predictor_from_mapping(payload: Mapping[str, Any]) -> RidgePredictor:
+    """Validate JSON payload schema/types/shapes/finiteness; no pickle."""
+    if payload.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+        raise UntrustedArtifactError(
+            f"unknown artifact schema {payload.get('schema_version')!r}"
+        )
+    if payload.get("payload_kind") != PAYLOAD_KIND:
+        raise UntrustedArtifactError(
+            f"unknown payload_kind {payload.get('payload_kind')!r}; "
+            f"expected {PAYLOAD_KIND}"
+        )
+    names = payload.get("feature_names")
+    if not isinstance(names, list) or tuple(names) != FEATURE_NAMES:
+        raise ArtifactFeatureOrderMismatchError(
+            f"{_kind_label(ArtifactKind.FEATURE_ORDER)} mismatch inside payload"
+        )
+    n_features = len(FEATURE_NAMES)
+    estimator = payload.get("estimator")
+    if not isinstance(estimator, Mapping):
+        raise UntrustedArtifactError("estimator must be an object")
+    if estimator.get("kind") != ESTIMATOR_KIND:
+        raise UntrustedArtifactError(f"estimator.kind must be {ESTIMATOR_KIND}")
+    scaler = estimator.get("scaler")
+    logistic = estimator.get("logistic")
+    if not isinstance(scaler, Mapping) or not isinstance(logistic, Mapping):
+        raise UntrustedArtifactError("estimator.scaler and estimator.logistic must be objects")
+    mean = _require_finite_floats(scaler.get("mean"), n=n_features, field="scaler.mean")
+    scale = _require_positive_scales(
+        _require_finite_floats(scaler.get("scale"), n=n_features, field="scaler.scale"),
+        field="scaler.scale",
+    )
+    coef = _require_finite_floats(logistic.get("coef"), n=n_features, field="logistic.coef")
+    intercept = _intercept_from_json(logistic.get("intercept"))
+    classes = _classes_from_json(logistic.get("classes"))
+    spec = str(payload.get("spec_hash", "") or payload.get("feature_spec_hash", ""))
+    if spec != spec_hash():
+        raise ArtifactSpecMismatchError(
+            f"{_kind_label(ArtifactKind.SPEC)} hash mismatch inside payload"
+        )
+    version = str(payload.get("spec_version", ""))
+    if version != SPEC_VERSION:
+        raise ArtifactSpecMismatchError(
+            f"{_kind_label(ArtifactKind.SPEC)} version mismatch inside payload"
+        )
+    return RidgePredictor(
+        feature_names=FEATURE_NAMES,
+        scaler_mean=mean,
+        scaler_scale=scale,
+        coef=coef,
+        intercept=intercept,
+        classes=classes,
+        spec_hash=spec,
+        spec_version=version,
+    )
+
+
+def load_feature_vector(payload: Mapping[str, Any]) -> tuple[float, ...]:
+    """Validate a features-json object against live FEATURE_NAMES order."""
+    names = payload.get("names")
+    if not isinstance(names, list) or tuple(str(item) for item in names) != FEATURE_NAMES:
+        raise ArtifactFeatureOrderMismatchError(
+            f"{_kind_label(ArtifactKind.FEATURE_ORDER)} mismatch in features-json"
+        )
+    return _require_finite_floats(
+        payload.get("values"),
+        n=len(FEATURE_NAMES),
+        field="values",
     )
 
 
 def save_artifact(
-    payload: Mapping[str, Any],
+    predictor: RidgePredictor,
     payload_path: Path,
     *,
     train_sample_ids: Sequence[str],
@@ -404,21 +630,26 @@ def save_artifact(
     splits_config_hash: str,
     data_hash: str,
     code_hash: str,
+    code_commit: str,
+    code_commit_reason: str,
     model_id: str = EXPECTED_MODEL_ID,
     spec_id: str = RIDGE_SPEC_ID,
 ) -> SavedArtifact:
-    """Serialize ``payload`` with joblib and write a verified sidecar manifest."""
-    feature_names = tuple(str(name) for name in payload.get("feature_names", ()))
-    if feature_names != FEATURE_NAMES:
+    """Serialize a JSON ridge payload and write a verified sidecar manifest."""
+    if tuple(predictor.feature_names) != FEATURE_NAMES:
         raise ArtifactFeatureOrderMismatchError(
             f"{_kind_label(ArtifactKind.FEATURE_ORDER)} mismatch: "
-            "payload feature_names must equal the live FEATURE_NAMES order"
+            "predictor feature_names must equal the live FEATURE_NAMES order"
         )
     live_spec = spec_hash()
     if live_spec != PINNED_FEATURE_SPEC_HASH:
         raise ArtifactSpecMismatchError(
             f"{_kind_label(ArtifactKind.SPEC)} hash mismatch: "
             f"got {live_spec}, expected {PINNED_FEATURE_SPEC_HASH}"
+        )
+    if predictor.spec_hash != live_spec or predictor.spec_version != SPEC_VERSION:
+        raise ArtifactSpecMismatchError(
+            f"{_kind_label(ArtifactKind.SPEC)} mismatch on fitted predictor"
         )
     if contract_hash != PINNED_CONTRACT_HASH:
         raise ArtifactSpecMismatchError(
@@ -444,23 +675,42 @@ def save_artifact(
     splits_digest = _require_sha256(
         splits_config_hash, field="splits_config_hash", kind=ArtifactKind.CONFIG
     )
+    commit = _require_code_commit(code_commit)
+    reason = _require_reason(code_commit_reason)
 
-    stored = dict(payload)
-    stored["code_hash"] = code_digest
-    stored["config_hash"] = config_digest
-    stored["contract_hash"] = contract_digest
-    stored["data_hash"] = data_digest
-    stored["feature_names"] = list(FEATURE_NAMES)
-    stored["feature_spec_hash"] = live_spec
-    stored["spec_hash"] = live_spec
-    stored["splits_config_hash"] = splits_digest
+    stored: dict[str, Any] = {
+        "code_commit": commit,
+        "code_commit_reason": reason,
+        "code_hash": code_digest,
+        "config_hash": config_digest,
+        "contract_hash": contract_digest,
+        "data_hash": data_digest,
+        "estimator": {
+            "kind": ESTIMATOR_KIND,
+            "logistic": {
+                "classes": list(predictor.classes),
+                "coef": list(predictor.coef),
+                "intercept": predictor.intercept,
+            },
+            "scaler": {
+                "mean": list(predictor.scaler_mean),
+                "scale": list(predictor.scaler_scale),
+            },
+        },
+        "feature_names": list(FEATURE_NAMES),
+        "feature_spec_hash": live_spec,
+        "model_id": model_id,
+        "payload_kind": PAYLOAD_KIND,
+        "schema_version": ARTIFACT_SCHEMA_VERSION,
+        "spec_hash": live_spec,
+        "spec_version": SPEC_VERSION,
+        "splits_config_hash": splits_digest,
+    }
+    predictor_from_mapping(stored)
 
     target = Path(payload_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    buffer = io.BytesIO()
-    joblib.dump(stored, buffer)
-    blob = buffer.getvalue()
-    target.write_bytes(blob)
+    blob = _write_json(target, stored)
     checksum = sha256_bytes(blob)
     manifest = ArtifactManifest(
         schema_version=ARTIFACT_SCHEMA_VERSION,
@@ -473,6 +723,8 @@ def save_artifact(
         splits_config_hash=splits_digest,
         data_hash=data_digest,
         code_hash=code_digest,
+        code_commit=commit,
+        code_commit_reason=reason,
         feature_names=FEATURE_NAMES,
         train_sample_ids=tuple(train_sample_ids),
         max_train_timestamp=(
@@ -556,15 +808,20 @@ def _verify_manifest(manifest: ArtifactManifest, payload_bytes: bytes) -> None:
         )
     _require_sha256(manifest.data_hash, field="data_hash", kind=ArtifactKind.DATA)
     _require_sha256(manifest.code_hash, field="code_hash", kind=ArtifactKind.CODE)
+    _require_code_commit(manifest.code_commit)
+    _require_reason(manifest.code_commit_reason)
 
 
 def load_artifact(payload_path: Path) -> LoadedArtifact:
-    """Load a versioned artifact after checksum, spec, and feature-order checks."""
+    """Load a JSON artifact after checksum, spec, schema, and feature-order checks.
+
+    Never calls ``joblib.load`` / pickle. Invalid UTF-8 or JSON fails closed.
+    """
     target = Path(payload_path)
     side = manifest_path_for(target)
     if not side.is_file():
         raise UntrustedArtifactError(
-            f"refusing bare untrusted pickle {target}; missing sidecar {side.name}"
+            f"refusing untrusted artifact {target}; missing sidecar {side.name}"
         )
     try:
         raw_manifest = json.loads(side.read_text(encoding="utf-8"))
@@ -578,19 +835,15 @@ def load_artifact(payload_path: Path) -> LoadedArtifact:
     except OSError as exc:
         raise UntrustedArtifactError(f"unable to read artifact payload {target}: {exc}") from exc
     _verify_manifest(manifest, blob)
-    loaded = joblib.load(io.BytesIO(blob))
+    try:
+        loaded = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UntrustedArtifactError(
+            f"artifact payload is not valid JSON (refusing execution): {exc}"
+        ) from exc
     if not isinstance(loaded, dict):
-        raise UntrustedArtifactError("artifact payload must be a mapping")
-    payload_names = tuple(str(name) for name in loaded.get("feature_names", ()))
-    if payload_names != FEATURE_NAMES:
-        raise ArtifactFeatureOrderMismatchError(
-            f"{_kind_label(ArtifactKind.FEATURE_ORDER)} mismatch inside payload"
-        )
-    payload_spec = str(loaded.get("spec_hash", "") or loaded.get("feature_spec_hash", ""))
-    if payload_spec != spec_hash():
-        raise ArtifactSpecMismatchError(
-            f"{_kind_label(ArtifactKind.SPEC)} hash mismatch inside payload"
-        )
+        raise UntrustedArtifactError("artifact payload must be a JSON object")
+    predictor = predictor_from_mapping(loaded)
     hash_fields = (
         ("code_hash", manifest.code_hash, ArtifactKind.CODE),
         ("config_hash", manifest.config_hash, ArtifactKind.CONFIG),
@@ -605,8 +858,13 @@ def load_artifact(payload_path: Path) -> LoadedArtifact:
             raise ArtifactSpecMismatchError(
                 f"{_kind_label(kind)} hash mismatch inside payload field {field}"
             )
+    if str(loaded.get("code_commit", "")) != manifest.code_commit:
+        raise ArtifactSpecMismatchError(
+            f"{_kind_label(ArtifactKind.CODE)} commit mismatch inside payload"
+        )
     return LoadedArtifact(
         payload=loaded,
+        predictor=predictor,
         manifest=manifest,
         payload_path=target,
         manifest_path=side,
