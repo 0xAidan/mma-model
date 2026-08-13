@@ -100,7 +100,8 @@ def test_score_card_receives_all_bout_ids_together() -> None:
     seen: list[tuple[str, ...]] = []
 
     class Recorder:
-        def score_card(self, group, fold: FoldMetadata) -> CardScore:
+        def score_card(self, group, fold: FoldMetadata, quotes=()) -> CardScore:
+            del quotes
             seen.append(group.bout_ids)
             preds = tuple(
                 make_prediction(bout_id, group.event_id, estimator_hash="one")

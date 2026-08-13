@@ -238,6 +238,22 @@ class QuoteCandidate:
 
 
 @dataclass(frozen=True)
+class SelectionUncertainty:
+    """DWCS-305 event-block refit summary for one canonical selection."""
+
+    p25: float
+    p75: float | None = None
+    n_successful: int | None = None
+    seed: int | None = None
+    production_qualified: bool = False
+    prob_ev_positive: float | None = None
+    estimator_hash: str | None = None
+    calibrator_hash: str | None = None
+    data_hash: str | None = None
+    config_hash: str | None = None
+
+
+@dataclass(frozen=True)
 class MarketPrediction:
     family: str
     outcome_key: str
@@ -248,6 +264,14 @@ class MarketPrediction:
     availability_reason: str | None
     draw_probability: float | None = None
     p25_conditional: bool = False
+    uncertainty_successful_refits: int | None = None
+    uncertainty_seed: int | None = None
+    production_qualified: bool = False
+    prob_ev_positive: float | None = None
+    estimator_hash: str | None = None
+    calibrator_hash: str | None = None
+    data_hash: str | None = None
+    config_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -273,6 +297,11 @@ class BoutPrediction:
     baseline_no_vig: float | None
     baseline_m1: float | None
     p25_unavailable_reason: str | None = None
+    feature_quality: str | None = None
+    identity_resolved: bool = False
+    canonical_match: bool = False
+    ambiguous: bool = False
+    replacement: bool = False
 
 
 @dataclass(frozen=True)
@@ -343,6 +372,7 @@ class CardScorer(Protocol):
         self,
         group: EventGroup,
         fold: FoldMetadata,
+        quotes: Sequence[QuoteCandidate] = (),
     ) -> CardScore:
         """Score every bout on ``group`` from one frozen pre-card state."""
 
@@ -353,7 +383,13 @@ class PrecomputedScorer:
 
     by_event: dict[str, CardScore]
 
-    def score_card(self, group: EventGroup, fold: FoldMetadata) -> CardScore:
+    def score_card(
+        self,
+        group: EventGroup,
+        fold: FoldMetadata,
+        quotes: Sequence[QuoteCandidate] = (),
+    ) -> CardScore:
+        del quotes
         score = self.by_event.get(group.event_id)
         if score is None:
             missing = tuple(
@@ -399,7 +435,13 @@ class ManifestExclusionScorer:
     reason: ExclusionReason = ExclusionReason.MISSING_DATABASE
     detail: str = "no database/features/models/odds; exclusions only"
 
-    def score_card(self, group: EventGroup, fold: FoldMetadata) -> CardScore:
+    def score_card(
+        self,
+        group: EventGroup,
+        fold: FoldMetadata,
+        quotes: Sequence[QuoteCandidate] = (),
+    ) -> CardScore:
+        del quotes
         return CardScore(
             event_id=group.event_id,
             estimator_hash="none",
@@ -419,26 +461,38 @@ def _selection_id(family: str, outcome: str, line_point: float | None) -> str:
 
 def _prediction_payload(prediction: BoutPrediction) -> dict[str, Any]:
     return {
+        "ambiguous": prediction.ambiguous,
         "baseline_fifty": prediction.baseline_fifty,
         "baseline_m1": prediction.baseline_m1,
         "baseline_no_vig": prediction.baseline_no_vig,
         "baseline_rating": prediction.baseline_rating,
         "bout_id": prediction.bout_id,
         "calibrator_hash": prediction.calibrator_hash,
+        "canonical_match": prediction.canonical_match,
         "estimator_hash": prediction.estimator_hash,
         "event_id": prediction.event_id,
+        "feature_quality": prediction.feature_quality,
+        "identity_resolved": prediction.identity_resolved,
         "joint_atoms": None if prediction.joint_atoms is None else dict(prediction.joint_atoms),
         "markets": [
             {
                 "availability_reason": item.availability_reason,
                 "available": item.available,
+                "calibrator_hash": item.calibrator_hash,
+                "config_hash": item.config_hash,
+                "data_hash": item.data_hash,
                 "draw_probability": item.draw_probability,
+                "estimator_hash": item.estimator_hash,
                 "family": item.family,
                 "line_point": item.line_point,
                 "outcome_key": item.outcome_key,
                 "p25": item.p25,
                 "p25_conditional": item.p25_conditional,
                 "p50": item.p50,
+                "prob_ev_positive": item.prob_ev_positive,
+                "production_qualified": item.production_qualified,
+                "uncertainty_seed": item.uncertainty_seed,
+                "uncertainty_successful_refits": item.uncertainty_successful_refits,
             }
             for item in prediction.markets
         ],
@@ -454,6 +508,7 @@ def _prediction_payload(prediction: BoutPrediction) -> dict[str, Any]:
         "p_draw": prediction.p_draw,
         "p_fighter_a": prediction.p_fighter_a,
         "p_fighter_b": prediction.p_fighter_b,
+        "replacement": prediction.replacement,
         "train_event_ids": list(prediction.train_event_ids),
     }
 
@@ -584,6 +639,40 @@ def markets_from_joint(
                 )
             )
     return tuple(rows)
+
+
+def attach_market_uncertainty(
+    markets: tuple[MarketPrediction, ...],
+    *,
+    bout_id: str,
+    by_key: Mapping[str, SelectionUncertainty],
+) -> tuple[MarketPrediction, ...]:
+    """Copy DWCS-305 refit metadata onto available market rows. No forged hashes."""
+    attached: list[MarketPrediction] = []
+    for market in markets:
+        if not market.available or not market.outcome_key:
+            attached.append(market)
+            continue
+        key = f"{bout_id}|{_selection_id(market.family, market.outcome_key, market.line_point)}"
+        unc = by_key.get(key)
+        if unc is None:
+            attached.append(market)
+            continue
+        attached.append(
+            replace(
+                market,
+                p25=market.p25 if market.p25 is not None else unc.p25,
+                uncertainty_successful_refits=unc.n_successful,
+                uncertainty_seed=unc.seed,
+                production_qualified=unc.production_qualified,
+                prob_ev_positive=unc.prob_ev_positive,
+                estimator_hash=unc.estimator_hash,
+                calibrator_hash=unc.calibrator_hash,
+                data_hash=unc.data_hash,
+                config_hash=unc.config_hash,
+            )
+        )
+    return tuple(attached)
 
 
 def join_quote(
@@ -866,6 +955,69 @@ def _eligibility(
     )
 
 
+def _authoritative_quote_fields(
+    quote: QuoteCandidate,
+    *,
+    selection_identity: str,
+) -> dict[str, Any]:
+    """Serialize actual QuoteCandidate evidence. Never invent eligibility identity."""
+    eligibility = (
+        quote.eligibility_evidence
+        if isinstance(quote.eligibility_evidence, QuoteEligibilityEvidence)
+        else None
+    )
+    freshness = None if eligibility is None else eligibility.quote_freshness_at
+    if freshness is None:
+        freshness = quote.observed_at
+    manual = (
+        quote.quote_evidence
+        if isinstance(quote.quote_evidence, ManualObservedPriceEvidence)
+        else None
+    )
+    binding = None if manual is None else manual.bout_binding
+    evidence_identity = None if eligibility is None else eligibility.selection_identity
+    if evidence_identity is None and manual is not None:
+        evidence_identity = manual.selection_identity
+    return {
+        "availability": quote.availability,
+        "bookmaker_key": quote.bookmaker_key,
+        "eligible": quote.eligible if eligibility is None else eligibility.eligible,
+        "eligibility_decision_identity": (
+            None if eligibility is None else eligibility.decision_identity
+        ),
+        "eligibility_decision_version": (
+            None if eligibility is None else eligibility.decision_version
+        ),
+        "eligibility_evaluated_at": (
+            None if eligibility is None else isoformat_utc(eligibility.evaluated_at)
+        ),
+        "eligibility_selection_identity": (
+            None if eligibility is None else eligibility.selection_identity
+        ),
+        "family": quote.market_family,
+        "fixture_provenance": quote.fixture_provenance,
+        "freshness_at": isoformat_utc(freshness),
+        "historical_evidence": quote.historical_evidence,
+        "is_ambiguous": quote.is_ambiguous,
+        "is_replacement": quote.is_replacement,
+        "lifecycle": quote.lifecycle,
+        "manual_asserted_at": (
+            None if binding is None else isoformat_utc(binding.asserted_at)
+        ),
+        "manual_recorder": None if binding is None else binding.asserted_by,
+        "manual_source": None if binding is None else binding.source.value,
+        "observed_at": isoformat_utc(quote.observed_at),
+        "provider": quote.provider,
+        "quote_id": quote.quote_id,
+        "region": quote.region,
+        "selection_identity": (
+            selection_identity if evidence_identity is None else evidence_identity
+        ),
+        "source_kind": quote.source_kind,
+        "stale": quote.lifecycle == "stale",
+    }
+
+
 def _priced_metrics_for_quote(
     *,
     quote: QuoteCandidate,
@@ -964,7 +1116,7 @@ def _priced_metrics_for_quote(
     else:
         if opening_quote_evidence is None or opening_eligibility is None:
             if not quote.fixture_provenance:
-                return {
+                payload = {
                     "available": False,
                     "bookmaker_key": quote.bookmaker_key,
                     "bout_id": quote.bout_id,
@@ -991,6 +1143,12 @@ def _priced_metrics_for_quote(
                     "is_proxy_timestamp": quote.is_proxy_timestamp,
                     "later_ignored": quote.later_ignored,
                 }
+                payload.update(
+                    _authoritative_quote_fields(
+                        quote, selection_identity=selection_identity
+                    )
+                )
+                return payload
             opening_quote_evidence = _provider_evidence(
                 quote, role=PriceObservationRole.OPENING
             )
@@ -1042,6 +1200,7 @@ def _priced_metrics_for_quote(
         "later_ignored": quote.later_ignored,
         "void_adjusted": metrics.void_adjusted,
     }
+    payload.update(_authoritative_quote_fields(quote, selection_identity=selection_identity))
     if quote.is_proxy_timestamp:
         payload["probability_clv"] = None
         payload["closing_ev"] = None
@@ -1303,6 +1462,16 @@ def _grade_bout(
             if joined.reason is not None and joined.reason is not ExclusionReason.THRESHOLD_ONLY:
                 row["quote_exclusion"] = joined.reason.value
                 row["quote_exclusion_detail"] = joined.detail
+            if joined.quote is not None:
+                row["offered_decimal"] = joined.quote.price_decimal
+                row.update(
+                    _authoritative_quote_fields(
+                        joined.quote,
+                        selection_identity=_selection_id(
+                            market.family, market.outcome_key, market.line_point
+                        ),
+                    )
+                )
             threshold_rows.append(row)
             continue
         settlement = _settle_market(facts, family, outcome, market.line_point)
@@ -1366,7 +1535,16 @@ def _grade_bout(
         threshold_only_rows=tuple(threshold_rows),
         pre_policy_candidates=tuple(candidates),
         settlement_facts_present=facts is not None,
-        source_quality={"cutoff_kind": group.cutoff.cutoff_kind.value},
+        source_quality={
+            "ambiguous": prediction.ambiguous
+            or any(item.is_ambiguous for item in quotes if item.bout_id == bout_id),
+            "canonical_match": prediction.canonical_match,
+            "cutoff_kind": group.cutoff.cutoff_kind.value,
+            "feature_quality": prediction.feature_quality,
+            "identity_resolved": prediction.identity_resolved,
+            "replacement": prediction.replacement
+            or any(item.is_replacement for item in quotes if item.bout_id == bout_id),
+        },
     )
 
 
@@ -1803,7 +1981,7 @@ def run_walk_forward(
             holdout_event_ids=holdout_ids,
             holdout_seasons=holdout_seasons,
         )
-        score = scorer.score_card(group, fold)
+        score = scorer.score_card(group, fold, quotes=quotes)
         if score.holdout_in_train:
             raise BacktestError("scorer used holdout-season cards in training")
         assert_holdout_not_in_train(

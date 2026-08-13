@@ -370,6 +370,7 @@ def test_default_bootstrap_is_200_and_lightweight_200_refit() -> None:
     payload = priced.targets[0].to_dict()
     assert payload["observed_price"] == 2.0
     assert payload["ev50"] == pytest.approx(2.0 * payload["p50"] - 1.0)
+    assert 0.0 <= payload["prob_ev_positive"] <= 1.0
     unpriced = event_block_refit_bootstrap(
         groups,
         refit=refit,
@@ -382,6 +383,39 @@ def test_default_bootstrap_is_200_and_lightweight_200_refit() -> None:
     )
     assert "ev50" not in unpriced.targets[0].to_dict()
     assert unpriced.targets[0].ev50 is None
+    assert unpriced.targets[0].prob_ev_positive is None
+
+
+def test_prob_ev_positive_uses_replicate_predictions_not_p25() -> None:
+    groups = (EventBlock("e1", ("a", "b")), EventBlock("e2", ("c",)))
+    n_calls = {"n": 0}
+
+    def refit(samples: tuple[str, ...]) -> int:
+        n_calls["n"] += 1
+        return n_calls["n"]
+
+    def predict(fitted: int) -> dict[str, float]:
+        # Four of five replicates sit below break-even at 2.0 (p=0.5); p50 can
+        # still be near 0.5 while P(EV>0) is 0.2.
+        values = {1: 0.10, 2: 0.20, 3: 0.30, 4: 0.40, 5: 0.90}
+        return {"t": values[fitted]}
+
+    summary = event_block_refit_bootstrap(
+        groups,
+        refit=refit,
+        predict=predict,
+        n_replicates=5,
+        seed=3,
+        observed_prices={"t": 2.0},
+        estimator_hash="a" * 64,
+        config_hash="b" * 64,
+        data_hash="c" * 64,
+    )
+    payload = summary.targets[0].to_dict()
+    assert payload["prob_ev_positive"] == pytest.approx(0.2)
+    assert payload["p25"] < 0.5
+    # p25 EV is negative; P(EV>0) still comes from the replicate share, not p25.
+    assert payload["ev25"] < 0.0
 
 
 def test_ece_and_slope_counts_reconcile_and_weak_bins_are_suppressed() -> None:

@@ -84,6 +84,12 @@ from mma_model.backtest.metrics import (
     DEFAULT_BACKTEST_BOOTSTRAP_SEED,
 )
 from mma_model.evaluation.contract import EvaluationContractError, load_evaluation_contract
+from mma_model.recommend.policy import (
+    PolicyContractDriftError,
+    PolicyHashMismatch,
+    RecommendationPolicyError,
+)
+from mma_model.recommend.replay import RecommendReplayError, execute_recommend_replay
 from mma_model.markets.derive import UnsupportedScheduleError
 from mma_model.modeling.artifacts import (
     ArtifactError,
@@ -605,6 +611,44 @@ def main(argv: list[str] | None = None) -> int:
         "--expected-calibration-hash",
         default=None,
         help="Independent expected per-card calibrator hash digest",
+    )
+
+    p_rec = sub.add_parser(
+        "recommend",
+        help=(
+            "Frozen confirmed-value / price-target policy (DWCS-307). "
+            "`recommend replay` applies the pinned policy to DWCS-306 evidence "
+            "or the protocol fixture. It never refits models or tunes thresholds."
+        ),
+    )
+    rec_sub = p_rec.add_subparsers(dest="recommend_cmd", required=True)
+    p_rec_replay = rec_sub.add_parser(
+        "replay",
+        help="Apply frozen DWCS-307 policy to backtest evidence or --fixture protocol",
+    )
+    p_rec_replay.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("config/evaluation/dwcs_v1.json"),
+        help="Frozen evaluation contract (never mutated)",
+    )
+    p_rec_replay.add_argument(
+        "--backtest-json",
+        type=Path,
+        default=None,
+        help="DWCS-306 evidence JSON; content hash is verified before replay",
+    )
+    p_rec_replay.add_argument(
+        "--fixture",
+        choices=("protocol",),
+        default=None,
+        help="protocol = frozen DWCS-307 policy cases (confirmed/unpriced/stale/ties)",
+    )
+    p_rec_replay.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional path to write the recommendation JSON report",
     )
 
     p_source = sub.add_parser("source", help="Source adapter utilities")
@@ -1719,6 +1763,39 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(out, indent=2, sort_keys=True))
         return EXIT_STRICT_BLOCKERS
+
+    if args.cmd == "recommend":
+        if getattr(args, "recommend_cmd", None) != "replay":
+            print(f"unsupported recommend command: {getattr(args, 'recommend_cmd', None)}")
+            return EXIT_INTERNAL
+        try:
+            payload = execute_recommend_replay(
+                contract_path=Path(args.contract),
+                backtest_json=args.backtest_json,
+                fixture=args.fixture,
+            )
+        except EvaluationContractError as exc:
+            print(f"evaluation contract error: {exc}")
+            return EXIT_INTERNAL
+        except (
+            PolicyHashMismatch,
+            PolicyContractDriftError,
+            RecommendationPolicyError,
+        ) as exc:
+            print(f"recommendation policy error: {exc}")
+            return EXIT_INTERNAL
+        except RecommendReplayError as exc:
+            print(f"recommend replay error: {exc}")
+            return EXIT_INTERNAL
+        if args.output is not None:
+            out_path = Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return EXIT_OK
 
     if args.cmd == "source" and args.source_cmd == "audit":
         if args.audit_source != "ufcstats-public":

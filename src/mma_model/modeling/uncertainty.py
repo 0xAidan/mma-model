@@ -110,6 +110,7 @@ class TargetPercentiles:
     ev75: float | None
     ev95: float | None
     ev_omission_reason: str | None = None
+    prob_ev_positive: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -121,6 +122,8 @@ class TargetPercentiles:
         }
         if self.ev_omission_reason is not None:
             payload["ev_omission_reason"] = self.ev_omission_reason
+        if self.prob_ev_positive is not None:
+            payload["prob_ev_positive"] = self.prob_ev_positive
         if self.observed_price is None:
             return payload
         payload["observed_price"] = self.observed_price
@@ -223,6 +226,34 @@ def _ev_tuple(
     return (values[0], values[1], values[2], values[3], values[4])
 
 
+def _prob_ev_positive(
+    probabilities: Sequence[float],
+    price: float,
+    ev_fn: Callable[[float, float], float] | None,
+) -> float:
+    """Share of replicate predictions with EV > 0 at the observed price.
+
+    Never inferred from p25. ``ev_fn(prob, decimal_odds)`` defaults to
+    exhaustive binary ``p * odds - 1``. Void markets must pass a
+    settlement-aware callback.
+    """
+    if not math.isfinite(price) or price <= 1.0:
+        raise BootstrapError("observed decimal price must be finite and > 1.0")
+    series = [float(item) for item in probabilities]
+    if not series:
+        raise BootstrapError("cannot compute P(EV>0) over empty replicates")
+
+    def default_ev(prob: float, odds: float) -> float:
+        return float(odds) * float(prob) - 1.0
+
+    fn = default_ev if ev_fn is None else ev_fn
+    hits = sum(1 for prob in series if fn(prob, float(price)) > 0.0)
+    value = hits / len(series)
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        raise BootstrapError("prob_ev_positive must be in [0, 1]")
+    return value
+
+
 def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, BootstrapRedrawError):
         return True
@@ -263,6 +294,7 @@ def event_block_refit_bootstrap(
     calibrator_fitting_event_ids: Sequence[str] | None = None,
     calibrator_fitting_sample_ids: Sequence[str] | None = None,
     ev_semantics: EvSemantics = EV_SEMANTICS_BINARY_MONEYLINE,
+    ev_positive_fn: Callable[[float, float], float] | None = None,
 ) -> BootstrapSummary:
     """Generic event-block refit API. Production default is 200 successful fits.
 
@@ -354,8 +386,12 @@ def event_block_refit_bootstrap(
     emit_ev = ev_semantics == EV_SEMANTICS_BINARY_MONEYLINE
     targets: list[TargetPercentiles] = []
     for target_id in target_ids:
-        series = _percentile_tuple([row[target_id] for row in successes])
+        replicate_probs = [row[target_id] for row in successes]
+        series = _percentile_tuple(replicate_probs)
         price = prices.get(target_id)
+        prob_ev: float | None = None
+        if price is not None and (emit_ev or ev_positive_fn is not None):
+            prob_ev = _prob_ev_positive(replicate_probs, float(price), ev_positive_fn)
         if not emit_ev:
             targets.append(
                 TargetPercentiles(
@@ -372,6 +408,7 @@ def event_block_refit_bootstrap(
                     ev75=None,
                     ev95=None,
                     ev_omission_reason=omission_reason,
+                    prob_ev_positive=prob_ev,
                 )
             )
             continue
@@ -390,6 +427,7 @@ def event_block_refit_bootstrap(
                     ev50=None,
                     ev75=None,
                     ev95=None,
+                    prob_ev_positive=None,
                 )
             )
             continue
@@ -408,6 +446,7 @@ def event_block_refit_bootstrap(
                 ev50=ev[2],
                 ev75=ev[3],
                 ev95=ev[4],
+                prob_ev_positive=prob_ev,
             )
         )
     production = n_replicates == DEFAULT_BOOTSTRAP_REPLICATES

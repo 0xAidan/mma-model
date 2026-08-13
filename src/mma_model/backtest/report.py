@@ -19,7 +19,7 @@ from typing import Any, Final
 from mma_model.backtest.gates import EvidenceOverwriteError, EvidenceTamperError
 from mma_model.quality.schema import canonical_json_bytes, sha256_canonical
 
-EVIDENCE_SCHEMA_VERSION: Final = "dwcs_backtest_evidence_v1"
+EVIDENCE_SCHEMA_VERSION: Final = "dwcs_backtest_evidence_v1.1"
 JSON_NAME: Final = "backtest.json"
 MARKDOWN_NAME: Final = "backtest.md"
 HASHED_OMIT_KEYS: Final = frozenset()
