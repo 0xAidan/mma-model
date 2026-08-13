@@ -1,13 +1,21 @@
 """Complete-set proportional de-vig with DWCS-200 market identity (DWCS-204).
 
 Canonical completeness requires family (+ scheduled rounds / line where relevant)
-and the exact catalog outcome-key set. A generic API may de-vig only when an
-explicit expected outcome set is supplied; it never claims DWCS-200 completeness
-without a family. Totals lines are separate over/under complete sets.
+and an *exhaustive* catalog outcome-key set. Exact-round catalog keys
+(``round_1``…``round_N``) are **not** mutually exhaustive for fight settlement:
+decisions / no-finish make every round selection lose. Canonical
+``family=exact_round`` de-vig therefore fails explicitly; unconditional fair
+probs require an explicit provider outcome set that includes a no-finish atom
+via the generic API (``canonical_complete=False``).
+
+Generic de-vig never claims DWCS-200 completeness. Totals lines are separate
+over/under complete sets. Overround unit is probability mass
+(``sum(implied) - 1``) under the stated probability conditioning.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -34,7 +42,20 @@ DEVIG_METHOD: Final = "proportional_complete_set"
 DEVIG_VERSION: Final = "1.0.0"
 OVERROUND_UNIT: Final = "probability_mass"  # sum(implied) - 1
 
+# Explicit atoms that complete a round market for unconditional fight outcomes.
+NO_FINISH_OUTCOME_ATOMS: Final = frozenset(
+    {"decision", "goes_distance", "no_finish", "decision_or_draw"}
+)
+
+PROBABILITY_CONDITIONING_UNCONDITIONAL_CATALOG: Final = (
+    "unconditional_exhaustive_catalog"
+)
+PROBABILITY_CONDITIONING_UNCONDITIONAL_EXPLICIT: Final = (
+    "unconditional_explicit_complete_set"
+)
+
 _SUM_TOLERANCE: Final = 1e-12
+_ROUND_KEY_RE: Final = re.compile(r"^round_\d+$")
 
 
 @dataclass(frozen=True)
@@ -55,6 +76,7 @@ class DevigResult:
     line_point: float | None
     scheduled_rounds: int | None
     canonical_complete: bool
+    probability_conditioning: str
 
     def as_mapping(self) -> Mapping[str, float]:
         return dict(zip(self.outcome_keys, self.fair_probs, strict=True))
@@ -83,6 +105,8 @@ class IncompleteMarketSet:
     family: MarketFamily | None
     line_point: float | None
     scheduled_rounds: int | None
+    canonical_complete: bool = False
+    probability_conditioning: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -99,6 +123,8 @@ class IncompleteMarketSet:
             "family": None if self.family is None else self.family.value,
             "line_point": self.line_point,
             "scheduled_rounds": self.scheduled_rounds,
+            "canonical_complete": self.canonical_complete,
+            "probability_conditioning": self.probability_conditioning,
         }
 
 
@@ -123,12 +149,36 @@ def _normalize_prices(
     return normalized
 
 
+def _is_round_only_set(keys: Sequence[str]) -> bool:
+    if not keys:
+        return False
+    return all(_ROUND_KEY_RE.match(k) for k in keys) and not any(
+        k in NO_FINISH_OUTCOME_ATOMS for k in keys
+    )
+
+
+def _exact_round_non_exhaustive_message() -> str:
+    return (
+        "exact_round catalog outcomes (round_1…round_N) are not mutually "
+        "exhaustive for fight settlement: decisions/no-finish make every round "
+        "selection lose. Refusing to normalize round-only implied probabilities "
+        "to 1 and call them fair/unconditional. Use the generic API with "
+        "expected_outcome_keys that include an explicit no-finish atom "
+        f"({sorted(NO_FINISH_OUTCOME_ATOMS)}) for unconditional complete-set "
+        "de-vig (canonical_complete=False), or treat round-only prices as "
+        "conditional-on-finish outside this path."
+    )
+
+
 def _expected_keys_for_family(
     family: MarketFamily,
     *,
     scheduled_rounds: int | None,
     line_point: float | None,
 ) -> tuple[str, ...]:
+    if family is MarketFamily.EXACT_ROUND:
+        raise InvalidMarketSetSpecError(_exact_round_non_exhaustive_message())
+
     catalog = catalog_for_family(family)
     if family is MarketFamily.TOTALS:
         if line_point is None or not catalog.is_valid_line_point(line_point):
@@ -140,15 +190,6 @@ def _expected_keys_for_family(
     if line_point is not None:
         raise InvalidMarketSetSpecError(
             f"{family.value} de-vig must not supply line_point"
-        )
-    if family is MarketFamily.EXACT_ROUND:
-        if scheduled_rounds is None:
-            raise InvalidMarketSetSpecError(
-                "exact_round de-vig requires scheduled_rounds (3 or 5)"
-            )
-        return tuple(
-            o.value
-            for o in outcomes_for_family(family, scheduled_rounds=scheduled_rounds)
         )
     if scheduled_rounds is not None:
         raise InvalidMarketSetSpecError(
@@ -163,14 +204,27 @@ def _resolve_expected_keys(
     scheduled_rounds: int | None,
     line_point: float | None,
     expected_outcome_keys: Sequence[object] | None,
-) -> tuple[tuple[str, ...], bool]:
-    """Return (expected_keys, canonical_complete)."""
+) -> tuple[tuple[str, ...], bool, str]:
+    """Return (expected_keys, canonical_complete, probability_conditioning)."""
     if family is not None:
         if expected_outcome_keys is not None:
             raise InvalidMarketSetSpecError(
                 "do not pass expected_outcome_keys with a canonical family; "
-                "the DWCS-200 catalog is authoritative"
+                "the DWCS-200 catalog is authoritative for exhaustive families, "
+                "and exact_round is rejected as non-exhaustive"
             )
+        if family is MarketFamily.EXACT_ROUND:
+            # Surface scheduled_rounds validation before non-exhaustive reject
+            # only when rounds missing would confuse callers.
+            if scheduled_rounds is None:
+                raise InvalidMarketSetSpecError(
+                    "exact_round de-vig requires scheduled_rounds (3 or 5); "
+                    "however even with rounds the catalog set is not "
+                    "mutually exhaustive — " + _exact_round_non_exhaustive_message()
+                )
+            # Validate rounds shape exists in catalog before rejecting.
+            outcomes_for_family(family, scheduled_rounds=scheduled_rounds)
+            raise InvalidMarketSetSpecError(_exact_round_non_exhaustive_message())
         return (
             _expected_keys_for_family(
                 family,
@@ -178,6 +232,7 @@ def _resolve_expected_keys(
                 line_point=line_point,
             ),
             True,
+            PROBABILITY_CONDITIONING_UNCONDITIONAL_CATALOG,
         )
 
     if scheduled_rounds is not None or line_point is not None:
@@ -187,7 +242,8 @@ def _resolve_expected_keys(
     if expected_outcome_keys is None:
         raise InvalidMarketSetSpecError(
             "generic de-vig requires explicit expected_outcome_keys; "
-            "refusing to claim completeness from price count alone"
+            "refusing to claim completeness from price count alone "
+            "(canonical_complete=False when successful)"
         )
     keys = tuple(_normalize_key(k) for k in expected_outcome_keys)
     if len(keys) < 2:
@@ -196,7 +252,12 @@ def _resolve_expected_keys(
         )
     if len(set(keys)) != len(keys):
         raise InvalidMarketSetSpecError("expected_outcome_keys must be unique")
-    return keys, False
+    if _is_round_only_set(keys):
+        raise InvalidMarketSetSpecError(
+            "round-only expected_outcome_keys are not mutually exhaustive "
+            "(missing no-finish/decision atom). " + _exact_round_non_exhaustive_message()
+        )
+    return keys, False, PROBABILITY_CONDITIONING_UNCONDITIONAL_EXPLICIT
 
 
 def try_proportional_devig(
@@ -211,9 +272,10 @@ def try_proportional_devig(
 
     Invalid / non-finite odds raise ``InvalidOddsError``. Blank keys and invalid
     market identity raise ``InvalidMarketSetSpecError``. Missing/extra outcomes
-    return ``IncompleteMarketSet`` (never silent success).
+    return ``IncompleteMarketSet`` (never silent success). Canonical exact-round
+    always fails as non-exhaustive.
     """
-    expected, canonical = _resolve_expected_keys(
+    expected, canonical, conditioning = _resolve_expected_keys(
         family=family,
         scheduled_rounds=scheduled_rounds,
         line_point=line_point,
@@ -240,9 +302,9 @@ def try_proportional_devig(
             value_math_version=VALUE_MATH_VERSION,
             family=family,
             line_point=None if family is not MarketFamily.TOTALS else line_point,
-            scheduled_rounds=(
-                scheduled_rounds if family is MarketFamily.EXACT_ROUND else None
-            ),
+            scheduled_rounds=None,
+            canonical_complete=False,
+            probability_conditioning=None,
         )
 
     ordered_keys = expected
@@ -271,10 +333,9 @@ def try_proportional_devig(
         value_math_version=VALUE_MATH_VERSION,
         family=family,
         line_point=totals_line,
-        scheduled_rounds=(
-            scheduled_rounds if family is MarketFamily.EXACT_ROUND else None
-        ),
+        scheduled_rounds=None,
         canonical_complete=canonical,
+        probability_conditioning=conditioning,
     )
     result.assert_sum_to_one()
     return result

@@ -4,10 +4,16 @@ Booleans alone must not grant EV/CLV/stake. Callers supply typed provenance:
 manual observed-price evidence (DWCS-202) or quote + eligibility evidence
 (DWCS-203). Selection identity is bout-scoped. Catalog validation uses
 DWCS-200 domain contracts. Adapters live in ``mma_model.odds.value_bridge``.
+
+Eligibility evidence is time-bound: ``evaluated_at`` / decision identity must
+match the valuation cutoff in use; stale/replayed decisions are rejected.
+Manual bout binding is an auditable assertion (actor/time/source), not a
+casual unbound id field.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -34,6 +40,17 @@ class PriceProvenanceKind(StrEnum):
 class PriceObservationRole(StrEnum):
     OPENING = "opening"
     CLOSING = "closing"
+
+
+class ManualBindingSource(StrEnum):
+    """Named auditable sources for manual bout binding assertions."""
+
+    USER_ASSERTION = "user_assertion"
+    OPERATOR_ASSERTION = "operator_assertion"
+
+
+# Closing CLV default policy: same book/region as opening unless explicitly allowed.
+CROSS_BOOK_CLOSING_POLICY_DEFAULT: bool = False
 
 
 def _require_aware_utc(value: datetime, *, field: str) -> datetime:
@@ -88,6 +105,42 @@ def value_selection_identity(bout_id: str, market_selection_identity: str) -> st
     return f"{bout}|{market}"
 
 
+def compute_eligibility_decision_identity(
+    *,
+    quote_id: int,
+    evaluated_at: datetime,
+    eligible: bool,
+    reason: str,
+    selection_identity: str,
+    resolved_bout_id: str | None,
+    quote_availability_at_decision: str,
+    quote_freshness_at: datetime | None,
+    lifecycle_state_at_decision: str | None,
+) -> str:
+    """Content identity for eligibility evidence (replay/staleness binding)."""
+    as_of = _require_aware_utc(evaluated_at, field="evaluated_at").isoformat()
+    freshness = (
+        None
+        if quote_freshness_at is None
+        else _require_aware_utc(quote_freshness_at, field="quote_freshness_at").isoformat()
+    )
+    payload = "|".join(
+        [
+            str(int(quote_id)),
+            as_of,
+            "1" if eligible else "0",
+            str(reason),
+            str(selection_identity),
+            "" if resolved_bout_id is None else str(resolved_bout_id),
+            str(quote_availability_at_decision),
+            "" if freshness is None else freshness,
+            "" if lifecycle_state_at_decision is None else str(lifecycle_state_at_decision),
+        ]
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"elig_v1:{digest}"
+
+
 @dataclass(frozen=True)
 class ValueSelectionContext:
     """Canonical target for priced metrics: bout + DWCS-200 market selection."""
@@ -123,11 +176,48 @@ class ValueSelectionContext:
 
 
 @dataclass(frozen=True)
+class ManualBoutBindingAssertion:
+    """Auditable user/operator assertion binding a manual price to a canonical bout.
+
+    This is an explicit named action/DTO — not a casual unbound id parameter.
+    """
+
+    bout_id: str
+    asserted_at: datetime
+    asserted_by: str
+    source: ManualBindingSource
+    note: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "bout_id", _require_nonempty(self.bout_id, field="bout_id")
+        )
+        object.__setattr__(
+            self,
+            "asserted_at",
+            _require_aware_utc(self.asserted_at, field="asserted_at"),
+        )
+        object.__setattr__(
+            self,
+            "asserted_by",
+            _require_nonempty(self.asserted_by, field="asserted_by"),
+        )
+        if not isinstance(self.source, ManualBindingSource):
+            raise IneligiblePriceError(
+                "manual bout binding source must be ManualBindingSource "
+                f"(user_assertion|operator_assertion); got {self.source!r}"
+            )
+        if self.note is not None:
+            object.__setattr__(self, "note", str(self.note))
+
+
+@dataclass(frozen=True)
 class ManualObservedPriceEvidence:
     """DWCS-202 user-observed available price evidence (no boolean shortcuts).
 
-    Stored rows may be unmatched (``bound_bout_id=None``) but cannot produce
-    metrics until explicitly bound to the target canonical bout.
+    Stored rows may be unmatched (``bout_binding=None``) but cannot produce
+    metrics until an explicit ``ManualBoutBindingAssertion`` binds them to the
+    target canonical bout.
     """
 
     provenance: PriceProvenanceKind
@@ -141,8 +231,15 @@ class ManualObservedPriceEvidence:
     observed_at: datetime
     bookmaker_key: str
     region: str
-    bound_bout_id: str | None = None
+    bout_binding: ManualBoutBindingAssertion | None = None
     price_role: PriceObservationRole = PriceObservationRole.OPENING
+
+    @property
+    def bound_bout_id(self) -> str | None:
+        """Bound bout from auditable assertion, if present."""
+        if self.bout_binding is None:
+            return None
+        return self.bout_binding.bout_id
 
     def __post_init__(self) -> None:
         if self.provenance is not PriceProvenanceKind.USER_OBSERVED:
@@ -182,11 +279,9 @@ class ManualObservedPriceEvidence:
                 "selection_identity mismatch versus catalog family/outcome/line: "
                 f"got {self.selection_identity!r}, expected {market_id!r}"
             )
-        if self.bound_bout_id is not None:
-            object.__setattr__(
-                self,
-                "bound_bout_id",
-                _require_nonempty(self.bound_bout_id, field="bound_bout_id"),
+        if self.bout_binding is not None and self.bout_binding.asserted_at < self.observed_at:
+            raise IneligiblePriceError(
+                "manual bout binding asserted_at must be >= price observed_at"
             )
 
 
@@ -255,18 +350,59 @@ class ProviderQuoteEvidence:
 
 @dataclass(frozen=True)
 class QuoteEligibilityEvidence:
-    """DWCS-203 quote-level eligibility decision bound to a quote_id."""
+    """DWCS-203 quote-level eligibility decision bound to a quote + cutoff.
+
+    Timeless eligible flags are rejected: ``evaluated_at`` (as_of), availability
+    at decision, and ``decision_identity`` bind the decision to the quote and
+    valuation cutoff in use.
+    """
 
     quote_id: int
     eligible: bool
     selection_identity: str
     resolved_bout_id: str | None
     reason: str
+    evaluated_at: datetime
+    quote_availability_at_decision: str
+    decision_identity: str = ""
+    quote_freshness_at: datetime | None = None
+    lifecycle_state_at_decision: str | None = None
+    decision_version: str | None = None
 
     def __post_init__(self) -> None:
         if int(self.quote_id) <= 0:
             raise IneligiblePriceError("eligibility quote_id must be positive")
-        # selection_identity must be a catalog market id (validated as family:outcome[:line]).
+        evaluated = _require_aware_utc(self.evaluated_at, field="evaluated_at")
+        object.__setattr__(self, "evaluated_at", evaluated)
+        availability = _require_nonempty(
+            self.quote_availability_at_decision,
+            field="quote_availability_at_decision",
+        )
+        object.__setattr__(self, "quote_availability_at_decision", availability)
+        freshness = (
+            None
+            if self.quote_freshness_at is None
+            else _require_aware_utc(
+                self.quote_freshness_at, field="quote_freshness_at"
+            )
+        )
+        object.__setattr__(self, "quote_freshness_at", freshness)
+        if self.lifecycle_state_at_decision is not None:
+            object.__setattr__(
+                self,
+                "lifecycle_state_at_decision",
+                _require_nonempty(
+                    self.lifecycle_state_at_decision,
+                    field="lifecycle_state_at_decision",
+                ),
+            )
+        if self.decision_version is not None:
+            object.__setattr__(
+                self,
+                "decision_version",
+                _require_nonempty(self.decision_version, field="decision_version"),
+            )
+
         parts = self.selection_identity.split(":")
         if len(parts) < 2:
             raise IneligiblePriceError(
@@ -293,6 +429,11 @@ class QuoteEligibilityEvidence:
                     "eligible QuoteEligibilityEvidence requires reason='none' "
                     f"(got {self.reason!r})"
                 )
+            if availability != "available":
+                raise IneligiblePriceError(
+                    "eligible QuoteEligibilityEvidence requires "
+                    "quote_availability_at_decision='available'"
+                )
             object.__setattr__(
                 self,
                 "resolved_bout_id",
@@ -304,18 +445,46 @@ class QuoteEligibilityEvidence:
                     "ineligible QuoteEligibilityEvidence must not use reason='none'"
                 )
 
+        expected_identity = compute_eligibility_decision_identity(
+            quote_id=int(self.quote_id),
+            evaluated_at=evaluated,
+            eligible=bool(self.eligible),
+            reason=str(self.reason),
+            selection_identity=str(self.selection_identity),
+            resolved_bout_id=self.resolved_bout_id,
+            quote_availability_at_decision=availability,
+            quote_freshness_at=freshness,
+            lifecycle_state_at_decision=self.lifecycle_state_at_decision,
+        )
+        if self.decision_identity:
+            supplied = _require_nonempty(
+                self.decision_identity, field="decision_identity"
+            )
+            if supplied != expected_identity:
+                raise IneligiblePriceError(
+                    "eligibility decision_identity does not match content identity "
+                    "(stale/replayed or tampered evidence)"
+                )
+            object.__setattr__(self, "decision_identity", supplied)
+        else:
+            object.__setattr__(self, "decision_identity", expected_identity)
+
 
 @dataclass(frozen=True)
 class ClosingPriceEvidence:
     """Closing price with the same provenance gates as opening evidence.
 
-    Provider close requires quote row + eligible decision. Manual close requires
-    an available timestamped user observation bound to the target bout.
+    Provider close requires quote row + eligible decision evaluated at
+    ``closing_cutoff``. Manual close requires an available timestamped user
+    observation with auditable bout binding. Same-book close is required unless
+    ``allow_cross_book=True`` (explicit policy exception; labeled in provenance).
     """
 
     manual_evidence: ManualObservedPriceEvidence | None = None
     quote_evidence: ProviderQuoteEvidence | None = None
     eligibility_evidence: QuoteEligibilityEvidence | None = None
+    closing_cutoff: datetime | None = None
+    allow_cross_book: bool = CROSS_BOOK_CLOSING_POLICY_DEFAULT
 
     def __post_init__(self) -> None:
         manual = self.manual_evidence
@@ -338,14 +507,40 @@ class ClosingPriceEvidence:
         if manual is not None:
             if manual.price_role is not PriceObservationRole.CLOSING:
                 raise IneligiblePriceError("manual closing evidence requires price_role=closing")
-            if manual.bound_bout_id is None:
+            if manual.bout_binding is None:
                 raise IneligiblePriceError(
-                    "manual closing evidence must be bound to a canonical bout"
+                    "manual closing evidence requires ManualBoutBindingAssertion"
                 )
-        if quote is not None and quote.price_role is not PriceObservationRole.CLOSING:
-            raise IneligiblePriceError(
-                "provider closing evidence requires price_role=closing"
+            cutoff = (
+                manual.observed_at
+                if self.closing_cutoff is None
+                else _require_aware_utc(self.closing_cutoff, field="closing_cutoff")
             )
+            object.__setattr__(self, "closing_cutoff", cutoff)
+            if cutoff != manual.observed_at:
+                raise IneligiblePriceError(
+                    "manual closing_cutoff must equal closing observation observed_at"
+                )
+        if quote is not None:
+            if quote.price_role is not PriceObservationRole.CLOSING:
+                raise IneligiblePriceError(
+                    "provider closing evidence requires price_role=closing"
+                )
+            if self.closing_cutoff is None:
+                raise IneligiblePriceError(
+                    "provider closing evidence requires closing_cutoff"
+                )
+            cutoff = _require_aware_utc(self.closing_cutoff, field="closing_cutoff")
+            object.__setattr__(self, "closing_cutoff", cutoff)
+            assert elig is not None
+            if elig.evaluated_at != cutoff:
+                raise IneligiblePriceError(
+                    "closing eligibility evaluated_at must equal closing_cutoff"
+                )
+            if quote.observed_at > cutoff:
+                raise IneligiblePriceError(
+                    "closing quote observed_at must be <= closing_cutoff"
+                )
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,11 @@ import pytest
 
 from mma_model.domain.markets import MarketFamily, outcomes_for_family
 from mma_model.value.devig import proportional_devig
-from mma_model.value.errors import InvalidOddsError, InvalidProbabilityError
+from mma_model.value.errors import (
+    InvalidMarketSetSpecError,
+    InvalidOddsError,
+    InvalidProbabilityError,
+)
 from mma_model.value.ev import expected_value
 from mma_model.value.kelly import fractional_kelly, quarter_kelly_fraction
 from mma_model.value.odds import american_to_decimal, decimal_to_american
@@ -66,7 +70,7 @@ def test_complete_canonical_devig_sum_property() -> None:
     for family, rounds, line in [
         (MarketFamily.MONEYLINE, None, None),
         (MarketFamily.METHOD, None, None),
-        (MarketFamily.EXACT_ROUND, 3, None),
+        (MarketFamily.GOES_DISTANCE, None, None),
         (MarketFamily.TOTALS, None, 2.5),
     ]:
         keys = [
@@ -79,8 +83,32 @@ def test_complete_canonical_devig_sum_property() -> None:
             scheduled_rounds=rounds,
             line_point=line,
         )
+        assert result.canonical_complete is True
         assert sum(result.fair_probs) == pytest.approx(1.0, abs=1e-12)
         assert math.isfinite(result.overround)
+
+
+def test_exact_round_canonical_devig_rejected_property() -> None:
+    keys = [
+        o.value for o in outcomes_for_family(MarketFamily.EXACT_ROUND, scheduled_rounds=3)
+    ]
+    prices = {k: 3.0 for k in keys}
+    with pytest.raises(InvalidMarketSetSpecError, match="not mutually exhaustive"):
+        proportional_devig(
+            prices,
+            family=MarketFamily.EXACT_ROUND,
+            scheduled_rounds=3,
+        )
+    # Explicit complete set with no-finish atom remains non-canonical.
+    keys_complete = (*keys, "decision")
+    prices_complete = {k: 4.0 for k in keys_complete}
+    prices_complete["decision"] = 1.5
+    result = proportional_devig(
+        prices_complete,
+        expected_outcome_keys=keys_complete,
+    )
+    assert result.canonical_complete is False
+    assert sum(result.fair_probs) == pytest.approx(1.0, abs=1e-12)
 
 
 def test_stake_never_exceeds_hard_cap_property() -> None:

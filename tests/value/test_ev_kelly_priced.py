@@ -25,6 +25,8 @@ from mma_model.value.ev import (
 )
 from mma_model.value.evidence import (
     ClosingPriceEvidence,
+    ManualBindingSource,
+    ManualBoutBindingAssertion,
     ManualObservedPriceEvidence,
     PriceObservationRole,
     PriceProvenanceKind,
@@ -41,6 +43,7 @@ from mma_model.value.kelly import (
 )
 from mma_model.value.portfolio import stake_amount
 from mma_model.value.priced import (
+    MODEL_PROBABILITY_UNIT,
     ROI_UNIT,
     MetricsUnavailableReason,
     PricedValueRequest,
@@ -52,6 +55,20 @@ T0 = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
 T1 = T0 + timedelta(hours=2)
 BOUT_A = "bout-a"
 BOUT_B = "bout-b"
+
+
+def _binding(
+    bout_id: str = BOUT_A,
+    *,
+    at: datetime = T0,
+) -> ManualBoutBindingAssertion:
+    return ManualBoutBindingAssertion(
+        bout_id=bout_id,
+        asserted_at=at,
+        asserted_by="tester",
+        source=ManualBindingSource.USER_ASSERTION,
+        note="test binding",
+    )
 
 
 def _ctx(bout_id: str = BOUT_A) -> ValueSelectionContext:
@@ -70,7 +87,10 @@ def _manual(
     at: datetime = T0,
     bout_id: str | None = BOUT_A,
     role: PriceObservationRole = PriceObservationRole.OPENING,
+    bookmaker_key: str = "manual_book",
+    region: str = "us",
 ) -> ManualObservedPriceEvidence:
+    binding = None if bout_id is None else _binding(bout_id, at=at)
     return ManualObservedPriceEvidence(
         provenance=PriceProvenanceKind.USER_OBSERVED,
         automated=False,
@@ -81,9 +101,9 @@ def _manual(
         price_decimal=price,
         lifecycle="available",
         observed_at=at,
-        bookmaker_key="manual_book",
-        region="us",
-        bound_bout_id=bout_id,
+        bookmaker_key=bookmaker_key,
+        region=region,
+        bout_binding=binding,
         price_role=role,
     )
 
@@ -95,12 +115,14 @@ def _quote(
     bout_id: str | None = BOUT_A,
     at: datetime = T0,
     role: PriceObservationRole = PriceObservationRole.OPENING,
+    bookmaker_key: str = "ref_book",
+    region: str = "us",
 ) -> ProviderQuoteEvidence:
     return ProviderQuoteEvidence(
         quote_id=quote_id,
         provider="the_odds_api",
-        bookmaker_key="ref_book",
-        region="us",
+        bookmaker_key=bookmaker_key,
+        region=region,
         market_family="moneyline",
         outcome_key="fighter_a",
         line_point=None,
@@ -121,6 +143,8 @@ def _elig(
     eligible: bool = True,
     reason: str = "none",
     bout_id: str | None = BOUT_A,
+    evaluated_at: datetime = T0,
+    availability: str = "available",
 ) -> QuoteEligibilityEvidence:
     return QuoteEligibilityEvidence(
         quote_id=quote_id,
@@ -128,6 +152,11 @@ def _elig(
         selection_identity="moneyline:fighter_a",
         resolved_bout_id=bout_id,
         reason=reason,
+        evaluated_at=evaluated_at,
+        quote_availability_at_decision=availability,
+        quote_freshness_at=evaluated_at,
+        lifecycle_state_at_decision="active",
+        decision_version="odds_decision_v1",
     )
 
 
@@ -136,11 +165,20 @@ def _close_manual(
     *,
     at: datetime = T1,
     bout_id: str = BOUT_A,
+    bookmaker_key: str = "manual_book",
+    region: str = "us",
+    allow_cross_book: bool = False,
 ) -> ClosingPriceEvidence:
     return ClosingPriceEvidence(
         manual_evidence=_manual(
-            price, at=at, bout_id=bout_id, role=PriceObservationRole.CLOSING
-        )
+            price,
+            at=at,
+            bout_id=bout_id,
+            role=PriceObservationRole.CLOSING,
+            bookmaker_key=bookmaker_key,
+            region=region,
+        ),
+        allow_cross_book=allow_cross_book,
     )
 
 
@@ -150,6 +188,9 @@ def _close_provider(
     at: datetime = T1,
     bout_id: str = BOUT_A,
     quote_id: int = 9,
+    bookmaker_key: str = "ref_book",
+    region: str = "us",
+    allow_cross_book: bool = False,
 ) -> ClosingPriceEvidence:
     return ClosingPriceEvidence(
         quote_evidence=_quote(
@@ -158,8 +199,17 @@ def _close_provider(
             bout_id=bout_id,
             at=at,
             role=PriceObservationRole.CLOSING,
+            bookmaker_key=bookmaker_key,
+            region=region,
         ),
-        eligibility_evidence=_elig(quote_id=quote_id, eligible=True, bout_id=bout_id),
+        eligibility_evidence=_elig(
+            quote_id=quote_id,
+            eligible=True,
+            bout_id=bout_id,
+            evaluated_at=at,
+        ),
+        closing_cutoff=at,
+        allow_cross_book=allow_cross_book,
     )
 
 
@@ -241,6 +291,7 @@ def test_push_void_profit_and_roi_zero() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             manual_evidence=_manual(2.5),
             settlement=SettlementResult.PUSH,
@@ -266,6 +317,7 @@ def test_unpriced_cannot_produce_metrics_or_roi() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
         )
     )
@@ -283,6 +335,7 @@ def test_unbound_manual_price_cannot_produce_metrics() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             manual_evidence=_manual(bout_id=None),
         )
@@ -297,6 +350,7 @@ def test_cross_bout_manual_price_rejected() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(BOUT_A),
+            valuation_cutoff=T0,
             product_eligible=True,
             manual_evidence=_manual(bout_id=BOUT_B),
         )
@@ -310,6 +364,7 @@ def test_cross_bout_provider_eligibility_rejected() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(BOUT_A),
+            valuation_cutoff=T0,
             product_eligible=True,
             quote_evidence=_quote(bout_id=BOUT_B),
             eligibility_evidence=_elig(eligible=True, bout_id=BOUT_B),
@@ -324,12 +379,14 @@ def test_match_gate_alone_insufficient_for_provider_quote() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             quote_evidence=_quote(),
             eligibility_evidence=_elig(
                 eligible=False,
                 reason="unmatched",
                 bout_id=None,
+                availability="unknown",
             ),
         )
     )
@@ -345,6 +402,8 @@ def test_eligible_true_requires_resolved_bout_and_reason_none() -> None:
             selection_identity="moneyline:fighter_a",
             resolved_bout_id=None,
             reason="none",
+            evaluated_at=T0,
+            quote_availability_at_decision="available",
         )
     with pytest.raises(IneligiblePriceError, match="reason='none'"):
         QuoteEligibilityEvidence(
@@ -353,6 +412,8 @@ def test_eligible_true_requires_resolved_bout_and_reason_none() -> None:
             selection_identity="moneyline:fighter_a",
             resolved_bout_id=BOUT_A,
             reason="stale",
+            evaluated_at=T0,
+            quote_availability_at_decision="available",
         )
     with pytest.raises(IneligiblePriceError, match="must not use reason='none'"):
         QuoteEligibilityEvidence(
@@ -361,6 +422,8 @@ def test_eligible_true_requires_resolved_bout_and_reason_none() -> None:
             selection_identity="moneyline:fighter_a",
             resolved_bout_id=None,
             reason="none",
+            evaluated_at=T0,
+            quote_availability_at_decision="unknown",
         )
 
 
@@ -369,6 +432,7 @@ def test_provider_close_requires_eligibility_not_naked_dto() -> None:
         ClosingPriceEvidence(
             quote_evidence=_quote(role=PriceObservationRole.CLOSING),
             eligibility_evidence=None,
+            closing_cutoff=T1,
         )
 
 
@@ -377,6 +441,7 @@ def test_eligible_provider_quote_emits_priced_metrics_and_roi() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             quote_evidence=_quote(price=2.20),
             eligibility_evidence=_elig(eligible=True),
@@ -393,8 +458,16 @@ def test_eligible_provider_quote_emits_priced_metrics_and_roi() -> None:
     assert row.flat_unit_profit == pytest.approx(1.20)
     assert row.realized_roi == pytest.approx(row.flat_unit_profit)
     assert row.realized_roi_unit == ROI_UNIT
+    assert row.model_probability_unit == MODEL_PROBABILITY_UNIT
     assert row.stake_fraction is not None
     assert row.stake_fraction <= DEFAULT_BANKROLL_CAP_FRACTION
+    assert row.opening_provenance is not None
+    assert row.opening_provenance.source_kind == "provider_quote"
+    assert row.opening_provenance.eligibility_evaluated_at == T0.isoformat()
+    assert row.closing_provenance is not None
+    assert row.closing_provenance.bookmaker_key == "ref_book"
+    assert row.closing_provenance.cross_book_closing is False
+    assert row.bankroll_cap_fraction == DEFAULT_BANKROLL_CAP_FRACTION
 
 
 def test_user_observed_priced_path_and_missing_close() -> None:
@@ -402,6 +475,7 @@ def test_user_observed_priced_path_and_missing_close() -> None:
         PricedValueRequest(
             model_prob=0.50,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             manual_evidence=_manual(2.20),
         )
@@ -413,6 +487,8 @@ def test_user_observed_priced_path_and_missing_close() -> None:
     assert row.probability_clv is None
     assert row.realized_roi is None
     assert row.realized_roi_reason is MetricsUnavailableReason.UNRESOLVED_SETTLEMENT
+    assert row.opening_provenance is not None
+    assert row.opening_provenance.manual_binding_source == "user_assertion"
 
 
 def test_same_timestamp_close_suppresses_clv() -> None:
@@ -420,6 +496,7 @@ def test_same_timestamp_close_suppresses_clv() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             manual_evidence=_manual(2.20, at=T0),
             closing_evidence=_close_manual(2.00, at=T0),
@@ -437,6 +514,7 @@ def test_unresolved_preserves_ev_clv_stake_suppresses_profit_and_roi() -> None:
         PricedValueRequest(
             model_prob=0.55,
             target_context=_ctx(),
+            valuation_cutoff=T0,
             product_eligible=True,
             manual_evidence=_manual(2.20),
             closing_evidence=_close_manual(2.00),
@@ -460,3 +538,139 @@ def test_value_selection_context_is_fight_unique() -> None:
     assert a.market_selection_identity == b.market_selection_identity
     assert a.value_selection_identity != b.value_selection_identity
     assert a.value_selection_identity.startswith(f"{BOUT_A}|")
+
+
+def test_stale_eligibility_after_lock_rejected() -> None:
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T1,
+            product_eligible=True,
+            quote_evidence=_quote(at=T0),
+            # Decision evaluated at older opening time, not at valuation cutoff.
+            eligibility_evidence=_elig(eligible=True, evaluated_at=T0),
+        )
+    )
+    assert row.available is False
+    assert row.reason is MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH
+
+
+def test_locked_eligibility_at_cutoff_blocks_metrics() -> None:
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T1,
+            product_eligible=True,
+            quote_evidence=_quote(at=T0),
+            eligibility_evidence=_elig(
+                eligible=False,
+                reason="locked",
+                bout_id=None,
+                evaluated_at=T1,
+                availability="available",
+            ),
+        )
+    )
+    assert row.available is False
+    assert row.reason is MetricsUnavailableReason.STALE_ELIGIBILITY_EVIDENCE
+
+
+def test_replaced_and_review_blocked_eligibility_rejected() -> None:
+    for reason in ("replaced", "review_blocked", "unknown_availability"):
+        row = compute_priced_value_metrics(
+            PricedValueRequest(
+                model_prob=0.55,
+                target_context=_ctx(),
+                valuation_cutoff=T0,
+                product_eligible=True,
+                quote_evidence=_quote(),
+                eligibility_evidence=_elig(
+                    eligible=False,
+                    reason=reason,
+                    bout_id=None,
+                    availability="unknown",
+                ),
+            )
+        )
+        assert row.available is False
+        assert row.reason is MetricsUnavailableReason.STALE_ELIGIBILITY_EVIDENCE
+
+
+def test_tampered_decision_identity_rejected() -> None:
+    with pytest.raises(IneligiblePriceError, match="decision_identity"):
+        QuoteEligibilityEvidence(
+            quote_id=1,
+            eligible=True,
+            selection_identity="moneyline:fighter_a",
+            resolved_bout_id=BOUT_A,
+            reason="none",
+            evaluated_at=T0,
+            quote_availability_at_decision="available",
+            decision_identity="elig_v1:deadbeef",
+        )
+
+
+def test_cross_book_close_disallowed_by_default() -> None:
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T0,
+            product_eligible=True,
+            quote_evidence=_quote(bookmaker_key="ref_book"),
+            eligibility_evidence=_elig(eligible=True),
+            closing_evidence=_close_provider(
+                2.00,
+                bookmaker_key="other_book",
+                allow_cross_book=False,
+            ),
+        )
+    )
+    assert row.available is True
+    assert row.probability_clv is None
+    assert (
+        row.probability_clv_reason
+        is MetricsUnavailableReason.CROSS_BOOK_CLOSING_DISALLOWED
+    )
+
+
+def test_cross_book_close_allowed_when_policy_explicit() -> None:
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T0,
+            product_eligible=True,
+            quote_evidence=_quote(bookmaker_key="ref_book"),
+            eligibility_evidence=_elig(eligible=True),
+            closing_evidence=_close_provider(
+                2.00,
+                bookmaker_key="other_book",
+                allow_cross_book=True,
+            ),
+        )
+    )
+    assert row.available is True
+    assert row.probability_clv is not None
+    assert row.closing_provenance is not None
+    assert row.closing_provenance.cross_book_closing is True
+    assert row.closing_provenance.bookmaker_key == "other_book"
+
+
+def test_opening_before_closing_required_for_clv() -> None:
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T1,
+            product_eligible=True,
+            quote_evidence=_quote(at=T1, bout_id=BOUT_A),
+            eligibility_evidence=_elig(eligible=True, evaluated_at=T1),
+            closing_evidence=_close_provider(2.00, at=T0),
+        )
+    )
+    assert row.available is True
+    assert row.probability_clv is None
+    assert row.probability_clv_reason is MetricsUnavailableReason.EVIDENCE_MISMATCH

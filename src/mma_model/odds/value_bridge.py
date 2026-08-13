@@ -2,31 +2,35 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from mma_model.db.tables.odds import OddsQuote
 from mma_model.odds.lifecycle import QuoteEligibilityDecision
 from mma_model.odds.manual_price import ObservedPrice, PriceSourceKind, canonical_selection_identity
 from mma_model.value.errors import IneligiblePriceError
 from mma_model.value.evidence import (
     ClosingPriceEvidence,
+    ManualBoutBindingAssertion,
     ManualObservedPriceEvidence,
     PriceObservationRole,
     PriceProvenanceKind,
     ProviderQuoteEvidence,
     QuoteEligibilityEvidence,
     ValueSelectionContext,
+    validate_catalog_selection,
 )
 
 
 def manual_evidence_from_observed(
     observed: ObservedPrice,
     *,
-    bound_bout_id: str | None,
+    bout_binding: ManualBoutBindingAssertion | None,
     price_role: PriceObservationRole = PriceObservationRole.OPENING,
 ) -> ManualObservedPriceEvidence:
     """Build manual priced evidence from a DWCS-202 ObservedPrice.
 
-    ``bound_bout_id`` is required before metrics; stored unmatched rows may pass
-    ``None`` but cannot produce EV/ROI/CLV until rebound.
+    Bout binding is an auditable ``ManualBoutBindingAssertion`` (actor/time/source).
+    Unmatched stored rows may pass ``bout_binding=None`` but cannot produce metrics.
     """
     if observed.source_kind is not PriceSourceKind.USER_OBSERVED:
         raise IneligiblePriceError("manual evidence requires user_observed ObservedPrice")
@@ -47,33 +51,75 @@ def manual_evidence_from_observed(
         observed_at=observed.observed_at,
         bookmaker_key=observed.bookmaker_key,
         region=observed.region,
-        bound_bout_id=bound_bout_id,
+        bout_binding=bout_binding,
         price_role=price_role,
+    )
+
+
+def eligibility_evidence_from_decision(
+    decision: QuoteEligibilityDecision,
+    *,
+    evaluated_at: datetime,
+    quote_availability_at_decision: str,
+    lifecycle_state_at_decision: str | None = None,
+    decision_version: str | None = None,
+) -> QuoteEligibilityEvidence:
+    """Build time-bound eligibility evidence from a DWCS-203 decision.
+
+    ``evaluated_at`` is the valuation/closing cutoff at which the decision applies.
+    Caller must not reuse a decision older than the valuation cutoff in use.
+    """
+    return QuoteEligibilityEvidence(
+        quote_id=int(decision.quote_id),
+        eligible=bool(decision.eligible),
+        selection_identity=str(decision.selection_identity),
+        resolved_bout_id=decision.resolved_bout_id,
+        reason=decision.reason.value,
+        evaluated_at=evaluated_at,
+        quote_availability_at_decision=quote_availability_at_decision,
+        quote_freshness_at=decision.freshness_at,
+        lifecycle_state_at_decision=lifecycle_state_at_decision,
+        decision_version=decision_version,
     )
 
 
 def quote_evidence_from_row(
     quote: OddsQuote,
     *,
-    bout_id: str | None,
-    selection_identity: str | None = None,
+    eligibility: QuoteEligibilityEvidence,
     price_role: PriceObservationRole = PriceObservationRole.OPENING,
 ) -> ProviderQuoteEvidence:
-    """Build provider quote evidence from a persisted OddsQuote row."""
+    """Build provider quote evidence deriving bout/selection from quote+eligibility.
+
+    Caller-supplied bout/selection identity is not accepted. Selection is derived
+    from quote catalog fields and must exactly match ``eligibility.selection_identity``.
+    Bout is taken from ``eligibility.resolved_bout_id`` when eligible.
+    """
     if quote.id is None:
         raise IneligiblePriceError("quote row must be persisted (quote.id required)")
-    market_id = selection_identity or (
-        f"{quote.market_family}:{quote.outcome_key}"
-        if quote.line_point is None
-        else f"{quote.market_family}:{quote.outcome_key}:{float(quote.line_point)}"
+    if int(quote.id) != int(eligibility.quote_id):
+        raise IneligiblePriceError(
+            "quote.id must equal eligibility.quote_id "
+            f"(got {quote.id!r} vs {eligibility.quote_id!r})"
+        )
+    _family, _outcome, market_id = validate_catalog_selection(
+        str(quote.market_family),
+        str(quote.outcome_key),
+        quote.line_point,
     )
+    if market_id != eligibility.selection_identity:
+        raise IneligiblePriceError(
+            "quote-derived selection must exactly match eligibility.selection_identity: "
+            f"{market_id!r} vs {eligibility.selection_identity!r}"
+        )
+    bout_id = eligibility.resolved_bout_id if eligibility.eligible else None
     return ProviderQuoteEvidence(
         quote_id=int(quote.id),
         provider=str(quote.provider),
         bookmaker_key=str(quote.bookmaker_key),
         region=str(quote.region),
-        market_family=str(quote.market_family),
-        outcome_key=str(quote.outcome_key),
+        market_family=_family.value,
+        outcome_key=_outcome.value,
         line_point=quote.line_point,
         selection_identity=market_id,
         price_decimal=float(quote.price_decimal),
@@ -88,29 +134,16 @@ def quote_evidence_from_row(
     )
 
 
-def eligibility_evidence_from_decision(
-    decision: QuoteEligibilityDecision,
-) -> QuoteEligibilityEvidence:
-    """Build eligibility evidence from a DWCS-203 QuoteEligibilityDecision."""
-    return QuoteEligibilityEvidence(
-        quote_id=int(decision.quote_id),
-        eligible=bool(decision.eligible),
-        selection_identity=str(decision.selection_identity),
-        resolved_bout_id=decision.resolved_bout_id,
-        reason=decision.reason.value,
-    )
-
-
 def closing_evidence_from_manual(
     observed: ObservedPrice,
     *,
-    bound_bout_id: str,
+    bout_binding: ManualBoutBindingAssertion,
 ) -> ClosingPriceEvidence:
     """Closing CLV evidence from a bound user-observed available price."""
     return ClosingPriceEvidence(
         manual_evidence=manual_evidence_from_observed(
             observed,
-            bound_bout_id=bound_bout_id,
+            bout_binding=bout_binding,
             price_role=PriceObservationRole.CLOSING,
         )
     )
@@ -119,17 +152,30 @@ def closing_evidence_from_manual(
 def closing_evidence_from_provider(
     quote: OddsQuote,
     decision: QuoteEligibilityDecision,
+    *,
+    closing_cutoff: datetime,
+    quote_availability_at_decision: str,
+    lifecycle_state_at_decision: str | None = None,
+    decision_version: str | None = None,
+    allow_cross_book: bool = False,
 ) -> ClosingPriceEvidence:
-    """Closing CLV evidence from quote row + eligible DWCS-203 decision."""
-    elig = eligibility_evidence_from_decision(decision)
+    """Closing CLV evidence from quote row + eligible DWCS-203 decision at cutoff."""
+    elig = eligibility_evidence_from_decision(
+        decision,
+        evaluated_at=closing_cutoff,
+        quote_availability_at_decision=quote_availability_at_decision,
+        lifecycle_state_at_decision=lifecycle_state_at_decision,
+        decision_version=decision_version,
+    )
     return ClosingPriceEvidence(
         quote_evidence=quote_evidence_from_row(
             quote,
-            bout_id=elig.resolved_bout_id,
-            selection_identity=elig.selection_identity,
+            eligibility=elig,
             price_role=PriceObservationRole.CLOSING,
         ),
         eligibility_evidence=elig,
+        closing_cutoff=closing_cutoff,
+        allow_cross_book=allow_cross_book,
     )
 
 

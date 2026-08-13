@@ -8,6 +8,8 @@ import pytest
 
 from mma_model.value.errors import IneligiblePriceError
 from mma_model.value.evidence import (
+    ManualBindingSource,
+    ManualBoutBindingAssertion,
     ManualObservedPriceEvidence,
     PriceProvenanceKind,
     ProviderQuoteEvidence,
@@ -68,8 +70,41 @@ def test_manual_evidence_rejects_self_consistent_nonsense() -> None:
             observed_at=T0,
             bookmaker_key="book",
             region="us",
-            bound_bout_id="bout-1",
+            bout_binding=ManualBoutBindingAssertion(
+                bout_id="bout-1",
+                asserted_at=T0,
+                asserted_by="tester",
+                source=ManualBindingSource.OPERATOR_ASSERTION,
+            ),
         )
+
+
+def test_manual_binding_is_auditable_user_assertion() -> None:
+    binding = ManualBoutBindingAssertion(
+        bout_id="bout-1",
+        asserted_at=T0,
+        asserted_by="aidan",
+        source=ManualBindingSource.USER_ASSERTION,
+        note="matched from screenshot",
+    )
+    evidence = ManualObservedPriceEvidence(
+        provenance=PriceProvenanceKind.USER_OBSERVED,
+        automated=False,
+        market_family="moneyline",
+        outcome_key="fighter_a",
+        line_point=None,
+        selection_identity="moneyline:fighter_a",
+        price_decimal=2.0,
+        lifecycle="available",
+        observed_at=T0,
+        bookmaker_key="book",
+        region="us",
+        bout_binding=binding,
+    )
+    assert evidence.bound_bout_id == "bout-1"
+    assert evidence.bout_binding is not None
+    assert evidence.bout_binding.source is ManualBindingSource.USER_ASSERTION
+    assert evidence.bout_binding.asserted_by == "aidan"
 
 
 def test_provider_evidence_rejects_bad_totals_line() -> None:
@@ -98,4 +133,19 @@ def test_eligibility_rejects_non_catalog_selection_identity() -> None:
             selection_identity="foo:bar",
             resolved_bout_id=None,
             reason="unmatched",
+            evaluated_at=T0,
+            quote_availability_at_decision="unknown",
         )
+
+
+def test_eligibility_auto_fills_decision_identity() -> None:
+    elig = QuoteEligibilityEvidence(
+        quote_id=1,
+        eligible=True,
+        selection_identity="moneyline:fighter_a",
+        resolved_bout_id="bout-1",
+        reason="none",
+        evaluated_at=T0,
+        quote_availability_at_decision="available",
+    )
+    assert elig.decision_identity.startswith("elig_v1:")

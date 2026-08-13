@@ -144,6 +144,9 @@ Quality tiers (overall): **gold** = qualifying direct/revision timestamp evidenc
 - **fighter_by_method:** `a_*` / `b_*` method atoms
 - **exact_round:** schedule-specific — 3-round bouts use `round_1`…`round_3`;
   5-round bouts use `round_1`…`round_5`. Out-of-schedule selections are rejected.
+  Catalog round keys alone are **not** a mutually exhaustive fight-outcome set
+  (decision/no-finish exists); DWCS-204 will not treat round-only prices as a
+  canonical complete de-vig set (see Value math section).
 
 Market-family maturity is `qualified` / `experimental` / `blocked`. Failed or
 non-qualified families may not emit `confirmed_value` or `price_target`.
@@ -299,11 +302,12 @@ Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exa
 | **Package** | `mma_model.value` (`odds`, `devig`, `thresholds`, `ev`, `kelly`, `portfolio`, `priced`, `evidence`) |
 | **Method / version** | `VALUE_MATH_METHOD=dwcs_value_math` / `VALUE_MATH_VERSION=1.0.0`; de-vig `proportional_complete_set` `1.0.0` |
 | **Odds interface** | Validated finite decimal (`> 1`) and American (`<= -100` or `>= +100`); reject `0` American; calibrated probs strictly `(0, 1)` |
-| **De-vig** | Canonical completeness requires DWCS-200 family (+ `scheduled_rounds` / totals `line_point`) and the exact catalog outcome-key set; invalid odds raise `InvalidOddsError`; incomplete sets return `IncompleteMarketSet`. Totals lines are separate over/under sets. Generic API requires explicit `expected_outcome_keys` and never claims canonical completeness without a family. Overround unit = probability mass (`sum(implied) - 1`). |
+| **De-vig** | Canonical completeness requires an *exhaustive* DWCS-200 family (+ totals `line_point`) and the exact catalog outcome-key set. **Exact-round catalog keys (`round_1`…`round_N`) are not mutually exhaustive** (decisions/no-finish make every round selection lose); canonical `family=exact_round` de-vig fails explicitly. Unconditional fair probs for rounds require the generic API with `expected_outcome_keys` that include an explicit no-finish atom (`decision` / `goes_distance` / `no_finish` / `decision_or_draw`) and are labeled `canonical_complete=False` with `probability_conditioning=unconditional_explicit_complete_set`. Round-only sets must not be normalized to 1 and called fair. Generic de-vig always sets `canonical_complete=False`. Overround unit = probability mass (`sum(implied) - 1`) under the stated conditioning (not a percent). |
 | **Thresholds** | Fair `1/p50`, p25 break-even, actionable `max(1/p25,(1+target)/p50)`, strong-value at 10% (exact-round actionable 10%) — pinned to DWCS-001 formulas |
 | **Value selection** | Fight-unique `ValueSelectionContext`: `bout_id|family:outcome[:line]`. Target context is required on every priced request. |
-| **Priced metrics** | Require typed provenance evidence (DWCS-202 `ManualObservedPriceEvidence` bound to target bout, or quote + DWCS-203 `QuoteEligibilityEvidence` whose resolved bout equals target). Booleans alone cannot grant metrics. Closing prices use `ClosingPriceEvidence` with the same provenance gates (provider close needs quote+eligible decision). |
-| **CLV unit** | Probability points (`implied(close) - implied(bet)`), not percent and not a price ratio. Closing timestamp must be strictly after bet; equal timestamps are non-closing and suppress CLV. |
+| **Priced metrics** | Require typed provenance + `valuation_cutoff`. Manual: DWCS-202 evidence with auditable `ManualBoutBindingAssertion` (actor/time/`user_assertion|operator_assertion`). Provider: quote + DWCS-203 `QuoteEligibilityEvidence` with `evaluated_at`/`decision_identity`/`quote_availability_at_decision` bound to the valuation cutoff (stale/replayed/locked/replaced/review-blocked decisions rejected). Bridge derives bout/selection from quote+eligibility (no caller-supplied identity override). Closing uses `ClosingPriceEvidence` with its own `closing_cutoff` + eligibility. Metrics include safe opening/closing provenance summaries (source kind, quote id, provider/book/region, observed_at, eligibility evaluated_at/reason/identity/version; model/CLV/ROI units; bankroll cap). No secrets/full payloads. |
+| **Closing book policy** | Default **same book+region** as opening. Cross-book close only when `allow_cross_book=True` (explicit policy exception); provenance labels `cross_book_closing` and closing book/region. Opening observation must be strictly before closing; equal timestamps suppress CLV (`NON_CLOSING_SAME_TIMESTAMP`). |
+| **CLV unit** | Probability points (`implied(close) - implied(bet)`), not percent and not a price ratio. |
 | **ROI** | Per-bet realized ROI = flat 1-unit profit / 1-unit stake (numerically equal to flat-unit profit); unit `unit_profit_per_unit_stake`. Push/void ROI=0; unresolved/unpriced/ineligible → unavailable. |
 | **Partial availability** | Unresolved settlement suppresses realized profit/ROI only; missing close suppresses CLV/closing EV only (`MISSING_CLOSING_PRICE`) |
 | **Kelly** | Production quarter fraction fixed at 0.25; hard max bankroll cap `0.01` (cannot raise) |

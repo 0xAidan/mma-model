@@ -2,20 +2,23 @@
 
 Unpriced price-target rows never receive EV / CLV / ROI / realized profit / stake.
 Caller booleans alone cannot grant metrics. ``PricedValueRequest`` names a
-bout-scoped ``ValueSelectionContext``. Manual prices require DWCS-202 evidence
-bound to that bout; provider quotes require quote evidence plus matching
-DWCS-203 eligibility whose resolved bout equals the target.
+bout-scoped ``ValueSelectionContext`` and a ``valuation_cutoff``. Manual prices
+require DWCS-202 evidence with an auditable bout binding; provider quotes require
+quote evidence plus matching DWCS-203 eligibility evaluated at that cutoff
+(never older / replayed). Closing evidence uses its own closing cutoff.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
 from mma_model.markets.settlement import SettlementResult
 from mma_model.value.errors import (
     IneligiblePriceError,
+    InvalidOddsError,
     SelectionMismatchError,
     UnpricedMetricsError,
 )
@@ -47,6 +50,7 @@ from mma_model.value.portfolio import capped_stake_fraction
 PRICED_METRICS_METHOD: Final = "priced_value_metrics"
 PRICED_METRICS_VERSION: Final = "1.0.0"
 ROI_UNIT: Final = "unit_profit_per_unit_stake"
+MODEL_PROBABILITY_UNIT: Final = "probability_open_unit_interval"
 
 
 class PriceSourceKind(StrEnum):
@@ -69,19 +73,46 @@ class MetricsUnavailableReason(StrEnum):
     MISSING_CLOSING_PRICE = "missing_closing_price"
     NON_CLOSING_SAME_TIMESTAMP = "non_closing_same_timestamp"
     UNRESOLVED_SETTLEMENT = "unresolved_settlement"
+    STALE_ELIGIBILITY_EVIDENCE = "stale_eligibility_evidence"
+    ELIGIBILITY_CUTOFF_MISMATCH = "eligibility_cutoff_mismatch"
+    CROSS_BOOK_CLOSING_DISALLOWED = "cross_book_closing_disallowed"
+    MISSING_VALUATION_CUTOFF = "missing_valuation_cutoff"
+
+
+@dataclass(frozen=True)
+class PriceProvenanceSummary:
+    """Safe reproducibility summary (no secrets / full payloads)."""
+
+    role: str
+    source_kind: str
+    quote_id: int | None
+    provider: str | None
+    bookmaker_key: str | None
+    region: str | None
+    observed_at: str | None
+    eligibility_evaluated_at: str | None
+    eligibility_reason: str | None
+    eligibility_decision_identity: str | None
+    eligibility_decision_version: str | None = None
+    manual_binding_actor: str | None = None
+    manual_binding_source: str | None = None
+    manual_binding_asserted_at: str | None = None
+    cross_book_closing: bool | None = None
 
 
 @dataclass(frozen=True)
 class PricedValueRequest:
     """Inputs for gated EV / CLV / profit / ROI / stake computation.
 
-    ``target_context`` is required. Provide either ``manual_evidence`` (DWCS-202)
-    or both ``quote_evidence`` and ``eligibility_evidence`` (DWCS-203). Closing
-    prices use ``closing_evidence`` with the same provenance gates.
+    ``target_context`` and ``valuation_cutoff`` are required for provider paths.
+    Manual paths also require ``valuation_cutoff`` (>= observation time).
+    Provide either ``manual_evidence`` (DWCS-202) or both ``quote_evidence`` and
+    ``eligibility_evidence`` (DWCS-203). Closing prices use ``closing_evidence``.
     """
 
     model_prob: float
     target_context: ValueSelectionContext
+    valuation_cutoff: datetime
     product_eligible: bool = False
     manual_evidence: ManualObservedPriceEvidence | None = None
     quote_evidence: ProviderQuoteEvidence | None = None
@@ -90,10 +121,14 @@ class PricedValueRequest:
     settlement: SettlementResult | None = None
     bankroll_cap_fraction: float = DEFAULT_BANKROLL_CAP_FRACTION
 
+    def __post_init__(self) -> None:
+        if self.valuation_cutoff.tzinfo is None:
+            raise InvalidOddsError("valuation_cutoff must be timezone-aware")
+
 
 @dataclass(frozen=True)
 class PricedValueMetrics:
-    """Typed priced metrics with per-metric availability reasons."""
+    """Typed priced metrics with per-metric availability and provenance summary."""
 
     available: bool
     method: str
@@ -124,6 +159,11 @@ class PricedValueMetrics:
     stake_fraction: float | None = None
     stake_reason: MetricsUnavailableReason = MetricsUnavailableReason.NONE
     detail: str = ""
+    opening_provenance: PriceProvenanceSummary | None = None
+    closing_provenance: PriceProvenanceSummary | None = None
+    model_probability_unit: str = MODEL_PROBABILITY_UNIT
+    bankroll_cap_fraction: float | None = None
+    valuation_cutoff: str | None = None
 
     def require_available(self) -> PricedValueMetrics:
         if self.available and self.expected_value is not None:
@@ -133,11 +173,16 @@ class PricedValueMetrics:
         raise IneligiblePriceError(self.detail or self.reason.value)
 
 
+def _iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
 def _unavailable(
     reason: MetricsUnavailableReason,
     *,
     detail: str = "",
     target_value_selection_identity: str | None = None,
+    valuation_cutoff: datetime | None = None,
 ) -> PricedValueMetrics:
     return PricedValueMetrics(
         available=False,
@@ -161,6 +206,54 @@ def _unavailable(
         stake_fraction=None,
         stake_reason=reason,
         detail=detail,
+        valuation_cutoff=_iso(valuation_cutoff),
+    )
+
+
+def _manual_provenance(
+    evidence: ManualObservedPriceEvidence,
+    *,
+    role: str,
+) -> PriceProvenanceSummary:
+    binding = evidence.bout_binding
+    return PriceProvenanceSummary(
+        role=role,
+        source_kind=PriceSourceKind.USER_OBSERVED.value,
+        quote_id=None,
+        provider=None,
+        bookmaker_key=evidence.bookmaker_key,
+        region=evidence.region,
+        observed_at=_iso(evidence.observed_at),
+        eligibility_evaluated_at=None,
+        eligibility_reason=None,
+        eligibility_decision_identity=None,
+        manual_binding_actor=None if binding is None else binding.asserted_by,
+        manual_binding_source=None if binding is None else binding.source.value,
+        manual_binding_asserted_at=None if binding is None else _iso(binding.asserted_at),
+        cross_book_closing=None,
+    )
+
+
+def _provider_provenance(
+    quote: ProviderQuoteEvidence,
+    eligibility: QuoteEligibilityEvidence,
+    *,
+    role: str,
+    cross_book_closing: bool | None = None,
+) -> PriceProvenanceSummary:
+    return PriceProvenanceSummary(
+        role=role,
+        source_kind=PriceSourceKind.PROVIDER_QUOTE.value,
+        quote_id=quote.quote_id,
+        provider=quote.provider,
+        bookmaker_key=quote.bookmaker_key,
+        region=quote.region,
+        observed_at=_iso(quote.observed_at),
+        eligibility_evaluated_at=_iso(eligibility.evaluated_at),
+        eligibility_reason=eligibility.reason,
+        eligibility_decision_identity=eligibility.decision_identity,
+        eligibility_decision_version=eligibility.decision_version,
+        cross_book_closing=cross_book_closing,
     )
 
 
@@ -217,6 +310,7 @@ def _validate_provider_pair(
     eligibility: QuoteEligibilityEvidence,
     *,
     target: ValueSelectionContext,
+    required_cutoff: datetime,
 ) -> MetricsUnavailableReason | None:
     if int(quote.quote_id) != int(eligibility.quote_id):
         return MetricsUnavailableReason.EVIDENCE_MISMATCH
@@ -226,14 +320,37 @@ def _validate_provider_pair(
         return MetricsUnavailableReason.CONTEXT_MISMATCH
     if eligibility.selection_identity != target.market_selection_identity:
         return MetricsUnavailableReason.CONTEXT_MISMATCH
+    if eligibility.evaluated_at != required_cutoff:
+        return MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH
+    if quote.observed_at > required_cutoff:
+        return MetricsUnavailableReason.STALE_ELIGIBILITY_EVIDENCE
+    if eligibility.eligible and eligibility.quote_availability_at_decision != "available":
+        return MetricsUnavailableReason.STALE_ELIGIBILITY_EVIDENCE
+    if eligibility.eligible and quote.availability != "available":
+        return MetricsUnavailableReason.QUOTE_INELIGIBLE
+    # Blocking lifecycle / availability reasons after an older eligible decision.
     if not eligibility.eligible:
         if eligibility.reason in {"unmatched", "latest_match_not_matched"}:
             return MetricsUnavailableReason.MATCH_GATE_ONLY
+        if eligibility.reason in {
+            "stale",
+            "locked",
+            "selection_locked",
+            "replaced",
+            "review_blocked",
+            "unknown_availability",
+            "market_unknown",
+            "quote_unavailable",
+            "bout_terminal",
+            "terminal_lifecycle",
+            "not_visible",
+        }:
+            return MetricsUnavailableReason.STALE_ELIGIBILITY_EVIDENCE
         return MetricsUnavailableReason.QUOTE_INELIGIBLE
-    # eligible path already requires resolved_bout_id + reason=none at DTO level
     assert eligibility.resolved_bout_id is not None
     if eligibility.resolved_bout_id != target.bout_id:
         return MetricsUnavailableReason.CONTEXT_MISMATCH
+    # Bout must be derived from eligibility; quote bout if present must match.
     if quote.bout_id is not None and quote.bout_id != eligibility.resolved_bout_id:
         return MetricsUnavailableReason.EVIDENCE_MISMATCH
     return None
@@ -241,8 +358,12 @@ def _validate_provider_pair(
 
 def _resolve_opening(
     request: PricedValueRequest,
-) -> tuple[SelectionPriceObservation, PriceSourceKind] | PricedValueMetrics:
+) -> (
+    tuple[SelectionPriceObservation, PriceSourceKind, PriceProvenanceSummary]
+    | PricedValueMetrics
+):
     target = request.target_context
+    cutoff = request.valuation_cutoff
     manual = request.manual_evidence
     quote = request.quote_evidence
     eligibility = request.eligibility_evidence
@@ -252,30 +373,35 @@ def _resolve_opening(
             MetricsUnavailableReason.UNPRICED_TARGET,
             detail="unpriced targets cannot produce EV/ROI/CLV/realized profit/stake",
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
     if manual is not None and (quote is not None or eligibility is not None):
         return _unavailable(
             MetricsUnavailableReason.EVIDENCE_MISMATCH,
             detail="provide either manual_evidence or quote+eligibility evidence, not both",
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
     if quote is not None and eligibility is None:
         return _unavailable(
             MetricsUnavailableReason.QUOTE_INELIGIBLE,
             detail="provider quotes require QuoteEligibilityEvidence from DWCS-203",
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
     if eligibility is not None and quote is None:
         return _unavailable(
             MetricsUnavailableReason.EVIDENCE_MISMATCH,
             detail="eligibility evidence requires matching ProviderQuoteEvidence",
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
     if not request.product_eligible:
         return _unavailable(
             MetricsUnavailableReason.PRODUCT_INELIGIBLE,
             detail="selection failed product gates or maturity",
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
 
     if manual is not None:
@@ -284,34 +410,49 @@ def _resolve_opening(
                 MetricsUnavailableReason.EVIDENCE_MISMATCH,
                 detail="opening manual evidence requires price_role=opening",
                 target_value_selection_identity=target.value_selection_identity,
+                valuation_cutoff=cutoff,
             )
-        if manual.bound_bout_id is None:
+        if manual.bout_binding is None:
             return _unavailable(
                 MetricsUnavailableReason.UNBOUND_MANUAL_PRICE,
                 detail=(
-                    "manual price is unbound; bind to the target canonical bout "
-                    "before exact EV/ROI/CLV"
+                    "manual price is unbound; require ManualBoutBindingAssertion "
+                    "(user_assertion|operator_assertion) before exact EV/ROI/CLV"
                 ),
                 target_value_selection_identity=target.value_selection_identity,
+                valuation_cutoff=cutoff,
             )
         if manual.bound_bout_id != target.bout_id:
             return _unavailable(
                 MetricsUnavailableReason.CONTEXT_MISMATCH,
                 detail=(
-                    "manual bound_bout_id does not match target context bout "
+                    "manual bout binding does not match target context bout "
                     f"({manual.bound_bout_id!r} vs {target.bout_id!r})"
                 ),
                 target_value_selection_identity=target.value_selection_identity,
+                valuation_cutoff=cutoff,
             )
         if manual.selection_identity != target.market_selection_identity:
             return _unavailable(
                 MetricsUnavailableReason.CONTEXT_MISMATCH,
                 detail="manual market selection does not match target context",
                 target_value_selection_identity=target.value_selection_identity,
+                valuation_cutoff=cutoff,
+            )
+        if cutoff < manual.observed_at:
+            return _unavailable(
+                MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH,
+                detail="valuation_cutoff must be >= manual opening observed_at",
+                target_value_selection_identity=target.value_selection_identity,
+                valuation_cutoff=cutoff,
             )
         opening = _observation_from_manual(manual, bout_id=target.bout_id)
         assert_matches_context(opening, target)
-        return opening, PriceSourceKind.USER_OBSERVED
+        return (
+            opening,
+            PriceSourceKind.USER_OBSERVED,
+            _manual_provenance(manual, role="opening"),
+        )
 
     assert quote is not None and eligibility is not None
     if quote.price_role is not PriceObservationRole.OPENING:
@@ -319,8 +460,11 @@ def _resolve_opening(
             MetricsUnavailableReason.EVIDENCE_MISMATCH,
             detail="opening provider evidence requires price_role=opening",
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
-    mismatch = _validate_provider_pair(quote, eligibility, target=target)
+    mismatch = _validate_provider_pair(
+        quote, eligibility, target=target, required_cutoff=cutoff
+    )
     if mismatch is not None:
         detail = {
             MetricsUnavailableReason.MATCH_GATE_ONLY: (
@@ -336,48 +480,127 @@ def _resolve_opening(
             MetricsUnavailableReason.CONTEXT_MISMATCH: (
                 "provider evidence bout/selection does not match target context"
             ),
+            MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH: (
+                "eligibility evaluated_at must equal valuation_cutoff "
+                "(rejecting older/replayed eligibility)"
+            ),
+            MetricsUnavailableReason.STALE_ELIGIBILITY_EVIDENCE: (
+                "eligibility evidence is stale relative to valuation cutoff "
+                "(lock/unknown/replaced/review-blocked or quote after cutoff)"
+            ),
         }[mismatch]
         return _unavailable(
             mismatch,
             detail=detail,
             target_value_selection_identity=target.value_selection_identity,
+            valuation_cutoff=cutoff,
         )
     bout_id = eligibility.resolved_bout_id
     assert bout_id is not None
     opening = _observation_from_quote(quote, bout_id=bout_id)
     assert_matches_context(opening, target)
-    return opening, PriceSourceKind.PROVIDER_QUOTE
+    return (
+        opening,
+        PriceSourceKind.PROVIDER_QUOTE,
+        _provider_provenance(quote, eligibility, role="opening"),
+    )
 
 
 def _resolve_closing(
     closing: ClosingPriceEvidence,
     *,
     target: ValueSelectionContext,
-) -> SelectionPriceObservation | MetricsUnavailableReason:
+    opening: SelectionPriceObservation,
+) -> (
+    tuple[SelectionPriceObservation, PriceProvenanceSummary]
+    | MetricsUnavailableReason
+):
     if closing.manual_evidence is not None:
         manual = closing.manual_evidence
         if manual.bound_bout_id != target.bout_id:
             return MetricsUnavailableReason.CONTEXT_MISMATCH
         if manual.selection_identity != target.market_selection_identity:
             return MetricsUnavailableReason.CONTEXT_MISMATCH
+        if (
+            opening.bookmaker_key is not None
+            and manual.bookmaker_key != opening.bookmaker_key
+            and not closing.allow_cross_book
+        ):
+            return MetricsUnavailableReason.CROSS_BOOK_CLOSING_DISALLOWED
+        if (
+            opening.region is not None
+            and manual.region != opening.region
+            and not closing.allow_cross_book
+        ):
+            return MetricsUnavailableReason.CROSS_BOOK_CLOSING_DISALLOWED
         obs = _observation_from_manual(manual, bout_id=target.bout_id)
         assert_matches_context(obs, target)
-        return obs
+        cross = bool(
+            opening.bookmaker_key is not None
+            and (
+                manual.bookmaker_key != opening.bookmaker_key
+                or manual.region != opening.region
+            )
+        )
+        base = _manual_provenance(manual, role="closing")
+        summary = PriceProvenanceSummary(
+            role=base.role,
+            source_kind=base.source_kind,
+            quote_id=base.quote_id,
+            provider=base.provider,
+            bookmaker_key=base.bookmaker_key,
+            region=base.region,
+            observed_at=base.observed_at,
+            eligibility_evaluated_at=base.eligibility_evaluated_at,
+            eligibility_reason=base.eligibility_reason,
+            eligibility_decision_identity=base.eligibility_decision_identity,
+            eligibility_decision_version=base.eligibility_decision_version,
+            manual_binding_actor=base.manual_binding_actor,
+            manual_binding_source=base.manual_binding_source,
+            manual_binding_asserted_at=base.manual_binding_asserted_at,
+            cross_book_closing=cross if closing.allow_cross_book else False,
+        )
+        return obs, summary
 
     assert closing.quote_evidence is not None
     assert closing.eligibility_evidence is not None
+    assert closing.closing_cutoff is not None
     mismatch = _validate_provider_pair(
         closing.quote_evidence,
         closing.eligibility_evidence,
         target=target,
+        required_cutoff=closing.closing_cutoff,
     )
     if mismatch is not None:
         return mismatch
+    close_quote = closing.quote_evidence
+    if (
+        opening.bookmaker_key is not None
+        and (
+            close_quote.bookmaker_key != opening.bookmaker_key
+            or close_quote.region != opening.region
+        )
+        and not closing.allow_cross_book
+    ):
+        return MetricsUnavailableReason.CROSS_BOOK_CLOSING_DISALLOWED
     bout_id = closing.eligibility_evidence.resolved_bout_id
     assert bout_id is not None
-    obs = _observation_from_quote(closing.quote_evidence, bout_id=bout_id)
+    obs = _observation_from_quote(close_quote, bout_id=bout_id)
     assert_matches_context(obs, target)
-    return obs
+    cross = bool(
+        opening.bookmaker_key is not None
+        and (
+            close_quote.bookmaker_key != opening.bookmaker_key
+            or close_quote.region != opening.region
+        )
+    )
+    summary = _provider_provenance(
+        close_quote,
+        closing.eligibility_evidence,
+        role="closing",
+        cross_book_closing=cross if closing.allow_cross_book else False,
+    )
+    return obs, summary
 
 
 def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetrics:
@@ -387,7 +610,7 @@ def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetr
     resolved = _resolve_opening(request)
     if isinstance(resolved, PricedValueMetrics):
         return resolved
-    opening, _source = resolved
+    opening, _source, opening_prov = resolved
 
     offered = opening.price_decimal
     ev = expected_value(model_prob, offered)
@@ -402,15 +625,16 @@ def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetr
     clv: float | None = None
     close_reason = MetricsUnavailableReason.MISSING_CLOSING_PRICE
     clv_reason = MetricsUnavailableReason.MISSING_CLOSING_PRICE
+    closing_prov: PriceProvenanceSummary | None = None
     if request.closing_evidence is not None:
         closing_resolved = _resolve_closing(
-            request.closing_evidence, target=target
+            request.closing_evidence, target=target, opening=opening
         )
         if isinstance(closing_resolved, MetricsUnavailableReason):
             close_reason = closing_resolved
             clv_reason = closing_resolved
         else:
-            closing_obs = closing_resolved
+            closing_obs, closing_prov = closing_resolved
             if closing_obs.observed_at == opening.observed_at:
                 close_reason = MetricsUnavailableReason.NON_CLOSING_SAME_TIMESTAMP
                 clv_reason = MetricsUnavailableReason.NON_CLOSING_SAME_TIMESTAMP
@@ -480,4 +704,9 @@ def compute_priced_value_metrics(request: PricedValueRequest) -> PricedValueMetr
         stake_fraction=stake,
         stake_reason=MetricsUnavailableReason.NONE,
         detail="",
+        opening_provenance=opening_prov,
+        closing_provenance=closing_prov,
+        model_probability_unit=MODEL_PROBABILITY_UNIT,
+        bankroll_cap_fraction=request.bankroll_cap_fraction,
+        valuation_cutoff=_iso(request.valuation_cutoff),
     )

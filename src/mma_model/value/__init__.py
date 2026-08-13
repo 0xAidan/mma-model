@@ -5,7 +5,10 @@ from __future__ import annotations
 from mma_model.value.devig import (
     DEVIG_METHOD,
     DEVIG_VERSION,
+    NO_FINISH_OUTCOME_ATOMS,
     OVERROUND_UNIT,
+    PROBABILITY_CONDITIONING_UNCONDITIONAL_CATALOG,
+    PROBABILITY_CONDITIONING_UNCONDITIONAL_EXPLICIT,
     DevigResult,
     IncompleteMarketSet,
     proportional_devig,
@@ -34,7 +37,10 @@ from mma_model.value.ev import (
     unsafe_same_line_probability_clv,
 )
 from mma_model.value.evidence import (
+    CROSS_BOOK_CLOSING_POLICY_DEFAULT,
     ClosingPriceEvidence,
+    ManualBindingSource,
+    ManualBoutBindingAssertion,
     ManualObservedPriceEvidence,
     PriceObservationRole,
     PriceProvenanceKind,
@@ -42,6 +48,7 @@ from mma_model.value.evidence import (
     QuoteEligibilityEvidence,
     SelectionPriceObservation,
     ValueSelectionContext,
+    compute_eligibility_decision_identity,
     validate_catalog_selection,
 )
 from mma_model.value.kelly import (
@@ -69,12 +76,14 @@ from mma_model.value.odds import (
 )
 from mma_model.value.portfolio import capped_stake_fraction, stake_amount
 from mma_model.value.priced import (
+    MODEL_PROBABILITY_UNIT,
     PRICED_METRICS_METHOD,
     PRICED_METRICS_VERSION,
     ROI_UNIT,
     MetricsUnavailableReason,
     PricedValueMetrics,
     PricedValueRequest,
+    PriceProvenanceSummary,
     PriceSourceKind,
     compute_priced_value_metrics,
 )
@@ -87,13 +96,18 @@ from mma_model.value.thresholds import (
 
 __all__ = [
     "CLV_UNIT",
+    "CROSS_BOOK_CLOSING_POLICY_DEFAULT",
     "DEFAULT_BANKROLL_CAP_FRACTION",
     "DEVIG_METHOD",
     "DEVIG_VERSION",
     "MAX_BANKROLL_CAP_FRACTION",
+    "MODEL_PROBABILITY_UNIT",
+    "NO_FINISH_OUTCOME_ATOMS",
     "OVERROUND_UNIT",
     "PRICED_METRICS_METHOD",
     "PRICED_METRICS_VERSION",
+    "PROBABILITY_CONDITIONING_UNCONDITIONAL_CATALOG",
+    "PROBABILITY_CONDITIONING_UNCONDITIONAL_EXPLICIT",
     "QUARTER_KELLY_FRACTION",
     "ROI_UNIT",
     "VALUE_MATH_METHOD",
@@ -106,11 +120,14 @@ __all__ = [
     "InvalidMarketSetSpecError",
     "InvalidOddsError",
     "InvalidProbabilityError",
+    "ManualBindingSource",
+    "ManualBoutBindingAssertion",
     "ManualObservedPriceEvidence",
     "MetricsUnavailableReason",
     "OddsMathError",
     "PriceObservationRole",
     "PriceProvenanceKind",
+    "PriceProvenanceSummary",
     "PriceSourceKind",
     "PricedValueMetrics",
     "PricedValueRequest",
@@ -126,6 +143,7 @@ __all__ = [
     "american_to_implied_prob",
     "capped_stake_fraction",
     "closing_ev",
+    "compute_eligibility_decision_identity",
     "compute_exact_ev",
     "compute_priced_value_metrics",
     "compute_value_price_thresholds",
