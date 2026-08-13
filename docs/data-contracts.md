@@ -271,6 +271,23 @@ Quota headers persisted: raw `x-requests-remaining` / `x-requests-used` / `x-req
 | **CLI** | `mma-model odds audit-bookmakers --next-dwcs`; `mma-model odds price-guidance … [--line-point]`; `mma-model odds record-manual-price …` |
 | **Prohibited** | Sportsbook website scraping, credential/cookie storage, Bet365 claims for reference consensus |
 
+## Odds event matching + bout lifecycle (DWCS-203)
+
+| Field | Value |
+|-------|--------|
+| **Contract** | Packaged `mma_model/odds/matching_v1.yaml` (`config/odds/matching_v1.yaml` symlink) |
+| **Matcher** | `mma_model.odds.matching.match_provider_event` — exact stored provider IDs first, then exact canonical participant pair within `match_window_minutes` (default 30) |
+| **Ordering** | Provider home/away ignored; both canonical fighters required |
+| **Ambiguity** | Routes to identity review (`ambiguous_blocked` / `review_blocked`); affected quotes are not value-eligible |
+| **Aliases** | Versioned `odds_provider_event_aliases`; replacements supersede prior versions and point at a new bout identity |
+| **Lifecycle** | Explicit `active` / `stale` / `missing_unknown` / `locked` / `cancelled` / `replaced` / `review_blocked` via append-only `odds_bout_lifecycle_observations` |
+| **Storage** | `odds_provider_event_aliases`, `odds_match_observations`, `odds_bout_lifecycle_observations`; migration `0014_odds_matching` |
+| **CLI** | `mma-model odds reconcile --next-dwcs --strict [--golden-card PATH]` |
+| **Golden** | Committed fixtures under `tests/fixtures/odds/golden/` must achieve 100% exact active-bout matches |
+| **Prohibited** | Home/away guess, fuzzy auto-merge, silent replacement quote inheritance, forward-fill, inferred lock/suspension without evidence |
+
+Value calculations (DWCS-204+) may consume only `matched` + `active` quotes. Exact bookmaker lines remain optional enrichment; sportsbook-agnostic actionable price guidance remains the mandatory fallback. Snapshot/reference rows stay `provider_unmatched` until proven by this matcher.
+
 ## Governing product rule (odds)
 
 Bookmaker odds are optional enrichment. Missing Bet365 does not block core

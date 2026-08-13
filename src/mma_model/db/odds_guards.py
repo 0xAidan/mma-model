@@ -10,6 +10,10 @@ ODDS_AVAIL_NO_UPDATE_TRIGGER = "odds_availability_observations_no_update"
 ODDS_AVAIL_NO_DELETE_TRIGGER = "odds_availability_observations_no_delete"
 ODDS_MANUAL_NO_UPDATE_TRIGGER = "odds_manual_price_observations_no_update"
 ODDS_MANUAL_NO_DELETE_TRIGGER = "odds_manual_price_observations_no_delete"
+ODDS_MATCH_NO_UPDATE_TRIGGER = "odds_match_observations_no_update"
+ODDS_MATCH_NO_DELETE_TRIGGER = "odds_match_observations_no_delete"
+ODDS_LIFECYCLE_NO_UPDATE_TRIGGER = "odds_bout_lifecycle_observations_no_update"
+ODDS_LIFECYCLE_NO_DELETE_TRIGGER = "odds_bout_lifecycle_observations_no_delete"
 
 _TRIGGER_SPECS = (
     (ODDS_QUOTES_NO_UPDATE_TRIGGER, "odds_quotes", "UPDATE", "odds_quotes is append-only"),
@@ -37,6 +41,30 @@ _TRIGGER_SPECS = (
         "odds_manual_price_observations",
         "DELETE",
         "odds_manual_price_observations is append-only",
+    ),
+    (
+        ODDS_MATCH_NO_UPDATE_TRIGGER,
+        "odds_match_observations",
+        "UPDATE",
+        "odds_match_observations is append-only",
+    ),
+    (
+        ODDS_MATCH_NO_DELETE_TRIGGER,
+        "odds_match_observations",
+        "DELETE",
+        "odds_match_observations is append-only",
+    ),
+    (
+        ODDS_LIFECYCLE_NO_UPDATE_TRIGGER,
+        "odds_bout_lifecycle_observations",
+        "UPDATE",
+        "odds_bout_lifecycle_observations is append-only",
+    ),
+    (
+        ODDS_LIFECYCLE_NO_DELETE_TRIGGER,
+        "odds_bout_lifecycle_observations",
+        "DELETE",
+        "odds_bout_lifecycle_observations is append-only",
     ),
 )
 

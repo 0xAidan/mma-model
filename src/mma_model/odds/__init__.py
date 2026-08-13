@@ -1,10 +1,16 @@
-"""Odds package exports (DWCS-201 / DWCS-202)."""
+"""Odds package exports (DWCS-201 / DWCS-202 / DWCS-203)."""
 
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.bookmaker_keys import (
     BET365_BOOKMAKER_ALIASES,
     is_bet365_bookmaker_key,
     normalize_bookmaker_key,
+)
+from mma_model.odds.lifecycle import (
+    OddsBoutLifecycleState,
+    QuoteValueEligibility,
+    apply_bout_lifecycle,
+    classify_quote_value_eligibility,
 )
 from mma_model.odds.manual_price import (
     MANUAL_SOURCE_LABEL,
@@ -16,6 +22,18 @@ from mma_model.odds.manual_price import (
     compute_exact_ev,
     parse_manual_price_observation,
     validate_market_selection,
+)
+from mma_model.odds.matching import (
+    MATCH_RULE_PARTICIPANT_PAIR,
+    MATCH_RULE_PROVIDER_ID,
+    MATCH_STATUS_AMBIGUOUS,
+    MATCH_STATUS_MATCHED,
+    MATCH_STATUS_UNMATCHED,
+    MatchingContract,
+    OddsMatchDecision,
+    load_matching_contract,
+    match_provider_event,
+    participant_names_equal,
 )
 from mma_model.odds.normalize import normalize_odds_payload
 from mma_model.odds.price_guidance import (
@@ -43,6 +61,11 @@ from mma_model.odds.provider_decision import (
     package_decision_resource_path,
     require_licensed_bookmaker_adapter,
 )
+from mma_model.odds.reconcile import (
+    apply_replacement,
+    persist_match_decision,
+    run_odds_reconcile,
+)
 from mma_model.odds.snapshot import run_odds_audit, run_odds_snapshot
 from mma_model.odds.store import OddsQuoteStore
 from mma_model.odds.the_odds_api import TheOddsApiClient, fetch_mma_odds
@@ -61,17 +84,25 @@ __all__ = [
     "EXPECTED_CONTRACT_VERSION",
     "FALLBACK_LABEL",
     "MANUAL_SOURCE_LABEL",
+    "MATCH_RULE_PARTICIPANT_PAIR",
+    "MATCH_RULE_PROVIDER_ID",
+    "MATCH_STATUS_AMBIGUOUS",
+    "MATCH_STATUS_MATCHED",
+    "MATCH_STATUS_UNMATCHED",
     "PINNED_ODDS_DECISION_HASH",
     "PROVIDER_THE_ODDS_API",
     "EntitlementFailure",
     "FrozenStrMapping",
     "LicensedBookmakerAdapterError",
     "LineLifecycleState",
+    "MatchingContract",
     "NormalizedQuote",
     "ObservedPrice",
+    "OddsBoutLifecycleState",
     "OddsDecisionContract",
     "OddsDecisionError",
     "OddsDecisionHashMismatch",
+    "OddsMatchDecision",
     "OddsQuoteStore",
     "Phase0OddsDecision",
     "PriceGuidanceRow",
@@ -79,25 +110,34 @@ __all__ = [
     "PriceSourceKind",
     "QuotaHeaders",
     "QuoteAvailability",
+    "QuoteValueEligibility",
     "TheOddsApiClient",
     "UnknownMarketObservation",
+    "apply_bout_lifecycle",
+    "apply_replacement",
     "build_price_guidance",
     "build_unpriced_price_targets",
     "canonical_selection_identity",
+    "classify_quote_value_eligibility",
     "compute_exact_ev",
     "fetch_mma_odds",
     "is_bet365_bookmaker_key",
     "licensed_bookmaker_adapter_authorized",
+    "load_matching_contract",
     "load_odds_decision_contract",
     "load_odds_source_config",
     "load_phase0_odds_decision",
+    "match_provider_event",
     "normalize_bookmaker_key",
     "normalize_odds_payload",
     "package_decision_resource_path",
     "parse_manual_price_observation",
+    "participant_names_equal",
+    "persist_match_decision",
     "require_licensed_bookmaker_adapter",
     "run_bookmaker_audit",
     "run_odds_audit",
+    "run_odds_reconcile",
     "run_odds_snapshot",
     "validate_market_selection",
 ]

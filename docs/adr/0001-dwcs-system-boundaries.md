@@ -95,9 +95,12 @@ here in DWCS-001.
    events/markets/current/historical normalization, quota persistence, and
    append-only quote storage. DWCS-202 records that Phase 0 did not authorize a
    licensed bookmaker adapter and implements sportsbook-agnostic price targets
-   plus optional `user_observed` prices for exact EV. Missing Bet365 must not
-   block sportsbook-agnostic price targets; reference quotes are never labeled
-   as Bet365.
+   plus optional `user_observed` prices for exact EV. DWCS-203 attaches provider
+   events to canonical bouts via exact provider IDs / participant pairs, versions
+   aliases through replacements/cancellations, and blocks ambiguous or
+   non-active lifecycles from value calculations. Missing Bet365 must not block
+   sportsbook-agnostic price targets; reference quotes are never labeled as
+   Bet365.
 
 ## Consequences
 

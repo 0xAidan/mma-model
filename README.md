@@ -87,6 +87,15 @@ DWCS-203 canonical bout matching. Exact bookmaker lines are optional enrichment.
 Missing Bet365 does not block sportsbook-agnostic actionable price guidance.
 Reference odds are never labeled as Bet365.
 
+Match provider events to canonical bouts (exact provider IDs, then participant
+pair within the configured window):
+
+```bash
+mma-model odds reconcile --next-dwcs --strict \
+  --golden-card tests/fixtures/odds/golden/card_active_bouts.json \
+  --database-url sqlite:////tmp/odds-reconcile.db
+```
+
 Phase 0 did **not** authorize a licensed bookmaker adapter. Use the mandatory
 fallback and optional manual confirmation:
 

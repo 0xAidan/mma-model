@@ -38,6 +38,7 @@ from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
 from mma_model.odds.bookmaker_audit import run_bookmaker_audit
 from mma_model.odds.manual_price import parse_manual_price_observation
+from mma_model.odds.reconcile import run_odds_reconcile
 from mma_model.odds.normalize import parse_single_region
 from mma_model.odds.price_guidance import (
     PriceGuidanceSelectionError,
@@ -220,6 +221,35 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON file with book/region/market/outcome/price_or_lifecycle/time",
     )
     p_odds_manual.add_argument("--database-url", default=None)
+    p_odds_reconcile = odds_sub.add_parser(
+        "reconcile",
+        help=(
+            "DWCS-203 match provider odds events to canonical bouts "
+            "(deterministic report; --strict exits nonzero on blockers)"
+        ),
+    )
+    p_odds_reconcile.add_argument(
+        "--next-dwcs",
+        action="store_true",
+        help="Require 100% exact active-bout matches for next-DWCS readiness",
+    )
+    p_odds_reconcile.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero when blockers are present",
+    )
+    p_odds_reconcile.add_argument(
+        "--golden-card",
+        type=Path,
+        default=None,
+        help="Optional committed golden-card fixture to seed and reconcile",
+    )
+    p_odds_reconcile.add_argument(
+        "--provider",
+        default="the-odds-api",
+        help="Odds provider id (DWCS-203: the-odds-api / the_odds_api)",
+    )
+    p_odds_reconcile.add_argument("--database-url", default=None)
     p_odds_guide = odds_sub.add_parser(
         "price-guidance",
         help="Emit fair/actionable/strong-value guidance (exact EV only if priced)",
@@ -567,6 +597,59 @@ def main(argv: list[str] | None = None) -> int:
             report = run_bookmaker_audit(next_dwcs=bool(getattr(args, "next_dwcs", False)))
             print(json.dumps(report, indent=2))
             return 0 if not report.get("scraper_paths_present") else 2
+
+        if odds_cmd == "reconcile":
+            provider_arg = str(getattr(args, "provider", "the-odds-api")).strip()
+            if provider_arg in {"the-odds-api", "the_odds_api"}:
+                provider = "the_odds_api"
+            else:
+                print(f"unsupported odds provider for reconcile: {provider_arg!r}")
+                return 2
+            database_url = getattr(args, "database_url", None)
+            golden = getattr(args, "golden_card", None)
+            strict = bool(getattr(args, "strict", False))
+            next_dwcs = bool(getattr(args, "next_dwcs", False))
+            try:
+                if database_url:
+                    db_url = str(database_url).strip()
+                    if not db_url:
+                        print("refusing empty --database-url")
+                        return 2
+                    engine = create_engine(db_url, future=True)
+                    _attach_sqlite_listeners(engine)
+                    root = get_settings().project_root
+                    cfg = Config(str(root / "alembic.ini"))
+                    cfg.set_main_option("script_location", str(root / "migrations"))
+                    cfg.set_main_option("sqlalchemy.url", db_url)
+                    command.upgrade(cfg, "head")
+                    Session = sessionmaker(bind=engine, future=True)
+                    with Session() as session:
+                        report = run_odds_reconcile(
+                            session,
+                            next_dwcs=next_dwcs,
+                            strict=strict,
+                            golden_card_path=golden,
+                            provider=provider,
+                        )
+                        session.commit()
+                    engine.dispose()
+                else:
+                    init_db()
+                    with session_scope() as session:
+                        report = run_odds_reconcile(
+                            session,
+                            next_dwcs=next_dwcs,
+                            strict=strict,
+                            golden_card_path=golden,
+                            provider=provider,
+                        )
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                print(str(exc))
+                return 2
+            print(json.dumps(report, indent=2))
+            if strict and report.get("blockers"):
+                return 2
+            return 0
 
         if odds_cmd == "price-guidance":
             try:

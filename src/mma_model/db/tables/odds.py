@@ -1,4 +1,4 @@
-"""Append-only odds event, quote, and availability tables (DWCS-201)."""
+"""Append-only odds event, quote, availability, and matching tables."""
 
 from __future__ import annotations
 
@@ -335,4 +335,125 @@ class OddsManualPriceObservation(Base):
     )
     selection_identity: Mapped[str] = mapped_column(String(200), nullable=False)
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+_ALIAS_STATUS_SQL = "'active', 'superseded'"
+_MATCH_STATUS_SQL = "'matched', 'unmatched', 'ambiguous_blocked'"
+_MATCH_RULE_SQL = "'provider_id', 'participant_pair'"
+_BOUT_LIFECYCLE_SQL = (
+    "'active', 'stale', 'missing_unknown', 'locked', "
+    "'cancelled', 'replaced', 'review_blocked'"
+)
+
+
+class OddsProviderEventAlias(Base):
+    """Versioned provider event ↔ canonical bout alias (DWCS-203).
+
+    Replacements supersede prior alias versions and never rewrite quote rows.
+    """
+
+    __tablename__ = "odds_provider_event_aliases"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "external_event_id",
+            "alias_version",
+            name="uq_odds_provider_event_alias_version",
+        ),
+        CheckConstraint(
+            f"status IN ({_ALIAS_STATUS_SQL})",
+            name="ck_odds_provider_event_alias_status",
+        ),
+        CheckConstraint(
+            f"match_rule IN ({_MATCH_RULE_SQL})",
+            name="ck_odds_provider_event_alias_match_rule",
+        ),
+        CheckConstraint("alias_version >= 1", name="ck_odds_provider_event_alias_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_uuid)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    external_event_id: Mapped[str] = mapped_column(String(128), index=True)
+    bout_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("canonical_bouts.id"), index=True
+    )
+    alias_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    match_rule: Mapped[str] = mapped_column(String(64))
+    evidence_json: Mapped[str] = mapped_column(String(2000), default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class OddsMatchObservation(Base):
+    """Append-only auditable match decisions (DWCS-203)."""
+
+    __tablename__ = "odds_match_observations"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_odds_match_observations_dedupe_key"),
+        CheckConstraint(
+            f"match_status IN ({_MATCH_STATUS_SQL})",
+            name="ck_odds_match_observations_status",
+        ),
+        CheckConstraint(
+            "("
+            "match_rule IS NULL OR "
+            f"match_rule IN ({_MATCH_RULE_SQL})"
+            ")",
+            name="ck_odds_match_observations_rule",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedupe_key: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    external_event_id: Mapped[str] = mapped_column(String(128), index=True)
+    bout_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    match_status: Mapped[str] = mapped_column(String(32), index=True)
+    match_rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str] = mapped_column(String(500))
+    review_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    eligible_for_value: Mapped[int] = mapped_column(Integer, default=0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+class OddsBoutLifecycleObservation(Base):
+    """Append-only bout/line lifecycle evidence (DWCS-203).
+
+    Never stores a forward-filled price. Lock/suspension require explicit evidence.
+    """
+
+    __tablename__ = "odds_bout_lifecycle_observations"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_odds_bout_lifecycle_dedupe_key"),
+        CheckConstraint(
+            f"lifecycle IN ({_BOUT_LIFECYCLE_SQL})",
+            name="ck_odds_bout_lifecycle_lifecycle",
+        ),
+        CheckConstraint(
+            "price_decimal IS NULL",
+            name="ck_odds_bout_lifecycle_no_price",
+        ),
+        CheckConstraint(
+            "length(trim(evidence_kind)) > 0",
+            name="ck_odds_bout_lifecycle_evidence_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dedupe_key: Mapped[str] = mapped_column(String(64), index=True)
+    bout_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    external_event_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    lifecycle: Mapped[str] = mapped_column(String(32), index=True)
+    evidence_kind: Mapped[str] = mapped_column(String(128))
+    detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    price_decimal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
