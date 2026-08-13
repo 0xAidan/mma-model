@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
 from mma_model.value.errors import IneligiblePriceError
 from mma_model.value.evidence import (
     ManualBindingSource,
@@ -15,6 +16,7 @@ from mma_model.value.evidence import (
     ProviderQuoteEvidence,
     QuoteEligibilityEvidence,
     ValueSelectionContext,
+    compute_eligibility_decision_identity,
     validate_catalog_selection,
 )
 
@@ -135,10 +137,26 @@ def test_eligibility_rejects_non_catalog_selection_identity() -> None:
             reason="unmatched",
             evaluated_at=T0,
             quote_availability_at_decision="unknown",
+            decision_identity="qe_v1:x",
+            quote_freshness_at=None,
+            lifecycle_state_at_decision="unresolved",
+            decision_version=QUOTE_ELIGIBILITY_DECISION_VERSION,
         )
 
 
-def test_eligibility_auto_fills_decision_identity() -> None:
+def test_eligibility_requires_native_decision_identity() -> None:
+    identity = compute_eligibility_decision_identity(
+        quote_id=1,
+        evaluated_at=T0,
+        eligible=True,
+        reason="none",
+        selection_identity="moneyline:fighter_a",
+        resolved_bout_id="bout-1",
+        quote_availability_at_decision="available",
+        quote_freshness_at=T0,
+        lifecycle_state_at_decision="active",
+        decision_version=QUOTE_ELIGIBILITY_DECISION_VERSION,
+    )
     elig = QuoteEligibilityEvidence(
         quote_id=1,
         eligible=True,
@@ -147,5 +165,10 @@ def test_eligibility_auto_fills_decision_identity() -> None:
         reason="none",
         evaluated_at=T0,
         quote_availability_at_decision="available",
+        decision_identity=identity,
+        quote_freshness_at=T0,
+        lifecycle_state_at_decision="active",
+        decision_version=QUOTE_ELIGIBILITY_DECISION_VERSION,
     )
-    assert elig.decision_identity.startswith("elig_v1:")
+    assert elig.decision_identity.startswith("qe_v1:")
+    assert elig.decision_version == QUOTE_ELIGIBILITY_DECISION_VERSION

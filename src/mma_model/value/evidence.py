@@ -13,7 +13,6 @@ casual unbound id field.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -23,6 +22,12 @@ from mma_model.domain.markets import (
     OutcomeKey,
     assert_known_outcome,
     catalog_for_family,
+)
+from mma_model.domain.quote_eligibility import (
+    ELIGIBILITY_BLOCKING_LIFECYCLES,
+    LIFECYCLE_UNRESOLVED,
+    RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS,
+    compute_quote_eligibility_decision_identity,
 )
 from mma_model.value.errors import (
     IneligiblePriceError,
@@ -115,30 +120,26 @@ def compute_eligibility_decision_identity(
     resolved_bout_id: str | None,
     quote_availability_at_decision: str,
     quote_freshness_at: datetime | None,
-    lifecycle_state_at_decision: str | None,
+    lifecycle_state_at_decision: str,
+    decision_version: str,
 ) -> str:
-    """Content identity for eligibility evidence (replay/staleness binding)."""
-    as_of = _require_aware_utc(evaluated_at, field="evaluated_at").isoformat()
-    freshness = (
-        None
-        if quote_freshness_at is None
-        else _require_aware_utc(quote_freshness_at, field="quote_freshness_at").isoformat()
+    """Content identity for eligibility evidence (same algorithm as DWCS-203)."""
+    return compute_quote_eligibility_decision_identity(
+        quote_id=quote_id,
+        evaluated_at=_require_aware_utc(evaluated_at, field="evaluated_at"),
+        eligible=eligible,
+        reason=reason,
+        selection_identity=selection_identity,
+        resolved_bout_id=resolved_bout_id,
+        quote_availability_at_decision=quote_availability_at_decision,
+        quote_freshness_at=(
+            None
+            if quote_freshness_at is None
+            else _require_aware_utc(quote_freshness_at, field="quote_freshness_at")
+        ),
+        lifecycle_state_at_decision=lifecycle_state_at_decision,
+        decision_version=decision_version,
     )
-    payload = "|".join(
-        [
-            str(int(quote_id)),
-            as_of,
-            "1" if eligible else "0",
-            str(reason),
-            str(selection_identity),
-            "" if resolved_bout_id is None else str(resolved_bout_id),
-            str(quote_availability_at_decision),
-            "" if freshness is None else freshness,
-            "" if lifecycle_state_at_decision is None else str(lifecycle_state_at_decision),
-        ]
-    )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    return f"elig_v1:{digest}"
 
 
 @dataclass(frozen=True)
@@ -352,9 +353,10 @@ class ProviderQuoteEvidence:
 class QuoteEligibilityEvidence:
     """DWCS-203 quote-level eligibility decision bound to a quote + cutoff.
 
-    Timeless eligible flags are rejected: ``evaluated_at`` (as_of), availability
-    at decision, and ``decision_identity`` bind the decision to the quote and
-    valuation cutoff in use.
+    Temporal/state fields must come from an authoritative DWCS-203 decision
+    (``evaluated_at``, availability, lifecycle, version, identity). Eligible
+    evidence requires freshness <= evaluated_at, available quote state, and a
+    non-blocking lifecycle with a recognized decision version.
     """
 
     quote_id: int
@@ -364,10 +366,10 @@ class QuoteEligibilityEvidence:
     reason: str
     evaluated_at: datetime
     quote_availability_at_decision: str
-    decision_identity: str = ""
-    quote_freshness_at: datetime | None = None
-    lifecycle_state_at_decision: str | None = None
-    decision_version: str | None = None
+    decision_identity: str
+    quote_freshness_at: datetime | None
+    lifecycle_state_at_decision: str
+    decision_version: str
 
     def __post_init__(self) -> None:
         if int(self.quote_id) <= 0:
@@ -379,6 +381,13 @@ class QuoteEligibilityEvidence:
             field="quote_availability_at_decision",
         )
         object.__setattr__(self, "quote_availability_at_decision", availability)
+        lifecycle = _require_nonempty(
+            self.lifecycle_state_at_decision,
+            field="lifecycle_state_at_decision",
+        )
+        object.__setattr__(self, "lifecycle_state_at_decision", lifecycle)
+        version = _require_nonempty(self.decision_version, field="decision_version")
+        object.__setattr__(self, "decision_version", version)
         freshness = (
             None
             if self.quote_freshness_at is None
@@ -387,21 +396,6 @@ class QuoteEligibilityEvidence:
             )
         )
         object.__setattr__(self, "quote_freshness_at", freshness)
-        if self.lifecycle_state_at_decision is not None:
-            object.__setattr__(
-                self,
-                "lifecycle_state_at_decision",
-                _require_nonempty(
-                    self.lifecycle_state_at_decision,
-                    field="lifecycle_state_at_decision",
-                ),
-            )
-        if self.decision_version is not None:
-            object.__setattr__(
-                self,
-                "decision_version",
-                _require_nonempty(self.decision_version, field="decision_version"),
-            )
 
         parts = self.selection_identity.split(":")
         if len(parts) < 2:
@@ -420,6 +414,12 @@ class QuoteEligibilityEvidence:
                 f"got {self.selection_identity!r}, expected {market_id!r}"
             )
         if self.eligible:
+            if version not in RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS:
+                allowed = sorted(RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS)
+                raise IneligiblePriceError(
+                    "eligible evidence requires recognized decision_version "
+                    f"(got {version!r}; allowed={allowed})"
+                )
             if not self.resolved_bout_id or not str(self.resolved_bout_id).strip():
                 raise IneligiblePriceError(
                     "eligible QuoteEligibilityEvidence requires nonempty resolved_bout_id"
@@ -433,6 +433,22 @@ class QuoteEligibilityEvidence:
                 raise IneligiblePriceError(
                     "eligible QuoteEligibilityEvidence requires "
                     "quote_availability_at_decision='available'"
+                )
+            if freshness is None:
+                raise IneligiblePriceError(
+                    "eligible QuoteEligibilityEvidence requires non-null quote_freshness_at"
+                )
+            if freshness > evaluated:
+                raise IneligiblePriceError(
+                    "eligible quote_freshness_at must be <= evaluated_at"
+                )
+            if (
+                lifecycle == LIFECYCLE_UNRESOLVED
+                or lifecycle in ELIGIBILITY_BLOCKING_LIFECYCLES
+            ):
+                raise IneligiblePriceError(
+                    "eligible QuoteEligibilityEvidence requires non-blocking "
+                    f"lifecycle_state_at_decision (got {lifecycle!r})"
                 )
             object.__setattr__(
                 self,
@@ -454,20 +470,16 @@ class QuoteEligibilityEvidence:
             resolved_bout_id=self.resolved_bout_id,
             quote_availability_at_decision=availability,
             quote_freshness_at=freshness,
-            lifecycle_state_at_decision=self.lifecycle_state_at_decision,
+            lifecycle_state_at_decision=lifecycle,
+            decision_version=version,
         )
-        if self.decision_identity:
-            supplied = _require_nonempty(
-                self.decision_identity, field="decision_identity"
+        supplied = _require_nonempty(self.decision_identity, field="decision_identity")
+        if supplied != expected_identity:
+            raise IneligiblePriceError(
+                "eligibility decision_identity does not match content identity "
+                "(stale/replayed or tampered evidence)"
             )
-            if supplied != expected_identity:
-                raise IneligiblePriceError(
-                    "eligibility decision_identity does not match content identity "
-                    "(stale/replayed or tampered evidence)"
-                )
-            object.__setattr__(self, "decision_identity", supplied)
-        else:
-            object.__setattr__(self, "decision_identity", expected_identity)
+        object.__setattr__(self, "decision_identity", supplied)
 
 
 @dataclass(frozen=True)
@@ -517,26 +529,33 @@ class ClosingPriceEvidence:
                 else _require_aware_utc(self.closing_cutoff, field="closing_cutoff")
             )
             object.__setattr__(self, "closing_cutoff", cutoff)
-            if cutoff != manual.observed_at:
+            if cutoff < manual.observed_at:
                 raise IneligiblePriceError(
-                    "manual closing_cutoff must equal closing observation observed_at"
+                    "manual closing_cutoff must be >= closing observation observed_at"
+                )
+            # Default closing_cutoff == observed_at ⇒ binding must be same-time.
+            if manual.bout_binding.asserted_at > cutoff:
+                raise IneligiblePriceError(
+                    "manual bout binding asserted_at must be <= closing_cutoff"
                 )
         if quote is not None:
             if quote.price_role is not PriceObservationRole.CLOSING:
                 raise IneligiblePriceError(
                     "provider closing evidence requires price_role=closing"
                 )
-            if self.closing_cutoff is None:
-                raise IneligiblePriceError(
-                    "provider closing evidence requires closing_cutoff"
-                )
-            cutoff = _require_aware_utc(self.closing_cutoff, field="closing_cutoff")
-            object.__setattr__(self, "closing_cutoff", cutoff)
             assert elig is not None
-            if elig.evaluated_at != cutoff:
-                raise IneligiblePriceError(
-                    "closing eligibility evaluated_at must equal closing_cutoff"
+            # Closing cutoff is the decision's evaluated_at (no caller relabel).
+            cutoff = elig.evaluated_at
+            if self.closing_cutoff is not None:
+                supplied = _require_aware_utc(
+                    self.closing_cutoff, field="closing_cutoff"
                 )
+                if supplied != cutoff:
+                    raise IneligiblePriceError(
+                        "provider closing_cutoff must equal eligibility.evaluated_at "
+                        "(derived from DWCS-203 decision; no caller override)"
+                    )
+            object.__setattr__(self, "closing_cutoff", cutoff)
             if quote.observed_at > cutoff:
                 raise IneligiblePriceError(
                     "closing quote observed_at must be <= closing_cutoff"

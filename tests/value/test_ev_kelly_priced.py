@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from mma_model.domain.markets import MarketFamily
+from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
 from mma_model.markets.settlement import SettlementResult
 from mma_model.value.errors import (
     IneligiblePriceError,
@@ -34,6 +35,7 @@ from mma_model.value.evidence import (
     QuoteEligibilityEvidence,
     SelectionPriceObservation,
     ValueSelectionContext,
+    compute_eligibility_decision_identity,
 )
 from mma_model.value.kelly import (
     DEFAULT_BANKROLL_CAP_FRACTION,
@@ -145,7 +147,28 @@ def _elig(
     bout_id: str | None = BOUT_A,
     evaluated_at: datetime = T0,
     availability: str = "available",
+    freshness_at: datetime | None = None,
+    lifecycle: str | None = None,
 ) -> QuoteEligibilityEvidence:
+    life = (
+        "active"
+        if lifecycle is None and eligible
+        else ("unresolved" if lifecycle is None else lifecycle)
+    )
+    freshness = evaluated_at if freshness_at is None else freshness_at
+    version = QUOTE_ELIGIBILITY_DECISION_VERSION
+    identity = compute_eligibility_decision_identity(
+        quote_id=quote_id,
+        evaluated_at=evaluated_at,
+        eligible=eligible,
+        reason=reason,
+        selection_identity="moneyline:fighter_a",
+        resolved_bout_id=bout_id,
+        quote_availability_at_decision=availability,
+        quote_freshness_at=freshness,
+        lifecycle_state_at_decision=life,
+        decision_version=version,
+    )
     return QuoteEligibilityEvidence(
         quote_id=quote_id,
         eligible=eligible,
@@ -154,9 +177,10 @@ def _elig(
         reason=reason,
         evaluated_at=evaluated_at,
         quote_availability_at_decision=availability,
-        quote_freshness_at=evaluated_at,
-        lifecycle_state_at_decision="active",
-        decision_version="odds_decision_v1",
+        decision_identity=identity,
+        quote_freshness_at=freshness,
+        lifecycle_state_at_decision=life,
+        decision_version=version,
     )
 
 
@@ -396,34 +420,16 @@ def test_match_gate_alone_insufficient_for_provider_quote() -> None:
 
 def test_eligible_true_requires_resolved_bout_and_reason_none() -> None:
     with pytest.raises(IneligiblePriceError, match="resolved_bout_id"):
-        QuoteEligibilityEvidence(
-            quote_id=1,
-            eligible=True,
-            selection_identity="moneyline:fighter_a",
-            resolved_bout_id=None,
-            reason="none",
-            evaluated_at=T0,
-            quote_availability_at_decision="available",
-        )
+        _elig(eligible=True, bout_id=None, reason="none")
     with pytest.raises(IneligiblePriceError, match="reason='none'"):
-        QuoteEligibilityEvidence(
-            quote_id=1,
-            eligible=True,
-            selection_identity="moneyline:fighter_a",
-            resolved_bout_id=BOUT_A,
-            reason="stale",
-            evaluated_at=T0,
-            quote_availability_at_decision="available",
-        )
+        _elig(eligible=True, reason="stale", lifecycle="stale")
     with pytest.raises(IneligiblePriceError, match="must not use reason='none'"):
-        QuoteEligibilityEvidence(
-            quote_id=1,
+        _elig(
             eligible=False,
-            selection_identity="moneyline:fighter_a",
-            resolved_bout_id=None,
             reason="none",
-            evaluated_at=T0,
-            quote_availability_at_decision="unknown",
+            bout_id=None,
+            availability="unknown",
+            lifecycle="unresolved",
         )
 
 
@@ -464,9 +470,19 @@ def test_eligible_provider_quote_emits_priced_metrics_and_roi() -> None:
     assert row.opening_provenance is not None
     assert row.opening_provenance.source_kind == "provider_quote"
     assert row.opening_provenance.eligibility_evaluated_at == T0.isoformat()
+    assert (
+        row.opening_provenance.eligibility_decision_version
+        == QUOTE_ELIGIBILITY_DECISION_VERSION
+    )
+    assert row.opening_provenance.eligibility_decision_identity is not None
+    assert row.opening_provenance.eligibility_decision_identity.startswith("qe_v1:")
     assert row.closing_provenance is not None
     assert row.closing_provenance.bookmaker_key == "ref_book"
     assert row.closing_provenance.cross_book_closing is False
+    assert (
+        row.closing_provenance.eligibility_decision_version
+        == QUOTE_ELIGIBILITY_DECISION_VERSION
+    )
     assert row.bankroll_cap_fraction == DEFAULT_BANKROLL_CAP_FRACTION
 
 
@@ -599,7 +615,25 @@ def test_replaced_and_review_blocked_eligibility_rejected() -> None:
 
 
 def test_tampered_decision_identity_rejected() -> None:
+    good = _elig(eligible=True)
     with pytest.raises(IneligiblePriceError, match="decision_identity"):
+        QuoteEligibilityEvidence(
+            quote_id=good.quote_id,
+            eligible=good.eligible,
+            selection_identity=good.selection_identity,
+            resolved_bout_id=good.resolved_bout_id,
+            reason=good.reason,
+            evaluated_at=good.evaluated_at,
+            quote_availability_at_decision=good.quote_availability_at_decision,
+            decision_identity="qe_v1:deadbeef",
+            quote_freshness_at=good.quote_freshness_at,
+            lifecycle_state_at_decision=good.lifecycle_state_at_decision,
+            decision_version=good.decision_version,
+        )
+
+
+def test_eligible_requires_freshness_lifecycle_and_recognized_version() -> None:
+    with pytest.raises(IneligiblePriceError, match="quote_freshness_at"):
         QuoteEligibilityEvidence(
             quote_id=1,
             eligible=True,
@@ -608,8 +642,165 @@ def test_tampered_decision_identity_rejected() -> None:
             reason="none",
             evaluated_at=T0,
             quote_availability_at_decision="available",
-            decision_identity="elig_v1:deadbeef",
+            decision_identity="qe_v1:x",
+            quote_freshness_at=None,
+            lifecycle_state_at_decision="active",
+            decision_version=QUOTE_ELIGIBILITY_DECISION_VERSION,
         )
+    with pytest.raises(IneligiblePriceError, match="non-blocking"):
+        _elig(eligible=True, lifecycle="locked")
+    with pytest.raises(IneligiblePriceError, match="recognized decision_version"):
+        identity = compute_eligibility_decision_identity(
+            quote_id=1,
+            evaluated_at=T0,
+            eligible=True,
+            reason="none",
+            selection_identity="moneyline:fighter_a",
+            resolved_bout_id=BOUT_A,
+            quote_availability_at_decision="available",
+            quote_freshness_at=T0,
+            lifecycle_state_at_decision="active",
+            decision_version="odds_decision_v1",
+        )
+        QuoteEligibilityEvidence(
+            quote_id=1,
+            eligible=True,
+            selection_identity="moneyline:fighter_a",
+            resolved_bout_id=BOUT_A,
+            reason="none",
+            evaluated_at=T0,
+            quote_availability_at_decision="available",
+            decision_identity=identity,
+            quote_freshness_at=T0,
+            lifecycle_state_at_decision="active",
+            decision_version="odds_decision_v1",
+        )
+
+
+def test_future_manual_binding_after_valuation_cutoff_rejected() -> None:
+    future = T1
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T0,
+            product_eligible=True,
+            manual_evidence=ManualObservedPriceEvidence(
+                provenance=PriceProvenanceKind.USER_OBSERVED,
+                automated=False,
+                market_family="moneyline",
+                outcome_key="fighter_a",
+                line_point=None,
+                selection_identity="moneyline:fighter_a",
+                price_decimal=2.20,
+                lifecycle="available",
+                observed_at=T0,
+                bookmaker_key="manual_book",
+                region="us",
+                bout_binding=ManualBoutBindingAssertion(
+                    bout_id=BOUT_A,
+                    asserted_at=future,
+                    asserted_by="tester",
+                    source=ManualBindingSource.USER_ASSERTION,
+                ),
+            ),
+        )
+    )
+    assert row.available is False
+    assert row.reason is MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH
+
+
+def test_historical_manual_binding_at_observation_allows_later_cutoff() -> None:
+    """Backfill: bind at observation time, value later — allowed."""
+    row = compute_priced_value_metrics(
+        PricedValueRequest(
+            model_prob=0.55,
+            target_context=_ctx(),
+            valuation_cutoff=T1,
+            product_eligible=True,
+            manual_evidence=_manual(2.20, at=T0, bout_id=BOUT_A),
+        )
+    )
+    assert row.available is True
+    assert row.opening_provenance is not None
+    assert row.opening_provenance.manual_binding_asserted_at == T0.isoformat()
+
+
+def test_manual_closing_default_cutoff_requires_same_time_binding() -> None:
+    late_binding = ManualBoutBindingAssertion(
+        bout_id=BOUT_A,
+        asserted_at=T1 + timedelta(minutes=5),
+        asserted_by="tester",
+        source=ManualBindingSource.OPERATOR_ASSERTION,
+    )
+    with pytest.raises(IneligiblePriceError, match="closing_cutoff"):
+        ClosingPriceEvidence(
+            manual_evidence=ManualObservedPriceEvidence(
+                provenance=PriceProvenanceKind.USER_OBSERVED,
+                automated=False,
+                market_family="moneyline",
+                outcome_key="fighter_a",
+                line_point=None,
+                selection_identity="moneyline:fighter_a",
+                price_decimal=2.00,
+                lifecycle="available",
+                observed_at=T1,
+                bookmaker_key="manual_book",
+                region="us",
+                bout_binding=late_binding,
+                price_role=PriceObservationRole.CLOSING,
+            ),
+            # default closing_cutoff == observed_at=T1 < late binding
+        )
+
+
+def test_manual_closing_explicit_later_cutoff_allows_later_binding() -> None:
+    later = T1 + timedelta(hours=1)
+    evidence = ClosingPriceEvidence(
+        manual_evidence=ManualObservedPriceEvidence(
+            provenance=PriceProvenanceKind.USER_OBSERVED,
+            automated=False,
+            market_family="moneyline",
+            outcome_key="fighter_a",
+            line_point=None,
+            selection_identity="moneyline:fighter_a",
+            price_decimal=2.00,
+            lifecycle="available",
+            observed_at=T1,
+            bookmaker_key="manual_book",
+            region="us",
+            bout_binding=ManualBoutBindingAssertion(
+                bout_id=BOUT_A,
+                asserted_at=later,
+                asserted_by="tester",
+                source=ManualBindingSource.OPERATOR_ASSERTION,
+            ),
+            price_role=PriceObservationRole.CLOSING,
+        ),
+        closing_cutoff=later,
+    )
+    assert evidence.closing_cutoff == later
+
+
+def test_valuation_cutoff_normalized_to_utc() -> None:
+    from datetime import timezone
+
+    eastern = timezone(timedelta(hours=-4))
+    local = datetime(2026, 8, 1, 14, 0, tzinfo=eastern)
+    req = PricedValueRequest(
+        model_prob=0.55,
+        target_context=_ctx(),
+        valuation_cutoff=local,
+        product_eligible=True,
+        manual_evidence=_manual(2.20, at=T0),
+    )
+    assert req.valuation_cutoff == T0
+    assert req.valuation_cutoff.tzinfo == UTC
+    row = compute_priced_value_metrics(req)
+    assert row.available is True
+    assert row.valuation_cutoff == T0.isoformat()
+    assert row.opening_provenance is not None
+    assert row.opening_provenance.eligibility_decision_version is None  # manual path
 
 
 def test_cross_book_close_disallowed_by_default() -> None:

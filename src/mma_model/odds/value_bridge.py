@@ -58,16 +58,12 @@ def manual_evidence_from_observed(
 
 def eligibility_evidence_from_decision(
     decision: QuoteEligibilityDecision,
-    *,
-    evaluated_at: datetime,
-    quote_availability_at_decision: str,
-    lifecycle_state_at_decision: str | None = None,
-    decision_version: str | None = None,
 ) -> QuoteEligibilityEvidence:
-    """Build time-bound eligibility evidence from a DWCS-203 decision.
+    """Build eligibility evidence solely from an authoritative DWCS-203 decision.
 
-    ``evaluated_at`` is the valuation/closing cutoff at which the decision applies.
-    Caller must not reuse a decision older than the valuation cutoff in use.
+    Temporal/state fields (``evaluated_at``, availability, lifecycle, version,
+    identity) are copied from the decision. Callers cannot override or relabel
+    a stale decision as current.
     """
     return QuoteEligibilityEvidence(
         quote_id=int(decision.quote_id),
@@ -75,11 +71,12 @@ def eligibility_evidence_from_decision(
         selection_identity=str(decision.selection_identity),
         resolved_bout_id=decision.resolved_bout_id,
         reason=decision.reason.value,
-        evaluated_at=evaluated_at,
-        quote_availability_at_decision=quote_availability_at_decision,
+        evaluated_at=decision.evaluated_at,
+        quote_availability_at_decision=decision.quote_availability_at_decision,
+        decision_identity=decision.decision_identity,
         quote_freshness_at=decision.freshness_at,
-        lifecycle_state_at_decision=lifecycle_state_at_decision,
-        decision_version=decision_version,
+        lifecycle_state_at_decision=decision.lifecycle_state_at_decision,
+        decision_version=decision.decision_version,
     )
 
 
@@ -138,6 +135,7 @@ def closing_evidence_from_manual(
     observed: ObservedPrice,
     *,
     bout_binding: ManualBoutBindingAssertion,
+    closing_cutoff: datetime | None = None,
 ) -> ClosingPriceEvidence:
     """Closing CLV evidence from a bound user-observed available price."""
     return ClosingPriceEvidence(
@@ -145,7 +143,8 @@ def closing_evidence_from_manual(
             observed,
             bout_binding=bout_binding,
             price_role=PriceObservationRole.CLOSING,
-        )
+        ),
+        closing_cutoff=closing_cutoff,
     )
 
 
@@ -153,20 +152,10 @@ def closing_evidence_from_provider(
     quote: OddsQuote,
     decision: QuoteEligibilityDecision,
     *,
-    closing_cutoff: datetime,
-    quote_availability_at_decision: str,
-    lifecycle_state_at_decision: str | None = None,
-    decision_version: str | None = None,
     allow_cross_book: bool = False,
 ) -> ClosingPriceEvidence:
-    """Closing CLV evidence from quote row + eligible DWCS-203 decision at cutoff."""
-    elig = eligibility_evidence_from_decision(
-        decision,
-        evaluated_at=closing_cutoff,
-        quote_availability_at_decision=quote_availability_at_decision,
-        lifecycle_state_at_decision=lifecycle_state_at_decision,
-        decision_version=decision_version,
-    )
+    """Closing CLV evidence from quote row + DWCS-203 decision (cutoff from decision)."""
+    elig = eligibility_evidence_from_decision(decision)
     return ClosingPriceEvidence(
         quote_evidence=quote_evidence_from_row(
             quote,
@@ -174,7 +163,7 @@ def closing_evidence_from_provider(
             price_role=PriceObservationRole.CLOSING,
         ),
         eligibility_evidence=elig,
-        closing_cutoff=closing_cutoff,
+        closing_cutoff=decision.evaluated_at,
         allow_cross_book=allow_cross_book,
     )
 

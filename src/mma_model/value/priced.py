@@ -11,7 +11,7 @@ quote evidence plus matching DWCS-203 eligibility evaluated at that cutoff
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
@@ -124,6 +124,9 @@ class PricedValueRequest:
     def __post_init__(self) -> None:
         if self.valuation_cutoff.tzinfo is None:
             raise InvalidOddsError("valuation_cutoff must be timezone-aware")
+        object.__setattr__(
+            self, "valuation_cutoff", self.valuation_cutoff.astimezone(UTC)
+        )
 
 
 @dataclass(frozen=True)
@@ -443,6 +446,17 @@ def _resolve_opening(
             return _unavailable(
                 MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH,
                 detail="valuation_cutoff must be >= manual opening observed_at",
+                target_value_selection_identity=target.value_selection_identity,
+                valuation_cutoff=cutoff,
+            )
+        assert manual.bout_binding is not None
+        if manual.bout_binding.asserted_at > cutoff:
+            return _unavailable(
+                MetricsUnavailableReason.ELIGIBILITY_CUTOFF_MISMATCH,
+                detail=(
+                    "manual bout binding asserted_at must be <= valuation_cutoff "
+                    "(future assertions cannot authorize historical valuation)"
+                ),
                 target_value_selection_identity=target.value_selection_identity,
                 valuation_cutoff=cutoff,
             )
