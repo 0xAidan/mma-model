@@ -9,9 +9,13 @@ from mma_model.backtest.report import attach_content_hash
 from mma_model.cli import main
 from mma_model.domain.markets import RecommendationState
 from mma_model.quality.constants import EXIT_INTERNAL, EXIT_OK
-from mma_model.recommend.policy import PINNED_POLICY_HASH, NoBetReason
-from mma_model.recommend.replay import RecommendReplayError, execute_recommend_replay
-from tests.recommend.helpers import POLICY
+from mma_model.recommend.policy import PINNED_POLICY_HASH, NoBetReason, SelectionCandidate
+from mma_model.recommend.replay import (
+    RecommendReplayError,
+    candidates_from_backtest_payload,
+    execute_recommend_replay,
+)
+from tests.recommend.helpers import HASH_C, HASH_D, POLICY
 
 
 def test_protocol_fixture_covers_required_cases() -> None:
@@ -56,7 +60,9 @@ def test_protocol_fixture_covers_required_cases() -> None:
 
 
 def test_replay_source_evidence_tamper_fails(tmp_path: Path) -> None:
-    honest = attach_content_hash({"schema_version": "dwcs_backtest_evidence_v1", "attempts": []})
+    honest = attach_content_hash(
+        {"schema_version": "dwcs_backtest_evidence_v1.1", "attempts": []}
+    )
     path = tmp_path / "backtest.json"
     path.write_text(json.dumps({**honest, "attempts": [{"tampered": True}]}), encoding="utf-8")
     try:
@@ -70,7 +76,7 @@ def test_replay_source_evidence_tamper_fails(tmp_path: Path) -> None:
 def test_replay_missing_confidence_is_honest_not_invented(tmp_path: Path) -> None:
     payload = attach_content_hash(
         {
-            "schema_version": "dwcs_backtest_evidence_v1",
+            "schema_version": "dwcs_backtest_evidence_v1.1",
             "attempts": [
                 {
                     "event_id": "dev-2017",
@@ -106,13 +112,18 @@ def test_replay_missing_confidence_is_honest_not_invented(tmp_path: Path) -> Non
     )
     path = tmp_path / "backtest.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
+    mapped = candidates_from_backtest_payload(payload, POLICY)
+    for row in mapped:
+        if isinstance(row, SelectionCandidate):
+            assert row.production_uncertainty is False
+        else:
+            assert row.get("data_hash") not in {HASH_C, HASH_D}
+            assert row.get("config_hash") not in {HASH_C, HASH_D}
     report = execute_recommend_replay(backtest_json=path, policy=POLICY)
     assert report["source_backtest_hash"] == payload["content_hash"]
     assert not report["confirmed_value"]
-    watch = report["price_target_watchlist"]
-    assert watch
-    assert watch[0]["median_ev"] is None
-    assert watch[0]["thresholds"]["fair_decimal"] > 1.0
+    assert not report["price_target_watchlist"]
+    assert report["no_bet"]
 
 
 def test_cli_protocol_replay(capsys) -> None:

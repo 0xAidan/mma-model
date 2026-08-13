@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
-from mma_model.domain.markets import OutcomeKey, RecommendationState
-from mma_model.recommend.policy import NoBetReason
+import yaml
+
+from mma_model.domain.markets import MarketFamily, OutcomeKey, RecommendationState
+from mma_model.recommend.policy import (
+    NoBetReason,
+    load_recommendation_policy,
+    package_policy_resource_path,
+)
 from mma_model.recommend.selector import select_recommendations
 from tests.recommend.helpers import POLICY, eligible_quote, make_candidate
 
@@ -113,6 +120,63 @@ def test_ranking_is_deterministic_under_shuffled_input() -> None:
     assert report.no_bet
     assert report.priced_policy["roi"] is None
     assert report.unpriced_target_coverage["unpriced_target_is_not_best_available_market"] is True
+
+
+def test_identical_duplicates_dedupe_under_shuffle() -> None:
+    original = make_candidate(quote=eligible_quote(2.60))
+    duplicate = make_candidate(quote=eligible_quote(2.60))
+    reports = []
+    for seed in (3, 7, 11, 19):
+        rows = [original, duplicate]
+        random.Random(seed).shuffle(rows)
+        reports.append(select_recommendations(rows, POLICY))
+    assert len({item.content_hash for item in reports}) == 1
+    assert reports[0].counts["selections"] == 1
+    assert len(reports[0].confirmed_value) == 1
+
+
+def test_conflicting_duplicates_are_ambiguous_under_shuffle() -> None:
+    first = make_candidate(quote=eligible_quote(2.60), p50=0.50, p25=0.40)
+    conflict = make_candidate(quote=eligible_quote(2.80), p50=0.50, p25=0.40)
+    reports = []
+    for seed in (2, 5, 8, 13, 21):
+        rows = [first, conflict]
+        random.Random(seed).shuffle(rows)
+        reports.append(select_recommendations(rows, POLICY))
+    assert len({item.content_hash for item in reports}) == 1
+    assert not reports[0].confirmed_value
+    assert reports[0].no_bet
+    assert all(
+        NoBetReason.AMBIGUOUS_SELECTION in row.reasons for row in reports[0].no_bet
+    )
+
+
+def test_cross_family_tie_uses_market_priority(tmp_path) -> None:
+    raw = yaml.safe_load(package_policy_resource_path().read_text(encoding="utf-8"))
+    raw["qualified_families"] = ["moneyline", "method"]
+    raw["market_maturity"]["method"] = "qualified"
+    path = Path(tmp_path) / "two_family.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    policy = load_recommendation_policy(path=path, enforce_pinned_digest=False)
+    moneyline = make_candidate(
+        family=MarketFamily.MONEYLINE,
+        outcome=OutcomeKey.FIGHTER_A,
+        quote=eligible_quote(2.60),
+        p50=0.50,
+        p25=0.40,
+        policy=policy,
+    )
+    method = make_candidate(
+        family=MarketFamily.METHOD,
+        outcome=OutcomeKey.KO_TKO,
+        quote=eligible_quote(2.60),
+        p50=0.50,
+        p25=0.40,
+        policy=policy,
+    )
+    report = select_recommendations([method, moneyline], policy)
+    assert len(report.confirmed_value) == 1
+    assert report.confirmed_value[0].family is MarketFamily.MONEYLINE
 
 
 def test_quoted_failure_is_no_bet_not_price_target() -> None:

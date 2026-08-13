@@ -12,8 +12,12 @@ from mma_model.backtest.engine import (
     BoutPrediction,
     CardScore,
     ExclusionReason,
+    QuoteCandidate,
+    SelectionUncertainty,
     _event_is_holdout_season,
     _selection_id,
+    attach_market_uncertainty,
+    join_quote,
     markets_from_joint,
     moneyline_markets,
 )
@@ -127,7 +131,12 @@ class SnapshotWalkForwardScorer:
     _frozen_joint: TemperatureCalibrator | None = None
     _pending_joint_logits: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
-    def score_card(self, group: EventGroup, fold: FoldMetadata) -> CardScore:
+    def score_card(
+        self,
+        group: EventGroup,
+        fold: FoldMetadata,
+        quotes: Sequence[QuoteCandidate] = (),
+    ) -> CardScore:
         assert_same_card_not_in_train(
             test_event_id=group.event_id, train_event_ids=fold.train_event_ids
         )
@@ -178,6 +187,7 @@ class SnapshotWalkForwardScorer:
                 model=joint_model,
                 calibrator=joint_cal,
                 ridge_cal=ridge_cal,
+                quotes=quotes,
             )
         else:
             score = self._score_m1(
@@ -191,6 +201,7 @@ class SnapshotWalkForwardScorer:
                     if joint_model is None
                     else ExclusionReason.UNCALIBRATED.value
                 ),
+                quotes=quotes,
             )
             if joint_model is not None:
                 self._record_joint_raw_oof(group, fold, joint_model)
@@ -476,6 +487,82 @@ class SnapshotWalkForwardScorer:
         except (CalibrationError, ValueError):
             return None
 
+    def _observed_prices(
+        self,
+        quotes: Sequence[QuoteCandidate],
+        *,
+        bout_ids: Sequence[str],
+        cutoff: datetime,
+    ) -> dict[str, float]:
+        allowed = set(bout_ids)
+        prices: dict[str, float] = {}
+        seen: set[tuple[str, str, str, float | None]] = set()
+        for quote in quotes:
+            if quote.bout_id not in allowed:
+                continue
+            key = (quote.bout_id, quote.market_family, quote.outcome_key, quote.line_point)
+            if key in seen:
+                continue
+            seen.add(key)
+            joined = join_quote(
+                quotes,
+                bout_id=quote.bout_id,
+                family=quote.market_family,
+                outcome_key=quote.outcome_key,
+                line_point=quote.line_point,
+                cutoff=cutoff,
+            )
+            if not joined.priced or joined.quote is None or not joined.quote.eligible:
+                continue
+            prices[
+                f"{quote.bout_id}|"
+                f"{_selection_id(quote.market_family, quote.outcome_key, quote.line_point)}"
+            ] = float(joined.quote.price_decimal)
+        return prices
+
+    @staticmethod
+    def _quote_flags(
+        quotes: Sequence[QuoteCandidate],
+        *,
+        bout_id: str,
+        cutoff: datetime,
+    ) -> tuple[bool, bool]:
+        matching = [
+            item
+            for item in quotes
+            if item.bout_id == bout_id and item.observed_at <= cutoff
+        ]
+        return (
+            any(item.is_ambiguous for item in matching),
+            any(item.is_replacement for item in matching),
+        )
+
+    @staticmethod
+    def _sign_equivalent_ev(prob: float, odds: float) -> float:
+        return float(odds) * float(prob) - 1.0
+
+    @staticmethod
+    def _uncertainty_map(
+        summary: Any,
+        *,
+        calibrator_hash: str | None,
+    ) -> dict[str, SelectionUncertainty]:
+        rows: dict[str, SelectionUncertainty] = {}
+        for target in summary.targets:
+            rows[target.target_id] = SelectionUncertainty(
+                p25=float(target.p25),
+                p75=float(target.p75),
+                n_successful=int(summary.n_successful),
+                seed=int(summary.seed),
+                production_qualified=bool(summary.production_qualified),
+                prob_ev_positive=target.prob_ev_positive,
+                estimator_hash=summary.estimator_hash,
+                calibrator_hash=calibrator_hash,
+                data_hash=summary.data_hash,
+                config_hash=summary.config_hash,
+            )
+        return rows
+
     def _m1_blocks(self, samples: Sequence[LabeledSample]) -> tuple[EventBlock[LabeledSample], ...]:
         grouped: dict[str, list[LabeledSample]] = {}
         for sample in samples:
@@ -504,7 +591,9 @@ class SnapshotWalkForwardScorer:
         estimator_hash: str,
         calibrator: SigmoidCalibrator | None,
         fold: FoldMetadata,
-    ) -> dict[str, tuple[float, float]]:
+        observed_prices: Mapping[str, float] | None = None,
+        calibrator_hash: str | None = None,
+    ) -> dict[str, SelectionUncertainty]:
         if calibrator is None or not train or not targets:
             return {}
         spec = load_ridge_spec()
@@ -519,7 +608,9 @@ class SnapshotWalkForwardScorer:
             out: dict[str, float] = {}
             for bout_id, values in targets.items():
                 raw = float(predict_ridge_win_prob(fitted, values))
-                out[bout_id] = float(calibrator.apply_probability(raw))
+                p_a = float(calibrator.apply_probability(raw))
+                out[f"{bout_id}|{_selection_id('moneyline', 'fighter_a', None)}"] = p_a
+                out[f"{bout_id}|{_selection_id('moneyline', 'fighter_b', None)}"] = 1.0 - p_a
             return out
 
         try:
@@ -533,13 +624,12 @@ class SnapshotWalkForwardScorer:
                 config_hash=fold.config_hash,
                 data_hash=fold.data_hash,
                 contract_hash=fold.contract_hash,
+                observed_prices=observed_prices,
+                ev_positive_fn=self._sign_equivalent_ev,
             )
         except (BootstrapError, TrainError):
             return {}
-        out: dict[str, tuple[float, float]] = {}
-        for target in summary.targets:
-            out[target.target_id] = (float(target.p25), float(target.p75))
-        return out
+        return self._uncertainty_map(summary, calibrator_hash=calibrator_hash)
 
     def _p25_joint(
         self,
@@ -549,7 +639,9 @@ class SnapshotWalkForwardScorer:
         estimator_hash: str,
         calibrator: TemperatureCalibrator,
         fold: FoldMetadata,
-    ) -> dict[str, float]:
+        observed_prices: Mapping[str, float] | None = None,
+        calibrator_hash: str | None = None,
+    ) -> dict[str, SelectionUncertainty]:
         if not train or not targets:
             return {}
         spec = load_joint_spec()
@@ -597,10 +689,12 @@ class SnapshotWalkForwardScorer:
                 config_hash=fold.config_hash,
                 data_hash=fold.data_hash,
                 contract_hash=fold.contract_hash,
+                observed_prices=observed_prices,
+                ev_positive_fn=self._sign_equivalent_ev,
             )
         except (BootstrapError, TrainError, MissingJointClassError):
             return {}
-        return {target.target_id: float(target.p25) for target in summary.targets}
+        return self._uncertainty_map(summary, calibrator_hash=calibrator_hash)
 
     def _score_m1(
         self,
@@ -611,6 +705,7 @@ class SnapshotWalkForwardScorer:
         train_samples: Sequence[LabeledSample],
         calibrator: SigmoidCalibrator | None,
         fallback_reason: str,
+        quotes: Sequence[QuoteCandidate] = (),
     ) -> CardScore:
         try:
             model = fit_ridge(train_samples, load_ridge_spec())
@@ -640,12 +735,17 @@ class SnapshotWalkForwardScorer:
             )
             built[bout_id] = (bout, row)
             target_values[bout_id] = row.values
+        observed_prices = self._observed_prices(
+            quotes, bout_ids=tuple(built), cutoff=group.cutoff.cutoff
+        )
         p25_map = self._p25_m1(
             train=train_samples,
             targets=target_values,
             estimator_hash=estimator_hash,
             calibrator=calibrator,
             fold=fold,
+            observed_prices=observed_prices,
+            calibrator_hash=calibrator_hash,
         )
         predictions: list[BoutPrediction] = []
         for bout_id, (_bout, row) in built.items():
@@ -658,19 +758,38 @@ class SnapshotWalkForwardScorer:
                 uncalibrated = True
             p_a = min(max(p_a, 1e-15), 1.0 - 1e-15)
             p_b = 1.0 - p_a
-            p25_p75 = p25_map.get(bout_id)
-            p25 = None if p25_p75 is None else p25_p75[0]
-            p75 = None if p25_p75 is None else p25_p75[1]
+            unc_a = p25_map.get(f"{bout_id}|{_selection_id('moneyline', 'fighter_a', None)}")
+            unc_b = p25_map.get(f"{bout_id}|{_selection_id('moneyline', 'fighter_b', None)}")
+            p25 = None if unc_a is None else unc_a.p25
+            p75 = None if unc_a is None else unc_a.p75
+            p25_b = None if unc_b is None else unc_b.p25
             p25_reason = None
             if uncalibrated:
                 p25_reason = ExclusionReason.UNCALIBRATED.value
                 p25 = None
                 p75 = None
+                p25_b = None
             elif p25 is None:
                 p25_reason = ExclusionReason.MISSING_P25.value
             moneyline = self._quote_moneyline(bout_id, group.cutoff.cutoff)
             no_vig = no_vig_win_prob(moneyline, cutoff=group.cutoff.cutoff)
             no_vig_p = None if isinstance(no_vig, MissingNoVig) else float(no_vig)
+            markets = moneyline_markets(
+                p_a=p_a,
+                p_b=p_b,
+                p_draw=0.0,
+                p25=p25,
+                p75=p75,
+                p25_b=p25_b,
+                fallback_reason=fallback_reason,
+            )
+            if not uncalibrated:
+                markets = attach_market_uncertainty(
+                    markets, bout_id=bout_id, by_key=p25_map
+                )
+            ambiguous, replacement = self._quote_flags(
+                quotes, bout_id=bout_id, cutoff=group.cutoff.cutoff
+            )
             predictions.append(
                 BoutPrediction(
                     bout_id=bout_id,
@@ -682,14 +801,7 @@ class SnapshotWalkForwardScorer:
                     p50=p_a,
                     p25=p25,
                     joint_atoms=None,
-                    markets=moneyline_markets(
-                        p_a=p_a,
-                        p_b=p_b,
-                        p_draw=0.0,
-                        p25=p25,
-                        p75=p75,
-                        fallback_reason=fallback_reason,
-                    ),
+                    markets=markets,
                     estimator_hash=estimator_hash,
                     calibrator_hash=calibrator_hash,
                     train_event_ids=train_events,
@@ -699,6 +811,11 @@ class SnapshotWalkForwardScorer:
                     baseline_no_vig=no_vig_p,
                     baseline_m1=raw_p,
                     p25_unavailable_reason=p25_reason,
+                    feature_quality=row.quality_flag.value,
+                    identity_resolved=True,
+                    canonical_match=True,
+                    ambiguous=ambiguous,
+                    replacement=replacement,
                 )
             )
         return CardScore(
@@ -722,6 +839,7 @@ class SnapshotWalkForwardScorer:
         model: JointPredictor,
         calibrator: TemperatureCalibrator,
         ridge_cal: SigmoidCalibrator | None,
+        quotes: Sequence[QuoteCandidate] = (),
     ) -> CardScore:
         estimator_hash = model.identity_hash()
         self.last_fit_hashes[group.event_id] = estimator_hash
@@ -744,12 +862,17 @@ class SnapshotWalkForwardScorer:
             rounds_n = int(bout.scheduled_rounds or 3)
             built[bout_id] = (bout, row, rounds_n)
             targets.append((bout_id, row.values, rounds_n))
+        observed_prices = self._observed_prices(
+            quotes, bout_ids=tuple(built), cutoff=group.cutoff.cutoff
+        )
         p25_by_key = self._p25_joint(
             train=joint_train,
             targets=targets,
             estimator_hash=estimator_hash,
             calibrator=calibrator,
             fold=fold,
+            observed_prices=observed_prices,
+            calibrator_hash=calibrator_hash,
         )
         m1_raw: dict[str, float] = {}
         try:
@@ -772,12 +895,16 @@ class SnapshotWalkForwardScorer:
                 hazard, decision, scheduled_rounds=rounds_n
             )
             p25_map = {
-                key.split("|", 1)[1]: value
-                for key, value in p25_by_key.items()
+                key.split("|", 1)[1]: unc.p25
+                for key, unc in p25_by_key.items()
                 if key.startswith(f"{bout_id}|")
             }
-            markets = markets_from_joint(
-                atoms, scheduled_rounds=rounds_n, p25_by_selection=p25_map
+            markets = attach_market_uncertainty(
+                markets_from_joint(
+                    atoms, scheduled_rounds=rounds_n, p25_by_selection=p25_map
+                ),
+                bout_id=bout_id,
+                by_key=p25_by_key,
             )
             p_a = float(sum(v for k, v in atoms.items() if k.startswith("a_")))
             p_b = float(sum(v for k, v in atoms.items() if k.startswith("b_")))
@@ -791,6 +918,9 @@ class SnapshotWalkForwardScorer:
             missing = any(
                 market.available and market.outcome_key and market.p25 is None
                 for market in markets
+            )
+            ambiguous, replacement = self._quote_flags(
+                quotes, bout_id=bout_id, cutoff=group.cutoff.cutoff
             )
             predictions.append(
                 BoutPrediction(
@@ -815,6 +945,11 @@ class SnapshotWalkForwardScorer:
                     p25_unavailable_reason=(
                         ExclusionReason.MISSING_P25.value if missing else None
                     ),
+                    feature_quality=row.quality_flag.value,
+                    identity_resolved=True,
+                    canonical_match=True,
+                    ambiguous=ambiguous,
+                    replacement=replacement,
                 )
             )
         return CardScore(

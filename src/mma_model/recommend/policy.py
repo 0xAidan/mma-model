@@ -68,6 +68,8 @@ POLICY_ID: Final = "dwcs_recommendation"
 EXPECTED_SCHEMA_VERSION: Final = 1
 EXPECTED_POLICY_VERSION: Final = "1.0.0"
 PRODUCTION_BOOTSTRAP_REFITS: Final = 200
+P25_EV_ZERO_EPS: Final = 1e-12
+VOID_P50_TOLERANCE: Final = P25_EV_ZERO_EPS
 SHA256_HEX: Final = re.compile(r"^[0-9a-f]{64}$")
 PINNED_POLICY_HASH: Final = (
     "6f18bffd536f4b9a7f41ac6e05903758595981e1dabc28a7d310a422532eb646"
@@ -575,6 +577,10 @@ class QuoteEvidence:
     locked: bool = False
     replaced: bool = False
     ambiguous: bool = False
+    selection_identity: str | None = None
+    recorder: str | None = None
+    manual_source: str | None = None
+    asserted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         validate_decimal_odds(self.offered_decimal, field="offered_decimal")
@@ -584,6 +590,8 @@ class QuoteEvidence:
             require_aware(self.eligibility_evaluated_at, field="eligibility_evaluated_at")
         if self.freshness_at is not None:
             require_aware(self.freshness_at, field="freshness_at")
+        if self.asserted_at is not None:
+            require_aware(self.asserted_at, field="asserted_at")
         if self.source_kind is QuoteSourceKind.AUTOMATIC:
             return
         if self.source_kind is QuoteSourceKind.USER_OBSERVED:
@@ -623,6 +631,7 @@ class SelectionCandidate:
     quote: QuoteEvidence | None = None
     prob_ev_positive: float | None = None
     production_uncertainty: bool = False
+    feature_quality: str | None = None
 
     def __post_init__(self) -> None:
         if not self.event_id.strip() or not self.bout_id.strip() or not self.selection_id.strip():
@@ -816,20 +825,30 @@ def _evaluate_identity(candidate: SelectionCandidate) -> GateResult:
 
 def _evaluate_data_quality(candidate: SelectionCandidate) -> GateResult:
     reasons: list[NoBetReason] = []
+    if candidate.feature_quality is None:
+        reasons.append(NoBetReason.INCOMPLETE_DATA)
+    elif candidate.feature_quality != "healthy":
+        reasons.append(NoBetReason.DATA_QUALITY)
     if not candidate.data_quality_pass:
         reasons.append(NoBetReason.DATA_QUALITY)
-    return GateResult(gate=GateId.DATA_QUALITY, passed=not reasons, reasons=tuple(reasons))
+    seen: set[NoBetReason] = set()
+    ordered: list[NoBetReason] = []
+    for reason in reasons:
+        if reason not in seen:
+            seen.add(reason)
+            ordered.append(reason)
+    return GateResult(gate=GateId.DATA_QUALITY, passed=not ordered, reasons=tuple(ordered))
 
 
 def _evaluate_model(candidate: SelectionCandidate, policy: RecommendationPolicy) -> GateResult:
     reasons: list[NoBetReason] = []
     if not candidate.model_qualified:
         reasons.append(NoBetReason.MODEL_UNQUALIFIED)
-    if not candidate.calibrated:
+    if not candidate.calibrated or candidate.calibration_hash is None:
         reasons.append(NoBetReason.UNCALIBRATED)
     if (
-        candidate.evaluation_contract_hash is not None
-        and candidate.evaluation_contract_hash != policy.evaluation_contract_hash
+        candidate.evaluation_contract_hash is None
+        or candidate.evaluation_contract_hash != policy.evaluation_contract_hash
     ):
         reasons.append(NoBetReason.HASH_MISMATCH)
     return GateResult(gate=GateId.MODEL, passed=not reasons, reasons=tuple(reasons))
@@ -837,11 +856,25 @@ def _evaluate_model(candidate: SelectionCandidate, policy: RecommendationPolicy)
 
 def _evaluate_uncertainty(candidate: SelectionCandidate) -> GateResult:
     reasons: list[NoBetReason] = []
+    if not _production_uncertainty(candidate):
+        if not candidate.production_uncertainty or (
+            candidate.bootstrap_successful_count != PRODUCTION_BOOTSTRAP_REFITS
+            and candidate.bootstrap_successful_count is not None
+        ):
+            reasons.append(NoBetReason.NONPRODUCTION_UNCERTAINTY)
+        if candidate.bootstrap_successful_count is None or candidate.bootstrap_seed is None:
+            reasons.append(NoBetReason.MISSING_BOOTSTRAP)
     if candidate.p25 is None:
         reasons.append(NoBetReason.MISSING_P25)
     elif candidate.p25 > candidate.p50:
         reasons.append(NoBetReason.INVALID_PERCENTILES)
-    return GateResult(gate=GateId.UNCERTAINTY, passed=not reasons, reasons=tuple(reasons))
+    seen: set[NoBetReason] = set()
+    ordered: list[NoBetReason] = []
+    for reason in reasons:
+        if reason not in seen:
+            seen.add(reason)
+            ordered.append(reason)
+    return GateResult(gate=GateId.UNCERTAINTY, passed=not ordered, reasons=tuple(ordered))
 
 
 def _evaluate_maturity(
@@ -883,7 +916,9 @@ def _evaluate_named_gate(
     raise PolicyValidationError(f"unhandled gate: {never_gate!r}")
 
 
-def _quote_gate_reasons(quote: QuoteEvidence) -> tuple[NoBetReason, ...]:
+def _quote_gate_reasons(
+    quote: QuoteEvidence, candidate: SelectionCandidate
+) -> tuple[NoBetReason, ...]:
     reasons: list[NoBetReason] = []
     observed = require_aware(quote.observed_at, field="observed_at")
     cutoff = require_aware(quote.cutoff, field="cutoff")
@@ -905,33 +940,40 @@ def _quote_gate_reasons(quote: QuoteEvidence) -> tuple[NoBetReason, ...]:
         "replaced",
     }:
         reasons.append(NoBetReason.INELIGIBLE_QUOTE)
-    missing_decision = (
-        not quote.eligibility_decision_identity
-        or not quote.eligibility_decision_version
-        or quote.eligibility_evaluated_at is None
-    )
-    if missing_decision:
-        reasons.append(NoBetReason.MISSING_ELIGIBILITY_DECISION)
-    else:
-        version = str(quote.eligibility_decision_version)
-        if version not in RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS:
-            reasons.append(NoBetReason.MISSING_ELIGIBILITY_DECISION)
-        evaluated = require_aware(
-            cast(datetime, quote.eligibility_evaluated_at),
-            field="eligibility_evaluated_at",
+    if quote.source_kind is QuoteSourceKind.AUTOMATIC:
+        missing_decision = (
+            not quote.eligibility_decision_identity
+            or not quote.eligibility_decision_version
+            or quote.eligibility_evaluated_at is None
         )
-        if evaluated != cutoff:
+        if missing_decision:
+            reasons.append(NoBetReason.MISSING_ELIGIBILITY_DECISION)
+        else:
+            version = str(quote.eligibility_decision_version)
+            if version not in RECOGNIZED_QUOTE_ELIGIBILITY_DECISION_VERSIONS:
+                reasons.append(NoBetReason.MISSING_ELIGIBILITY_DECISION)
+            evaluated = require_aware(
+                cast(datetime, quote.eligibility_evaluated_at),
+                field="eligibility_evaluated_at",
+            )
+            if evaluated != cutoff:
+                reasons.append(NoBetReason.INELIGIBLE_QUOTE)
+            if not quote.eligible:
+                reasons.append(NoBetReason.INELIGIBLE_QUOTE)
+    elif quote.source_kind is QuoteSourceKind.USER_OBSERVED:
+        missing_binding = (
+            not quote.selection_identity
+            or quote.selection_identity != candidate.selection_id
+            or not quote.bookmaker_key
+            or not quote.recorder
+            or not quote.manual_source
+            or quote.asserted_at is None
+        )
+        if missing_binding:
             reasons.append(NoBetReason.INELIGIBLE_QUOTE)
-        if not quote.eligible:
-            reasons.append(NoBetReason.INELIGIBLE_QUOTE)
-    if quote.source_kind is QuoteSourceKind.AUTOMATIC or (
-        quote.source_kind is QuoteSourceKind.USER_OBSERVED
-    ):
-        pass
     else:
         never_kind: Never = quote.source_kind
         raise PolicyValidationError(f"unhandled quote source kind: {never_kind!r}")
-    # Deduplicate while preserving order.
     seen: set[NoBetReason] = set()
     ordered: list[NoBetReason] = []
     for reason in reasons:
@@ -942,7 +984,19 @@ def _quote_gate_reasons(quote: QuoteEvidence) -> tuple[NoBetReason, ...]:
 
 
 def _production_uncertainty(candidate: SelectionCandidate) -> bool:
-    return candidate.bootstrap_successful_count == PRODUCTION_BOOTSTRAP_REFITS
+    calibration_hash = candidate.calibration_hash
+    if calibration_hash is None:
+        return False
+    return (
+        candidate.production_uncertainty
+        and candidate.bootstrap_successful_count == PRODUCTION_BOOTSTRAP_REFITS
+        and candidate.bootstrap_seed is not None
+        and candidate.p25 is not None
+        and SHA256_HEX.fullmatch(candidate.estimator_hash) is not None
+        and SHA256_HEX.fullmatch(calibration_hash) is not None
+        and SHA256_HEX.fullmatch(candidate.data_hash) is not None
+        and SHA256_HEX.fullmatch(candidate.config_hash) is not None
+    )
 
 
 def _price_gate_reasons(
@@ -965,18 +1019,13 @@ def _price_gate_reasons(
         ),
     ):
         reasons.append(NoBetReason.BELOW_ACTIONABLE)
-    if not _production_uncertainty(candidate):
-        if candidate.bootstrap_successful_count is None:
-            reasons.append(NoBetReason.MISSING_BOOTSTRAP)
-        else:
-            reasons.append(NoBetReason.NONPRODUCTION_UNCERTAINTY)
     if candidate.prob_ev_positive is None:
         reasons.append(NoBetReason.MISSING_PROB_EV_POSITIVE)
     else:
         minimum = policy.min_prob_ev_positive(candidate.family)
         if candidate.prob_ev_positive < minimum:
             reasons.append(NoBetReason.PROB_EV_POSITIVE_LOW)
-    if p25_ev is None or p25_ev < 0.0:
+    if p25_ev is None or p25_ev < -P25_EV_ZERO_EPS:
         reasons.append(NoBetReason.P25_EV_NONPOSITIVE)
     del thresholds
     seen: set[NoBetReason] = set()
@@ -996,9 +1045,15 @@ def observed_ev(
 ) -> tuple[float, str]:
     """Return (ev, semantics label) for an observed decimal price.
 
-    Thresholds always use the candidate p50/p25 as provided (conditional
-    non-void for void-on-draw families). Exact per-stake EV uses
-    unconditional components when present and does not condition twice.
+    Thresholds and ranking use the candidate p50/p25 as provided. For
+    void-on-draw families those ranking probabilities must be
+    ``conditional_nonvoid``. Exact per-stake median EV uses unconditional
+    components when present and does not condition twice.
+
+    If ``p_void > 0`` but ``p_win_unconditional`` is absent, displayed EV
+    may be labeled conditional only when p50 is explicitly
+    ``CONDITIONAL_NONVOID``. Exhaustive probabilities are never relabeled
+    conditional, and void is never treated as a loss.
     """
     family = candidate.family
     voids = family in VOID_ON_DRAW_FAMILIES
@@ -1019,20 +1074,17 @@ def observed_ev(
     if candidate.probability_semantics is ProbabilitySemantics.CONDITIONAL_NONVOID:
         return expected_value(probability, offered_decimal), EV_LABEL_CONDITIONAL
     if candidate.probability_semantics is ProbabilitySemantics.EXHAUSTIVE:
-        if (
-            voids
-            and candidate.p_void not in (None, 0.0)
-            and probability == candidate.p50
-            and candidate.p_win_unconditional is None
-        ):
-            return expected_value(probability, offered_decimal), EV_LABEL_CONDITIONAL
         return expected_value(probability, offered_decimal), EV_LABEL_EXHAUSTIVE
     never_sem: Never = candidate.probability_semantics
     raise PolicyValidationError(f"unhandled probability semantics: {never_sem!r}")
 
 
 def ranking_p25_ev(candidate: SelectionCandidate, offered_decimal: float) -> float:
-    """Frozen ranking score: p25 EV in the policy's declared semantics."""
+    """Frozen ranking score: conditional p25 EV (``p25 * odds - 1``).
+
+    Exact median EV uses unconditional components when present. Ranking does
+    not switch to void-aware exact EV.
+    """
     p25 = candidate.p25
     if p25 is None:
         raise PolicyValidationError("ranking p25 EV requires a valid p25")
@@ -1042,6 +1094,22 @@ def ranking_p25_ev(candidate: SelectionCandidate, offered_decimal: float) -> flo
         return expected_value(p25, offered_decimal)
     never_sem: Never = candidate.probability_semantics
     raise PolicyValidationError(f"unhandled probability semantics: {never_sem!r}")
+
+
+def _void_consistency_reasons(candidate: SelectionCandidate) -> tuple[NoBetReason, ...]:
+    if candidate.family not in VOID_ON_DRAW_FAMILIES:
+        return ()
+    if candidate.probability_semantics is not ProbabilitySemantics.CONDITIONAL_NONVOID:
+        return (NoBetReason.MALFORMED_CANDIDATE,)
+    if candidate.p_win_unconditional is None or candidate.p_void is None:
+        return ()
+    denom = 1.0 - candidate.p_void
+    if denom <= 0.0:
+        return (NoBetReason.MALFORMED_CANDIDATE,)
+    expected = candidate.p_win_unconditional / denom
+    if abs(candidate.p50 - expected) > VOID_P50_TOLERANCE:
+        return (NoBetReason.MALFORMED_CANDIDATE,)
+    return ()
 
 
 def _no_bet_decision(
@@ -1091,7 +1159,7 @@ def _no_bet_decision(
         ev_semantics_label=ev_semantics_label,
         offered_decimal=offered_decimal,
         offered_american=offered_american,
-        prob_ev_positive=prob_ev_positive if candidate is None else candidate.prob_ev_positive,
+        prob_ev_positive=prob_ev_positive,
         detail=detail,
     )
 
@@ -1133,6 +1201,26 @@ def evaluate_selection(
     policy: RecommendationPolicy,
 ) -> SelectionDecision:
     """Evaluate one selection. Failed pre-price gates never consult price."""
+    void_reasons = _void_consistency_reasons(candidate)
+    if void_reasons:
+        return _no_bet_decision(
+            candidate=candidate,
+            event_id=candidate.event_id,
+            bout_id=candidate.bout_id,
+            selection_id=candidate.selection_id,
+            reasons=void_reasons,
+            policy=policy,
+            gate_trace=GateTrace(
+                results=(
+                    GateResult(
+                        gate=GateId.IDENTITY,
+                        passed=False,
+                        reasons=void_reasons,
+                    ),
+                )
+            ),
+            detail="void probability components are inconsistent or unlabeled",
+        )
     pre_results = [
         _evaluate_named_gate(gate, candidate, policy) for gate in policy.gate_order
     ]
@@ -1176,7 +1264,7 @@ def evaluate_selection(
             prob_ev_positive=None,
         )
 
-    quote_reasons = _quote_gate_reasons(quote)
+    quote_reasons = _quote_gate_reasons(quote, candidate)
     quote_result = GateResult(
         gate=GateId.QUOTE, passed=not quote_reasons, reasons=quote_reasons
     )
@@ -1208,6 +1296,7 @@ def evaluate_selection(
             ev_semantics_label=ev_label,
             offered_decimal=quote.offered_decimal,
             offered_american=offered_american,
+            prob_ev_positive=candidate.prob_ev_positive,
         )
     return SelectionDecision(
         event_id=candidate.event_id,
@@ -1293,6 +1382,20 @@ def coerce_candidate(
                 locked=bool(quote_raw.get("locked", False)),
                 replaced=bool(quote_raw.get("replaced", False)),
                 ambiguous=bool(quote_raw.get("ambiguous", False)),
+                selection_identity=(
+                    None
+                    if quote_raw.get("selection_identity") is None
+                    else str(quote_raw["selection_identity"])
+                ),
+                recorder=(
+                    None if quote_raw.get("recorder") is None else str(quote_raw["recorder"])
+                ),
+                manual_source=(
+                    None
+                    if quote_raw.get("manual_source") is None
+                    else str(quote_raw["manual_source"])
+                ),
+                asserted_at=quote_raw.get("asserted_at"),
             )
         else:
             raise ValueError("quote must be a mapping or QuoteEvidence")
@@ -1327,13 +1430,13 @@ def coerce_candidate(
             ),
             data_hash=str(raw["data_hash"]),
             config_hash=str(raw["config_hash"]),
-            identity_resolved=bool(raw.get("identity_resolved", True)),
-            canonical_match=bool(raw.get("canonical_match", True)),
+            identity_resolved=bool(raw.get("identity_resolved", False)),
+            canonical_match=bool(raw.get("canonical_match", False)),
             ambiguous=bool(raw.get("ambiguous", False)),
             replacement=bool(raw.get("replacement", False)),
-            data_quality_pass=bool(raw.get("data_quality_pass", True)),
-            model_qualified=bool(raw.get("model_qualified", True)),
-            calibrated=bool(raw.get("calibrated", True)),
+            data_quality_pass=bool(raw.get("data_quality_pass", False)),
+            model_qualified=bool(raw.get("model_qualified", False)),
+            calibrated=bool(raw.get("calibrated", False)),
             market_maturity=maturity,
             p_win_unconditional=(
                 None
@@ -1351,6 +1454,9 @@ def coerce_candidate(
                 None if raw.get("prob_ev_positive") is None else float(raw["prob_ev_positive"])
             ),
             production_uncertainty=bool(raw.get("production_uncertainty", False)),
+            feature_quality=(
+                None if raw.get("feature_quality") is None else str(raw["feature_quality"])
+            ),
         )
     except (KeyError, TypeError, ValueError, ValidationError) as exc:
         return malformed_no_bet(
@@ -1373,6 +1479,7 @@ __all__ = [
     "POLICY_FILENAME",
     "POLICY_ID",
     "PRODUCTION_BOOTSTRAP_REFITS",
+    "P25_EV_ZERO_EPS",
     "GateId",
     "GateResult",
     "GateTrace",

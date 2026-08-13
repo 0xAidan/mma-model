@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from mma_model.domain.markets import MarketFamily, MarketMaturity, OutcomeKey
+from mma_model.domain.markets import VOID_ON_DRAW_FAMILIES, MarketFamily, MarketMaturity, OutcomeKey
 from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
 from mma_model.recommend.policy import (
     PRODUCTION_BOOTSTRAP_REFITS,
@@ -41,6 +41,10 @@ def eligible_quote(
     availability: str = "available",
     include_decision: bool = True,
     source_kind: QuoteSourceKind = QuoteSourceKind.AUTOMATIC,
+    selection_identity: str | None = None,
+    recorder: str | None = None,
+    manual_source: str | None = None,
+    asserted_at: datetime | None = None,
 ) -> QuoteEvidence:
     identity = None
     version = None
@@ -68,6 +72,10 @@ def eligible_quote(
         locked=locked,
         replaced=replaced,
         ambiguous=ambiguous,
+        selection_identity=selection_identity,
+        recorder=recorder,
+        manual_source=manual_source,
+        asserted_at=asserted_at,
     )
 
 
@@ -96,9 +104,28 @@ def make_candidate(
     p_void: float | None = None,
     estimator_hash: str = HASH_A,
     policy: RecommendationPolicy = POLICY,
+    production_uncertainty: bool | None = None,
+    feature_quality: str | None = "healthy",
 ) -> SelectionCandidate:
     resolved_quote = eligible_quote() if quote == "default" else quote
     maturity = policy.maturity_for(family) if market_maturity is None else market_maturity
+    resolved_semantics = probability_semantics
+    resolved_void = p_void
+    resolved_uncond = p_win_unconditional
+    if (
+        family in VOID_ON_DRAW_FAMILIES
+        and probability_semantics is ProbabilitySemantics.EXHAUSTIVE
+        and p_void is None
+    ):
+        resolved_semantics = ProbabilitySemantics.CONDITIONAL_NONVOID
+        resolved_void = 0.0
+        if resolved_uncond is None:
+            resolved_uncond = p50
+    resolved_production = (
+        bootstrap_successful_count == PRODUCTION_BOOTSTRAP_REFITS
+        if production_uncertainty is None
+        else production_uncertainty
+    )
     return SelectionCandidate(
         event_id=event_id,
         bout_id=bout_id,
@@ -114,7 +141,7 @@ def make_candidate(
         line_point=line_point,
         p50=p50,
         p25=p25,
-        probability_semantics=probability_semantics,
+        probability_semantics=resolved_semantics,
         bootstrap_successful_count=bootstrap_successful_count,
         bootstrap_seed=307001,
         estimator_hash=estimator_hash,
@@ -129,10 +156,11 @@ def make_candidate(
         model_qualified=model_qualified,
         calibrated=calibrated,
         market_maturity=maturity,
-        p_win_unconditional=p_win_unconditional,
-        p_void=p_void,
+        p_win_unconditional=resolved_uncond,
+        p_void=resolved_void,
         evaluation_contract_hash=policy.evaluation_contract_hash,
         quote=resolved_quote,
         prob_ev_positive=prob_ev_positive,
-        production_uncertainty=bootstrap_successful_count == PRODUCTION_BOOTSTRAP_REFITS,
+        production_uncertainty=resolved_production,
+        feature_quality=feature_quality,
     )

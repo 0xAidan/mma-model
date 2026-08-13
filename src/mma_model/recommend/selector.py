@@ -79,6 +79,59 @@ def no_bet_sort_key(decision: SelectionDecision) -> tuple[str, str, str]:
     return (decision.event_id, decision.bout_id, decision.selection_id)
 
 
+def _candidate_fingerprint(candidate: SelectionCandidate) -> str:
+    quote = candidate.quote
+    quote_payload: dict[str, Any] | None = None
+    if quote is not None:
+        quote_payload = {
+            "bookmaker_key": quote.bookmaker_key,
+            "eligible": quote.eligible,
+            "observed_at": quote.observed_at.isoformat(),
+            "offered_decimal": quote.offered_decimal,
+            "source_kind": quote.source_kind.value,
+        }
+    return sha256_canonical(
+        {
+            "bootstrap_seed": candidate.bootstrap_seed,
+            "bootstrap_successful_count": candidate.bootstrap_successful_count,
+            "calibration_hash": candidate.calibration_hash,
+            "config_hash": candidate.config_hash,
+            "data_hash": candidate.data_hash,
+            "estimator_hash": candidate.estimator_hash,
+            "p25": candidate.p25,
+            "p50": candidate.p50,
+            "p_void": candidate.p_void,
+            "p_win_unconditional": candidate.p_win_unconditional,
+            "prob_ev_positive": candidate.prob_ev_positive,
+            "probability_semantics": candidate.probability_semantics.value,
+            "quote": quote_payload,
+        }
+    )
+
+
+def _dedupe_candidates(candidates: Sequence[SelectionCandidate]) -> list[SelectionCandidate]:
+    grouped: dict[str, list[SelectionCandidate]] = {}
+    for item in candidates:
+        grouped.setdefault(item.selection_id, []).append(item)
+    out: list[SelectionCandidate] = []
+    for selection_id in sorted(grouped):
+        ordered = sorted(
+            grouped[selection_id],
+            key=lambda item: (
+                _candidate_fingerprint(item),
+                item.event_id,
+                item.bout_id,
+                item.selection_id,
+            ),
+        )
+        fingerprints = {_candidate_fingerprint(item) for item in ordered}
+        if len(fingerprints) == 1:
+            out.append(ordered[0])
+            continue
+        out.append(replace(ordered[0], ambiguous=True))
+    return out
+
+
 def _bout_key(decision: SelectionDecision) -> tuple[str, str]:
     return (decision.event_id, decision.bout_id)
 
@@ -261,6 +314,7 @@ def select_recommendations(
     source_backtest_hash: str | None = None,
 ) -> RecommendationReport:
     """Evaluate every input, then apply the frozen one-pick policy."""
+    coerced_candidates: list[SelectionCandidate] = []
     evaluated: list[SelectionDecision] = []
     for item in candidates:
         if isinstance(item, SelectionDecision):
@@ -270,7 +324,9 @@ def select_recommendations(
         if isinstance(coerced, SelectionDecision):
             evaluated.append(coerced)
             continue
-        evaluated.append(evaluate_selection(coerced, policy))
+        coerced_candidates.append(coerced)
+    for candidate in _dedupe_candidates(coerced_candidates):
+        evaluated.append(evaluate_selection(candidate, policy))
 
     by_bout: dict[tuple[str, str], list[SelectionDecision]] = {}
     for row in evaluated:

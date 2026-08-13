@@ -5,6 +5,7 @@ from __future__ import annotations
 from mma_model.domain.markets import MarketFamily, OutcomeKey, RecommendationState
 from mma_model.markets.price_targets import compute_price_thresholds, decimal_to_american
 from mma_model.recommend.policy import (
+    GateId,
     NoBetReason,
     _price_gate_reasons,
     evaluate_selection,
@@ -82,6 +83,7 @@ def test_below_actionable_and_p_ev_and_p25_ev_fail_exactly() -> None:
 
 
 def test_exact_round_requires_075_prob_ev_positive() -> None:
+    """Boundary helper only. Default policy still treats exact-round as experimental."""
     rendered = render_thresholds(0.20, 0.18, family=MarketFamily.EXACT_ROUND)
     passing = make_candidate(
         family=MarketFamily.EXACT_ROUND,
@@ -116,8 +118,9 @@ def test_nonproduction_and_missing_p_ev_cannot_confirm() -> None:
         ),
         POLICY,
     )
-    assert short.classification is RecommendationState.NO_BET
     assert NoBetReason.NONPRODUCTION_UNCERTAINTY in short.reasons
+    assert GateId.PRICE not in {item.gate for item in short.gate_trace.results}
+    assert short.offered_decimal is None
     missing = evaluate_selection(
         make_candidate(quote=eligible_quote(2.60), prob_ev_positive=None),
         POLICY,
