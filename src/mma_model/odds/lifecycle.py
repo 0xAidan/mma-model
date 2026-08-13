@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from mma_model.db.tables.odds import (
+    OddsAvailabilityObservation,
     OddsBoutLifecycleObservation,
     OddsProviderEventAlias,
     OddsQuote,
 )
+from mma_model.domain.markets import MarketFamily, OutcomeKey
+from mma_model.odds.manual_price import canonical_selection_identity
 
 VALUE_BLOCKING_LIFECYCLES: Final[frozenset[str]] = frozenset(
     {
@@ -127,12 +131,63 @@ class QuoteValueEligibility(StrEnum):
     BLOCKED = "blocked"
 
 
+class QuoteBlockReason(StrEnum):
+    NONE = "none"
+    UNMATCHED = "unmatched"
+    BOUT_TERMINAL = "bout_terminal"
+    SELECTION_LOCKED = "selection_locked"
+    MARKET_UNKNOWN = "market_unknown"
+    QUOTE_UNAVAILABLE = "quote_unavailable"
+    STALE = "stale"
+    NOT_VISIBLE = "not_visible"
+
+
+@dataclass(frozen=True)
+class QuoteEligibilityDecision:
+    """Per-quote value gate (book/region/market/outcome/line)."""
+
+    quote_id: int
+    eligible: bool
+    status: QuoteValueEligibility
+    reason: QuoteBlockReason
+    detail: str
+    selection_identity: str
+    bookmaker_key: str
+    region: str
+    market_family: str
+    outcome_key: str
+    line_point: float | None
+    freshness_at: datetime | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "quote_id": self.quote_id,
+            "eligible": self.eligible,
+            "status": self.status.value,
+            "reason": self.reason.value,
+            "detail": self.detail,
+            "selection_identity": self.selection_identity,
+            "bookmaker_key": self.bookmaker_key,
+            "region": self.region,
+            "market_family": self.market_family,
+            "outcome_key": self.outcome_key,
+            "line_point": self.line_point,
+            "freshness_at": (
+                self.freshness_at.isoformat() if self.freshness_at is not None else None
+            ),
+        }
+
+
 def classify_quote_value_eligibility(
     *,
     match_status: str,
     lifecycle: OddsBoutLifecycleState | str,
 ) -> QuoteValueEligibility:
-    """Only matched + active lifecycles may reach value calculations."""
+    """Bout/event match gate only — does not imply every quote is eligible.
+
+    Passes when matched and bout lifecycle is not terminal. Stale/missing markets
+    and selection locks are enforced by ``resolve_quote_value_eligibility``.
+    """
     life = (
         lifecycle.value
         if isinstance(lifecycle, OddsBoutLifecycleState)
@@ -140,9 +195,47 @@ def classify_quote_value_eligibility(
     )
     if match_status != "matched":
         return QuoteValueEligibility.BLOCKED
-    if life != OddsBoutLifecycleState.ACTIVE.value:
+    if life in TERMINAL_LIFECYCLES:
         return QuoteValueEligibility.BLOCKED
     return QuoteValueEligibility.ELIGIBLE
+
+
+def _lifecycle_row_is_bout_scoped(row: OddsBoutLifecycleObservation) -> bool:
+    return (
+        row.bookmaker_key is None
+        and row.region is None
+        and row.market_family is None
+        and row.outcome_key is None
+        and row.line_point is None
+        and row.quote_id is None
+    )
+
+
+def _selection_scope_applies(
+    row: OddsBoutLifecycleObservation,
+    *,
+    quote: OddsQuote,
+) -> bool:
+    """True when every non-null scope field on ``row`` matches ``quote``."""
+    if _lifecycle_row_is_bout_scoped(row):
+        return False
+    if row.quote_id is not None and int(row.quote_id) != int(quote.id):
+        return False
+    if row.bookmaker_key is not None and row.bookmaker_key != quote.bookmaker_key:
+        return False
+    if row.region is not None and row.region != quote.region:
+        return False
+    if row.market_family is not None and row.market_family != quote.market_family:
+        return False
+    if row.outcome_key is not None and row.outcome_key != quote.outcome_key:
+        return False
+    return not (
+        row.line_point is not None
+        and (
+            quote.line_point is None
+            or float(row.line_point) != float(quote.line_point)
+        )
+    )
 
 
 def _require_aware_utc(value: datetime, *, field: str) -> datetime:
@@ -211,7 +304,10 @@ def latest_bout_lifecycle(
     provider: str | None = None,
     external_event_id: str | None = None,
 ) -> OddsBoutLifecycleObservation | None:
-    """Latest explicit lifecycle row at/before as_of (PIT-safe)."""
+    """Latest bout/provider-event scoped lifecycle at/before as_of (PIT-safe).
+
+    Selection-scoped rows (book/market/outcome/line/quote) are ignored here.
+    """
     cutoff = _require_aware_utc(as_of, field="as_of")
     stmt = select(OddsBoutLifecycleObservation).where(
         OddsBoutLifecycleObservation.bout_id == bout_id
@@ -230,6 +326,46 @@ def latest_bout_lifecycle(
         row
         for row in session.scalars(stmt).all()
         if _as_utc_sqlite(row.observed_at) <= cutoff
+        and _lifecycle_row_is_bout_scoped(row)
+    ]
+    if not rows:
+        return None
+
+    def _sort_key(row: OddsBoutLifecycleObservation) -> tuple[datetime, int]:
+        return (_as_utc_sqlite(row.observed_at), int(row.id or 0))
+
+    return max(rows, key=_sort_key)
+
+
+def latest_selection_lifecycle(
+    session: Session,
+    *,
+    bout_id: str,
+    quote: OddsQuote,
+    as_of: datetime,
+    provider: str | None = None,
+    external_event_id: str | None = None,
+) -> OddsBoutLifecycleObservation | None:
+    """Latest selection-scoped lifecycle applying to ``quote`` at as_of."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    stmt = select(OddsBoutLifecycleObservation).where(
+        OddsBoutLifecycleObservation.bout_id == bout_id
+    )
+    if provider is not None:
+        stmt = stmt.where(
+            (OddsBoutLifecycleObservation.provider == provider)
+            | (OddsBoutLifecycleObservation.provider.is_(None))
+        )
+    if external_event_id is not None:
+        stmt = stmt.where(
+            (OddsBoutLifecycleObservation.external_event_id == external_event_id)
+            | (OddsBoutLifecycleObservation.external_event_id.is_(None))
+        )
+    rows = [
+        row
+        for row in session.scalars(stmt).all()
+        if _as_utc_sqlite(row.observed_at) <= cutoff
+        and _selection_scope_applies(row, quote=quote)
     ]
     if not rows:
         return None
@@ -357,6 +493,20 @@ def latest_quote_timestamp(
     return max(stamps)
 
 
+def quote_row_is_stale(
+    row: OddsQuote,
+    *,
+    as_of: datetime,
+    stale_after_minutes: int,
+) -> bool:
+    """True when this quote's own authoritative freshness exceeds stale_after."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    freshness = quote_authoritative_freshness(row, as_of=cutoff)
+    if freshness is None:
+        return True
+    return cutoff - freshness > timedelta(minutes=stale_after_minutes)
+
+
 def quote_is_stale(
     session: Session,
     *,
@@ -365,16 +515,115 @@ def quote_is_stale(
     observed_at: datetime,
     stale_after_minutes: int,
 ) -> bool:
+    """Deprecated event-wide helper: true only when every visible quote is stale.
+
+    Prefer ``quote_row_is_stale`` / ``resolve_quote_value_eligibility``.
+    """
     as_of = _require_aware_utc(observed_at, field="observed_at")
-    latest = latest_quote_timestamp(
+    rows = quotes_visible_under_alias_at(
         session,
         provider=provider,
         external_event_id=external_event_id,
         as_of=as_of,
     )
-    if latest is None:
+    if not rows:
         return False
-    return as_of - latest > timedelta(minutes=stale_after_minutes)
+    return all(
+        quote_row_is_stale(row, as_of=as_of, stale_after_minutes=stale_after_minutes)
+        for row in rows
+    )
+
+
+def availability_observations_visible_under_alias_at(
+    session: Session,
+    *,
+    provider: str,
+    external_event_id: str,
+    as_of: datetime,
+) -> list[OddsAvailabilityObservation]:
+    """Availability rows visible under the alias effective at as_of (PIT)."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    alias = alias_effective_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=cutoff,
+    )
+    if alias is None:
+        prior = session.scalars(
+            select(OddsProviderEventAlias).where(
+                OddsProviderEventAlias.provider == provider,
+                OddsProviderEventAlias.external_event_id == external_event_id,
+            )
+        ).all()
+        if any(_as_utc_sqlite(row.created_at) <= cutoff for row in prior):
+            return []
+        lower = None
+    else:
+        lower = alias_quote_lower_bound(alias)
+    rows = list(
+        session.scalars(
+            select(OddsAvailabilityObservation).where(
+                OddsAvailabilityObservation.provider == provider,
+                OddsAvailabilityObservation.external_event_id == external_event_id,
+            )
+        ).all()
+    )
+    visible: list[OddsAvailabilityObservation] = []
+    for row in rows:
+        observed = _as_utc_sqlite(row.observed_at)
+        if observed > cutoff:
+            continue
+        if lower is not None and observed < lower:
+            continue
+        if row.snapshot_at is not None and _as_utc_sqlite(row.snapshot_at) > cutoff:
+            continue
+        visible.append(row)
+    return visible
+
+
+def market_availability_unknown_at(
+    session: Session,
+    *,
+    provider: str,
+    external_event_id: str,
+    bookmaker_key: str,
+    region: str,
+    market_family: str,
+    provider_market_key: str | None = None,
+    as_of: datetime,
+) -> OddsAvailabilityObservation | None:
+    """Latest UNKNOWN availability for book/region/market at as_of, else None.
+
+    Never infers SUSPENDED/LOCKED from absence — only explicit UNKNOWN rows.
+    """
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    candidates = [
+        row
+        for row in availability_observations_visible_under_alias_at(
+            session,
+            provider=provider,
+            external_event_id=external_event_id,
+            as_of=cutoff,
+        )
+        if row.availability == "unknown"
+        and (row.bookmaker_key or "") == bookmaker_key
+        and row.region == region
+        and (
+            row.market_family == market_family
+            or (
+                provider_market_key is not None
+                and row.provider_market_key == provider_market_key
+            )
+        )
+    ]
+    if not candidates:
+        return None
+
+    def _sort_key(row: OddsAvailabilityObservation) -> tuple[datetime, int]:
+        return (_as_utc_sqlite(row.observed_at), int(row.id or 0))
+
+    return max(candidates, key=_sort_key)
 
 
 def resolve_match_lifecycle(
@@ -386,7 +635,13 @@ def resolve_match_lifecycle(
     observed_at: datetime,
     stale_after_minutes: int,
 ) -> tuple[OddsBoutLifecycleState, bool]:
-    """Resolve effective lifecycle for a successful match without overriding terminals."""
+    """Resolve bout-level match lifecycle and identity value gate.
+
+    ``eligible`` means matched identity may proceed to quote-level checks — it
+    does not mean every quote under the event is fresh/available. Staleness and
+    missing markets are enforced per quote, not by max() across books/markets.
+    """
+    del stale_after_minutes  # quote-level only; retained for call-site compat
     as_of = _require_aware_utc(observed_at, field="observed_at")
     latest = latest_bout_lifecycle(
         session,
@@ -405,18 +660,11 @@ def resolve_match_lifecycle(
         as_of=as_of,
     )
     if not visible:
-        return OddsBoutLifecycleState.MISSING_UNKNOWN, False
+        # Identity gate still open; no quotes to evaluate.
+        return OddsBoutLifecycleState.MISSING_UNKNOWN, True
 
-    if quote_is_stale(
-        session,
-        provider=provider,
-        external_event_id=external_event_id,
-        observed_at=as_of,
-        stale_after_minutes=stale_after_minutes,
-    ):
-        return OddsBoutLifecycleState.STALE, False
-
-    # Fresh quotes clear nonterminal observational blocks (STALE / MISSING).
+    # Bout observational ACTIVE when any quote is visible; per-quote stale/missing
+    # never flips the whole event.
     return OddsBoutLifecycleState.ACTIVE, True
 
 
@@ -431,6 +679,199 @@ def clears_observational_block(
     return previous.lifecycle in _OBSERVATIONAL_CLEARABLE
 
 
+def _quote_selection_identity(quote: OddsQuote) -> str:
+    family = MarketFamily(quote.market_family)
+    outcome = OutcomeKey(quote.outcome_key)
+    return canonical_selection_identity(family, outcome, quote.line_point)
+
+
+def resolve_quote_value_eligibility(
+    session: Session,
+    *,
+    quote: OddsQuote,
+    bout_id: str | None,
+    match_status: str,
+    as_of: datetime,
+    stale_after_minutes: int,
+) -> QuoteEligibilityDecision:
+    """Combine alias-effective match with quote-scoped freshness/availability/lock."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    selection = _quote_selection_identity(quote)
+    base = dict(
+        quote_id=int(quote.id),
+        selection_identity=selection,
+        bookmaker_key=quote.bookmaker_key,
+        region=quote.region,
+        market_family=quote.market_family,
+        outcome_key=quote.outcome_key,
+        line_point=quote.line_point,
+        freshness_at=quote_authoritative_freshness(quote, as_of=cutoff),
+    )
+    if match_status != "matched" or not bout_id:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.UNMATCHED,
+            detail="bout match required for value",
+            **base,
+        )
+
+    visible = quotes_visible_under_alias_at(
+        session,
+        provider=quote.provider,
+        external_event_id=quote.external_event_id,
+        as_of=cutoff,
+    )
+    if not any(int(row.id) == int(quote.id) for row in visible):
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.NOT_VISIBLE,
+            detail="quote not visible under alias at as_of",
+            **base,
+        )
+
+    bout_life = latest_bout_lifecycle(
+        session,
+        bout_id=bout_id,
+        as_of=cutoff,
+        provider=quote.provider,
+        external_event_id=quote.external_event_id,
+    )
+    if bout_life is not None and bout_life.lifecycle in TERMINAL_LIFECYCLES:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.BOUT_TERMINAL,
+            detail=f"bout lifecycle={bout_life.lifecycle}",
+            **base,
+        )
+
+    selection_life = latest_selection_lifecycle(
+        session,
+        bout_id=bout_id,
+        quote=quote,
+        as_of=cutoff,
+        provider=quote.provider,
+        external_event_id=quote.external_event_id,
+    )
+    if (
+        selection_life is not None
+        and selection_life.lifecycle == OddsBoutLifecycleState.LOCKED.value
+    ):
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.SELECTION_LOCKED,
+            detail=f"selection locked ({selection_life.evidence_kind})",
+            **base,
+        )
+
+    unknown = market_availability_unknown_at(
+        session,
+        provider=quote.provider,
+        external_event_id=quote.external_event_id,
+        bookmaker_key=quote.bookmaker_key,
+        region=quote.region,
+        market_family=quote.market_family,
+        provider_market_key=quote.provider_market_key,
+        as_of=cutoff,
+    )
+    if unknown is not None:
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.MARKET_UNKNOWN,
+            detail=(
+                f"availability unknown for {quote.bookmaker_key}/"
+                f"{quote.provider_market_key} (preserved UNKNOWN)"
+            ),
+            **base,
+        )
+
+    if quote.availability != "available":
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.QUOTE_UNAVAILABLE,
+            detail=f"quote availability={quote.availability}",
+            **base,
+        )
+
+    if quote_row_is_stale(
+        quote, as_of=cutoff, stale_after_minutes=stale_after_minutes
+    ):
+        return QuoteEligibilityDecision(
+            eligible=False,
+            status=QuoteValueEligibility.BLOCKED,
+            reason=QuoteBlockReason.STALE,
+            detail="quote authoritative freshness exceeds stale_after_minutes",
+            **base,
+        )
+
+    return QuoteEligibilityDecision(
+        eligible=True,
+        status=QuoteValueEligibility.ELIGIBLE,
+        reason=QuoteBlockReason.NONE,
+        detail="matched alias + available + fresh + not locked",
+        **base,
+    )
+
+
+def resolve_visible_quotes_value_eligibility(
+    session: Session,
+    *,
+    provider: str,
+    external_event_id: str,
+    bout_id: str | None,
+    match_status: str,
+    as_of: datetime,
+    stale_after_minutes: int,
+) -> list[QuoteEligibilityDecision]:
+    """Evaluate every alias-visible quote at as_of."""
+    cutoff = _require_aware_utc(as_of, field="as_of")
+    rows = quotes_visible_under_alias_at(
+        session,
+        provider=provider,
+        external_event_id=external_event_id,
+        as_of=cutoff,
+    )
+    return [
+        resolve_quote_value_eligibility(
+            session,
+            quote=row,
+            bout_id=bout_id,
+            match_status=match_status,
+            as_of=cutoff,
+            stale_after_minutes=stale_after_minutes,
+        )
+        for row in sorted(rows, key=lambda q: int(q.id or 0))
+    ]
+
+
+def summarize_quote_eligibility(
+    decisions: list[QuoteEligibilityDecision],
+) -> dict[str, Any]:
+    """Aggregate quote-level eligibility counts/reasons for reconcile reports."""
+    counts: dict[str, int] = {
+        "visible": len(decisions),
+        "eligible": 0,
+        "blocked": 0,
+    }
+    by_reason: dict[str, int] = {}
+    for row in decisions:
+        if row.eligible:
+            counts["eligible"] += 1
+        else:
+            counts["blocked"] += 1
+            by_reason[row.reason.value] = by_reason.get(row.reason.value, 0) + 1
+    return {
+        **counts,
+        "blocked_by_reason": dict(sorted(by_reason.items())),
+        "quotes": [row.as_dict() for row in decisions],
+    }
+
+
 def _lifecycle_dedupe_key(
     *,
     bout_id: str,
@@ -439,7 +880,14 @@ def _lifecycle_dedupe_key(
     observed_at: datetime,
     provider: str | None,
     external_event_id: str | None,
+    bookmaker_key: str | None,
+    region: str | None,
+    market_family: str | None,
+    outcome_key: str | None,
+    line_point: float | None,
+    quote_id: int | None,
 ) -> str:
+    point = "" if line_point is None else f"{float(line_point):.4f}"
     material = "|".join(
         [
             bout_id,
@@ -447,6 +895,12 @@ def _lifecycle_dedupe_key(
             evidence_kind,
             provider or "",
             external_event_id or "",
+            bookmaker_key or "",
+            region or "",
+            market_family or "",
+            outcome_key or "",
+            point,
+            "" if quote_id is None else str(int(quote_id)),
             _require_aware_utc(observed_at, field="observed_at").isoformat(),
         ]
     )
@@ -459,6 +913,12 @@ def _validate_lifecycle_evidence(
     evidence_kind: str,
     provider: str | None,
     external_event_id: str | None,
+    bookmaker_key: str | None,
+    region: str | None,
+    market_family: str | None,
+    outcome_key: str | None,
+    line_point: float | None,
+    quote_id: int | None,
 ) -> None:
     kind = (evidence_kind or "").strip()
     if not kind:
@@ -474,6 +934,33 @@ def _validate_lifecycle_evidence(
     ):
         raise ValueError(
             f"evidence_kind {kind!r} requires provider and external_event_id"
+        )
+    scoped = any(
+        value is not None
+        for value in (
+            bookmaker_key,
+            region,
+            market_family,
+            outcome_key,
+            line_point,
+            quote_id,
+        )
+    )
+    if scoped and lifecycle in {
+        OddsBoutLifecycleState.CANCELLED,
+        OddsBoutLifecycleState.REPLACED,
+        OddsBoutLifecycleState.REVIEW_BLOCKED,
+    }:
+        raise ValueError(
+            f"lifecycle {lifecycle.value!r} is bout-scoped only "
+            "(selection scope refused)"
+        )
+    if scoped and lifecycle is OddsBoutLifecycleState.LOCKED and not (
+        (bookmaker_key or "").strip() and (market_family or quote_id is not None)
+    ):
+        raise ValueError(
+            "selection-scoped lock requires bookmaker_key and "
+            "market_family (or quote_id)"
         )
     if kind in _CANONICAL_IDENTITY_EVIDENCE:
         # Canonical cancellation/replacement is bout-scoped; provider ids optional.
@@ -500,8 +987,17 @@ def apply_bout_lifecycle(
     external_event_id: str | None = None,
     detail: str | None = None,
     price_decimal: float | None = None,
+    bookmaker_key: str | None = None,
+    region: str | None = None,
+    market_family: str | None = None,
+    outcome_key: str | None = None,
+    line_point: float | None = None,
+    quote_id: int | None = None,
 ) -> OddsBoutLifecycleObservation | None:
     """Append an explicit lifecycle observation; never forward-fill prices.
+
+    Selection scope (book/region/market/outcome/line/quote_id) models line-level
+    lock/removal without inferring or forward-filling. Null scope = bout/event.
 
     Returns ``None`` when an ACTIVE transition is refused by the terminal
     transition matrix (provider unlock exits LOCKED only; cancelled/replaced
@@ -512,6 +1008,12 @@ def apply_bout_lifecycle(
         evidence_kind=evidence_kind,
         provider=provider,
         external_event_id=external_event_id,
+        bookmaker_key=bookmaker_key,
+        region=region,
+        market_family=market_family,
+        outcome_key=outcome_key,
+        line_point=line_point,
+        quote_id=quote_id,
     )
     kind = evidence_kind.strip()
     if price_decimal is not None:
@@ -520,14 +1022,59 @@ def apply_bout_lifecycle(
             "lifecycle rows never store prices"
         )
     stamp = _require_aware_utc(observed_at, field="observed_at")
-
-    latest = latest_bout_lifecycle(
-        session,
-        bout_id=bout_id,
-        as_of=stamp,
-        provider=provider,
-        external_event_id=external_event_id,
+    scoped = any(
+        value is not None
+        for value in (
+            bookmaker_key,
+            region,
+            market_family,
+            outcome_key,
+            line_point,
+            quote_id,
+        )
     )
+
+    if scoped:
+        # Selection ACTIVE/unlock only contends with prior selection-scoped terminals.
+        stub = OddsQuote(
+            id=int(quote_id or 0),
+            dedupe_key="selection-scope-probe",
+            dedupe_version=2,
+            provider=provider or "",
+            bookmaker_key=bookmaker_key or "",
+            bookmaker_title="",
+            region=region or "",
+            event_id="00000000-0000-0000-0000-000000000000",
+            external_event_id=external_event_id or "",
+            market_family=market_family or "",
+            provider_market_key="",
+            outcome_key=outcome_key or "",
+            outcome_label="",
+            line_point=line_point,
+            price_decimal=1.01,
+            availability="available",
+            observed_at=stamp,
+            source_updated_at=None,
+            commence_time=stamp,
+            snapshot_at=None,
+            raw_ref="selection-scope-probe",
+        )
+        latest = latest_selection_lifecycle(
+            session,
+            bout_id=bout_id,
+            quote=stub,
+            as_of=stamp,
+            provider=provider,
+            external_event_id=external_event_id,
+        )
+    else:
+        latest = latest_bout_lifecycle(
+            session,
+            bout_id=bout_id,
+            as_of=stamp,
+            provider=provider,
+            external_event_id=external_event_id,
+        )
     if (
         lifecycle is OddsBoutLifecycleState.ACTIVE
         and latest is not None
@@ -546,6 +1093,12 @@ def apply_bout_lifecycle(
         observed_at=stamp,
         provider=provider,
         external_event_id=external_event_id,
+        bookmaker_key=bookmaker_key,
+        region=region,
+        market_family=market_family,
+        outcome_key=outcome_key,
+        line_point=line_point,
+        quote_id=quote_id,
     )
     existing = session.scalar(
         select(OddsBoutLifecycleObservation).where(
@@ -560,6 +1113,12 @@ def apply_bout_lifecycle(
         bout_id=bout_id,
         provider=provider,
         external_event_id=external_event_id,
+        bookmaker_key=bookmaker_key,
+        region=region,
+        market_family=market_family,
+        outcome_key=outcome_key,
+        line_point=line_point,
+        quote_id=quote_id,
         lifecycle=lifecycle.value,
         evidence_kind=kind,
         detail=detail,

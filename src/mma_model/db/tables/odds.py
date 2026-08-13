@@ -134,10 +134,15 @@ class OddsQuote(Base):
             "price_decimal > 1.0",
             name="ck_odds_quotes_price_decimal",
         ),
+        CheckConstraint(
+            "dedupe_version IN (1, 2)",
+            name="ck_odds_quotes_dedupe_version",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     dedupe_key: Mapped[str] = mapped_column(String(64), index=True)
+    dedupe_version: Mapped[int] = mapped_column(Integer, default=2)
     provider: Mapped[str] = mapped_column(String(64), index=True)
     bookmaker_key: Mapped[str] = mapped_column(String(64), index=True)
     bookmaker_title: Mapped[str] = mapped_column(String(128))
@@ -509,9 +514,11 @@ class OddsMatchObservation(Base):
 
 
 class OddsBoutLifecycleObservation(Base):
-    """Append-only bout/line lifecycle evidence (DWCS-203).
+    """Append-only bout/selection lifecycle evidence (DWCS-203).
 
     Never stores a forward-filled price. Lock/suspension require explicit evidence.
+    Null book/region/market/outcome/line/quote_id means bout/provider-event scope;
+    any selection field set scopes the observation to that actionable identity.
     """
 
     __tablename__ = "odds_bout_lifecycle_observations"
@@ -540,6 +547,18 @@ class OddsBoutLifecycleObservation(Base):
     external_event_id: Mapped[str | None] = mapped_column(
         String(128), nullable=True, index=True
     )
+    bookmaker_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    market_family: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    outcome_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    line_point: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quote_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     lifecycle: Mapped[str] = mapped_column(String(32), index=True)
     evidence_kind: Mapped[str] = mapped_column(String(128))
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)

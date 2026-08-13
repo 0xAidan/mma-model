@@ -20,11 +20,14 @@ from mma_model.db.tables.core import (
 from mma_model.db.tables.odds import OddsEventRow, OddsMatchObservation, OddsProviderEventAlias
 from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.lifecycle import (
+    TERMINAL_LIFECYCLES,
     OddsBoutLifecycleState,
     apply_bout_lifecycle,
     classify_quote_value_eligibility,
     clears_observational_block,
     latest_bout_lifecycle,
+    resolve_visible_quotes_value_eligibility,
+    summarize_quote_eligibility,
 )
 from mma_model.odds.match_review import enqueue_bout_match_review
 from mma_model.odds.matching import (
@@ -332,12 +335,7 @@ def persist_match_decision(
     observed_at: datetime | None = None,
 ) -> OddsMatchObservation:
     stamp = require_aware_utc(observed_at or datetime.now(UTC), field="observed_at")
-    if (
-        decision.status == MATCH_STATUS_MATCHED
-        and decision.bout_id
-        and decision.match_rule
-        and decision.eligible_for_value
-    ):
+    if decision.status == MATCH_STATUS_MATCHED and decision.bout_id and decision.match_rule:
         activate_provider_alias(
             session,
             provider=decision.provider,
@@ -348,62 +346,13 @@ def persist_match_decision(
             evidence={
                 "reason": decision.reason,
                 "candidate_bout_ids": list(decision.candidate_bout_ids),
-            },
-        )
-        previous = latest_bout_lifecycle(
-            session,
-            bout_id=decision.bout_id,
-            as_of=stamp,
-            provider=decision.provider,
-            external_event_id=decision.external_event_id,
-        )
-        evidence_kind = f"match_{decision.match_rule}"
-        if clears_observational_block(
-            previous=previous,
-            resolved=OddsBoutLifecycleState.ACTIVE,
-        ):
-            evidence_kind = "fresh_quote_clears_observational_block"
-        apply_bout_lifecycle(
-            session,
-            bout_id=decision.bout_id,
-            lifecycle=OddsBoutLifecycleState.ACTIVE,
-            evidence_kind=evidence_kind,
-            observed_at=stamp,
-            provider=decision.provider,
-            external_event_id=decision.external_event_id,
-            detail=decision.reason,
-        )
-    elif (
-        decision.status == MATCH_STATUS_MATCHED
-        and decision.bout_id
-        and decision.match_rule
-        and not decision.eligible_for_value
-    ):
-        # Persist alias for identity continuity when matched but blocked by lifecycle,
-        # without writing an ACTIVE lifecycle override.
-        activate_provider_alias(
-            session,
-            provider=decision.provider,
-            external_event_id=decision.external_event_id,
-            bout_id=decision.bout_id,
-            match_rule=decision.match_rule,
-            observed_at=stamp,
-            evidence={
-                "reason": decision.reason,
                 "lifecycle": decision.lifecycle.value,
-                "eligible_for_value": False,
+                # Bout identity gate only — not per-quote eligibility.
+                "match_value_gate": bool(decision.eligible_for_value),
             },
         )
-        if decision.lifecycle is OddsBoutLifecycleState.STALE:
-            apply_bout_lifecycle(
-                session,
-                bout_id=decision.bout_id,
-                lifecycle=OddsBoutLifecycleState.STALE,
-                evidence_kind="quote_age_exceeds_stale_after_minutes",
-                observed_at=stamp,
-                provider=decision.provider,
-                external_event_id=decision.external_event_id,
-            )
+        if decision.lifecycle.value in TERMINAL_LIFECYCLES:
+            pass
         elif decision.lifecycle is OddsBoutLifecycleState.MISSING_UNKNOWN:
             apply_bout_lifecycle(
                 session,
@@ -413,6 +362,42 @@ def persist_match_decision(
                 observed_at=stamp,
                 provider=decision.provider,
                 external_event_id=decision.external_event_id,
+            )
+        elif decision.lifecycle is OddsBoutLifecycleState.STALE:
+            # Bout-level STALE is no longer inferred from max quote age; allow
+            # explicit persistence if a caller still supplies it.
+            apply_bout_lifecycle(
+                session,
+                bout_id=decision.bout_id,
+                lifecycle=OddsBoutLifecycleState.STALE,
+                evidence_kind="quote_age_exceeds_stale_after_minutes",
+                observed_at=stamp,
+                provider=decision.provider,
+                external_event_id=decision.external_event_id,
+            )
+        elif decision.eligible_for_value:
+            previous = latest_bout_lifecycle(
+                session,
+                bout_id=decision.bout_id,
+                as_of=stamp,
+                provider=decision.provider,
+                external_event_id=decision.external_event_id,
+            )
+            evidence_kind = f"match_{decision.match_rule}"
+            if clears_observational_block(
+                previous=previous,
+                resolved=OddsBoutLifecycleState.ACTIVE,
+            ):
+                evidence_kind = "fresh_quote_clears_observational_block"
+            apply_bout_lifecycle(
+                session,
+                bout_id=decision.bout_id,
+                lifecycle=OddsBoutLifecycleState.ACTIVE,
+                evidence_kind=evidence_kind,
+                observed_at=stamp,
+                provider=decision.provider,
+                external_event_id=decision.external_event_id,
+                detail=decision.reason,
             )
 
     dedupe = decision_dedupe_key(decision, observed_at=stamp)
@@ -865,6 +850,7 @@ def run_odds_reconcile(
     active_count = len(active_bout_ids)
     match_rate = (matched_active / active_count) if active_count else 0.0
 
+    quote_eligibility_by_event: dict[str, dict] = {}
     for decision in decisions:
         if decision.status == MATCH_STATUS_AMBIGUOUS:
             blockers.append(
@@ -875,17 +861,45 @@ def run_odds_reconcile(
                     "review_id": decision.review_id,
                 }
             )
-        eligibility = classify_quote_value_eligibility(
+        match_gate = classify_quote_value_eligibility(
             match_status=decision.status,
             lifecycle=decision.lifecycle,
         )
-        if decision.status == MATCH_STATUS_MATCHED and eligibility.value != "eligible":
+        if decision.status == MATCH_STATUS_MATCHED and match_gate.value != "eligible":
             blockers.append(
                 {
                     "kind": "lifecycle_block",
                     "external_event_id": decision.external_event_id,
                     "lifecycle": decision.lifecycle.value,
                     "bout_id": decision.bout_id,
+                    "scope": "bout",
+                }
+            )
+        quote_rows = resolve_visible_quotes_value_eligibility(
+            session,
+            provider=decision.provider,
+            external_event_id=decision.external_event_id,
+            bout_id=decision.bout_id,
+            match_status=decision.status,
+            as_of=stamp,
+            stale_after_minutes=contract.stale_after_minutes,
+        )
+        summary = summarize_quote_eligibility(quote_rows)
+        quote_eligibility_by_event[decision.external_event_id] = summary
+        if (
+            decision.status == MATCH_STATUS_MATCHED
+            and match_gate.value == "eligible"
+            and summary["visible"] > 0
+            and summary["eligible"] == 0
+        ):
+            blockers.append(
+                {
+                    "kind": "quote_value_blocked",
+                    "external_event_id": decision.external_event_id,
+                    "bout_id": decision.bout_id,
+                    "visible_quotes": summary["visible"],
+                    "eligible_quotes": 0,
+                    "blocked_by_reason": summary["blocked_by_reason"],
                 }
             )
 
@@ -900,8 +914,20 @@ def run_odds_reconcile(
             }
         )
 
+    decision_rows = []
+    for decision in decisions:
+        row = decision.as_dict()
+        row["match_value_gate"] = row["eligible_for_value"]
+        row["eligible_for_value_means"] = (
+            "bout_identity_matched_and_nonterminal_not_per_quote"
+        )
+        row["quote_eligibility"] = quote_eligibility_by_event.get(
+            decision.external_event_id,
+            {"visible": 0, "eligible": 0, "blocked": 0, "blocked_by_reason": {}, "quotes": []},
+        )
+        decision_rows.append(row)
     decision_rows = sorted(
-        (d.as_dict() for d in decisions),
+        decision_rows,
         key=lambda row: (row["external_event_id"], row["status"]),
     )
     blockers_sorted = sorted(
@@ -939,6 +965,17 @@ def run_odds_reconcile(
         ),
         "blockers": blockers_sorted,
         "decisions": decision_rows,
+        "quote_eligibility_totals": {
+            "visible": sum(
+                int(v.get("visible", 0)) for v in quote_eligibility_by_event.values()
+            ),
+            "eligible": sum(
+                int(v.get("eligible", 0)) for v in quote_eligibility_by_event.values()
+            ),
+            "blocked": sum(
+                int(v.get("blocked", 0)) for v in quote_eligibility_by_event.values()
+            ),
+        },
         "rules": [
             MATCH_RULE_PROVIDER_ID,
             MATCH_RULE_PARTICIPANT_PAIR,
@@ -951,6 +988,8 @@ def run_odds_reconcile(
             "No home/away guess, fuzzy merge, silent replacement inheritance, or forward-fill.",
             "Provider-ID matches remain subject to participant/status/series/time checks.",
             "Golden-card seeding is offline/disposable-DB only.",
+            "eligible_for_value is the bout identity/nonterminal gate only; "
+            "value consumers must also require quote-level ACTIVE/AVAILABLE/fresh.",
         ],
     }
 

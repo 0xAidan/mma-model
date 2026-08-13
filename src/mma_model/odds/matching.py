@@ -138,7 +138,9 @@ class OddsMatchDecision:
             "match_rule": self.match_rule,
             "reason": self.reason,
             "lifecycle": self.lifecycle.value,
+            # Bout identity + nonterminal gate only — not per-quote freshness.
             "eligible_for_value": self.eligible_for_value,
+            "match_value_gate": self.eligible_for_value,
             "review_id": self.review_id,
             "candidate_bout_ids": list(self.candidate_bout_ids),
         }

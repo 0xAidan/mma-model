@@ -112,6 +112,47 @@ def raw_reference(payload: Mapping[str, Any] | Sequence[Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# v1 = DWCS-201 legacy (no raw/participant). v2 adds raw_ref + participants.
+QUOTE_DEDUPE_VERSION: int = 2
+QUOTE_DEDUPE_VERSION_LEGACY: int = 1
+
+
+def quote_dedupe_key_v1(
+    *,
+    provider: str,
+    event_id: str,
+    bookmaker_key: str,
+    region: str,
+    market_family: MarketFamily,
+    outcome_key: OutcomeKey,
+    line_point: float | None,
+    price_decimal: float,
+    source_updated_at: datetime | None,
+    commence_time: datetime,
+    snapshot_at: datetime | None,
+) -> str:
+    """Legacy DWCS-201 quote dedupe material (pre raw/participant identity)."""
+    point = "" if line_point is None else f"{float(line_point):.4f}"
+    src = "" if source_updated_at is None else source_updated_at.isoformat()
+    snap = "" if snapshot_at is None else snapshot_at.isoformat()
+    material = "|".join(
+        [
+            provider,
+            event_id,
+            bookmaker_key,
+            region,
+            market_family.value,
+            outcome_key.value,
+            point,
+            f"{price_decimal:.6f}",
+            src,
+            commence_time.isoformat(),
+            snap,
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def quote_dedupe_key(
     *,
     provider: str,
@@ -129,12 +170,11 @@ def quote_dedupe_key(
     home_team: str,
     away_team: str,
 ) -> str:
-    """Stable identity for append-only quote deduplication.
+    """v2 quote dedupe: legacy fields plus raw_ref and participant identity.
 
-    Includes sanitized ``raw_ref`` plus participant names so same-external-ID
-    replacement quotes (changed opponents / labels) cannot collide with prior
-    rows when book/market/outcome-key/price/commence/source are otherwise equal.
-    Identical same-version polls that share the same raw fragment still dedupe.
+    Same-external-ID replacement quotes (changed opponents / labels) cannot
+    collide with prior rows when book/market/outcome-key/price/commence/source
+    are otherwise equal. Identical same-version polls still dedupe.
     """
     point = "" if line_point is None else f"{float(line_point):.4f}"
     src = "" if source_updated_at is None else source_updated_at.isoformat()

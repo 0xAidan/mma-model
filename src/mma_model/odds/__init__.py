@@ -8,10 +8,15 @@ from mma_model.odds.bookmaker_keys import (
 )
 from mma_model.odds.lifecycle import (
     OddsBoutLifecycleState,
+    QuoteBlockReason,
+    QuoteEligibilityDecision,
     QuoteValueEligibility,
     apply_bout_lifecycle,
     classify_quote_value_eligibility,
     quotes_visible_under_active_alias,
+    resolve_quote_value_eligibility,
+    resolve_visible_quotes_value_eligibility,
+    summarize_quote_eligibility,
 )
 from mma_model.odds.manual_price import (
     MANUAL_SOURCE_LABEL,
@@ -128,6 +133,8 @@ __all__ = [
     "PriceSourceKind",
     "QuotaHeaders",
     "QuoteAvailability",
+    "QuoteBlockReason",
+    "QuoteEligibilityDecision",
     "QuoteValueEligibility",
     "TheOddsApiClient",
     "UnknownMarketObservation",
@@ -158,10 +165,13 @@ __all__ = [
     "quotes_visible_under_active_alias",
     "reject_bout_match_review",
     "require_licensed_bookmaker_adapter",
+    "resolve_quote_value_eligibility",
+    "resolve_visible_quotes_value_eligibility",
     "reverse_bout_match_review",
     "run_bookmaker_audit",
     "run_odds_audit",
     "run_odds_reconcile",
     "run_odds_snapshot",
+    "summarize_quote_eligibility",
     "validate_market_selection",
 ]

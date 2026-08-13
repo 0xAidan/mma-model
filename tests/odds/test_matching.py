@@ -39,6 +39,7 @@ from mma_model.db.tables.odds import (
 from mma_model.domain.markets import MarketFamily, OutcomeKey
 from mma_model.odds.lifecycle import (
     OddsBoutLifecycleState,
+    QuoteBlockReason,
     QuoteValueEligibility,
     alias_effective_at,
     apply_bout_lifecycle,
@@ -47,8 +48,12 @@ from mma_model.odds.lifecycle import (
     latest_quote_timestamp,
     quote_authoritative_freshness,
     quote_is_stale,
+    quote_row_is_stale,
     quotes_visible_under_active_alias,
     quotes_visible_under_alias_at,
+    resolve_quote_value_eligibility,
+    resolve_visible_quotes_value_eligibility,
+    summarize_quote_eligibility,
 )
 from mma_model.odds.match_review import (
     OddsBoutMatchReviewError,
@@ -76,7 +81,12 @@ from mma_model.odds.matching import (
     require_aware_utc,
     visible_matching_path,
 )
-from mma_model.odds.normalize import quote_dedupe_key
+from mma_model.odds.normalize import (
+    QUOTE_DEDUPE_VERSION,
+    QUOTE_DEDUPE_VERSION_LEGACY,
+    quote_dedupe_key,
+    quote_dedupe_key_v1,
+)
 from mma_model.odds.reconcile import (
     OddsReconcileError,
     apply_replacement,
@@ -1170,10 +1180,18 @@ def test_lifecycle_requires_evidence_and_never_forward_fills(tmp_path: Path) -> 
     session.commit()
     assert row is not None
     assert row.lifecycle == OddsBoutLifecycleState.MISSING_UNKNOWN.value
+    # Match gate allows MISSING (observational); quote resolver enforces markets.
     assert (
         classify_quote_value_eligibility(
             match_status=MATCH_STATUS_MATCHED,
             lifecycle=OddsBoutLifecycleState.MISSING_UNKNOWN,
+        )
+        is QuoteValueEligibility.ELIGIBLE
+    )
+    assert (
+        classify_quote_value_eligibility(
+            match_status=MATCH_STATUS_MATCHED,
+            lifecycle=OddsBoutLifecycleState.LOCKED,
         )
         is QuoteValueEligibility.BLOCKED
     )
@@ -1281,8 +1299,23 @@ def test_stale_from_quote_age_blocks_without_inferring_lock(tmp_path: Path) -> N
         commence_time=start,
         observed_at=OBSERVED,
     )
-    assert decision.lifecycle == OddsBoutLifecycleState.STALE
-    assert decision.eligible_for_value is False
+    # Bout identity gate stays open; staleness is quote-scoped.
+    assert decision.lifecycle == OddsBoutLifecycleState.ACTIVE
+    assert decision.eligible_for_value is True
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+    quote_decisions = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-s",
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    assert quote_decisions
+    assert all(not row.eligible for row in quote_decisions)
+    assert all(row.reason == QuoteBlockReason.STALE for row in quote_decisions)
     locks = session.scalars(
         select(OddsBoutLifecycleObservation).where(
             OddsBoutLifecycleObservation.lifecycle == "locked"
@@ -1399,6 +1432,18 @@ def test_migration_upgrade_downgrade_preserves_schema_roundtrip(tmp_path: Path) 
         }
         assert "activated_alias_id" in cols
         assert "activated_alias_version" in cols
+        quote_cols = {
+            row[1] for row in conn.execute(text("PRAGMA table_info(odds_quotes)"))
+        }
+        assert "dedupe_version" in quote_cols
+        life_cols = {
+            row[1]
+            for row in conn.execute(
+                text("PRAGMA table_info(odds_bout_lifecycle_observations)")
+            )
+        }
+        assert "bookmaker_key" in life_cols
+        assert "quote_id" in life_cols
 
     command.downgrade(_alembic_config(db_path), "0013_odds_manual_prices")
     with engine.begin() as conn:
@@ -1850,7 +1895,8 @@ def test_no_quotes_matched_is_missing_blocked(tmp_path: Path) -> None:
     )
     assert decision.status == MATCH_STATUS_MATCHED
     assert decision.lifecycle == OddsBoutLifecycleState.MISSING_UNKNOWN
-    assert decision.eligible_for_value is False
+    # Identity gate open; zero quotes to evaluate for value.
+    assert decision.eligible_for_value is True
 
 
 def test_pit_future_lifecycle_and_quotes_do_not_leak(tmp_path: Path) -> None:
@@ -2371,13 +2417,8 @@ def test_freshness_uses_source_updated_not_max_with_observed(tmp_path: Path) -> 
         as_of=OBSERVED,
     )
     assert latest == stale_source
-    assert quote_is_stale(
-        session,
-        provider=PROVIDER_THE_ODDS_API,
-        external_event_id="prov-fresh",
-        observed_at=OBSERVED,
-        stale_after_minutes=360,
-    )
+    quote = session.scalars(select(OddsQuote)).one()
+    assert quote_row_is_stale(quote, as_of=OBSERVED, stale_after_minutes=360)
     decision = match_provider_event(
         session,
         provider=PROVIDER_THE_ODDS_API,
@@ -2387,8 +2428,20 @@ def test_freshness_uses_source_updated_not_max_with_observed(tmp_path: Path) -> 
         commence_time=start,
         observed_at=OBSERVED,
     )
-    assert decision.lifecycle == OddsBoutLifecycleState.STALE
-    assert decision.eligible_for_value is False
+    assert decision.lifecycle == OddsBoutLifecycleState.ACTIVE
+    assert decision.eligible_for_value is True
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+    qe = resolve_quote_value_eligibility(
+        session,
+        quote=quote,
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    assert qe.eligible is False
+    assert qe.reason == QuoteBlockReason.STALE
 
 
 def test_freshness_falls_back_to_observed_when_source_absent(tmp_path: Path) -> None:
@@ -3079,3 +3132,631 @@ def test_alias_quote_pit_exact_boundaries_and_utc(tmp_path: Path) -> None:
     session.refresh(v2)
     assert v2.superseded_at is not None
     assert v2.status == "superseded"
+
+
+# --- quote-level eligibility / availability / scoped lock / dedupe v1 -----
+
+
+def test_mixed_book_fresh_does_not_unstale_other_quotes(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-mixq",
+        event_id="evt-mixq",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-mixq",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED,
+        source_updated_at=OBSERVED - timedelta(minutes=5),
+        price_decimal=1.9,
+        raw_ref="fd-fresh",
+        bookmaker_key="fanduel",
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-mixq",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED,
+        source_updated_at=OBSERVED - timedelta(hours=12),
+        price_decimal=1.85,
+        raw_ref="dk-stale",
+        bookmaker_key="draftkings",
+    )
+    session.commit()
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id="prov-mixq",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=start,
+            home_team="Alpha Fighter",
+            away_team="Bravo Fighter",
+        ),
+        provider=PROVIDER_THE_ODDS_API,
+    )
+    totals_dedupe = quote_dedupe_key(
+        provider=PROVIDER_THE_ODDS_API,
+        event_id="prov-mixq",
+        bookmaker_key="fanduel",
+        region="us",
+        market_family=MarketFamily.TOTALS,
+        outcome_key=OutcomeKey.OVER,
+        line_point=2.5,
+        price_decimal=1.7,
+        source_updated_at=OBSERVED - timedelta(hours=12),
+        commence_time=start,
+        snapshot_at=None,
+        raw_ref="fd-totals-stale",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+    )
+    store.append_quotes(
+        [
+            NormalizedQuote(
+                provider=PROVIDER_THE_ODDS_API,
+                bookmaker_key="fanduel",
+                bookmaker_title="FanDuel",
+                region="us",
+                event_id="prov-mixq",
+                home_team="Alpha Fighter",
+                away_team="Bravo Fighter",
+                market_family=MarketFamily.TOTALS,
+                provider_market_key="totals",
+                outcome_key=OutcomeKey.OVER,
+                outcome_label="Over",
+                line_point=2.5,
+                price_decimal=1.7,
+                availability=QuoteAvailability.AVAILABLE,
+                observed_at=OBSERVED,
+                source_updated_at=OBSERVED - timedelta(hours=12),
+                commence_time=start,
+                snapshot_at=None,
+                raw_ref="fd-totals-stale",
+                dedupe_key=totals_dedupe,
+            )
+        ],
+        events_by_external_id={"prov-mixq": event_row},
+    )
+    session.commit()
+
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-mixq",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+    assert decision.eligible_for_value is True
+
+    rows = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-mixq",
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    by_ref = {
+        session.get(OddsQuote, row.quote_id).raw_ref: row for row in rows  # type: ignore[union-attr]
+    }
+    assert by_ref["fd-fresh"].eligible is True
+    assert by_ref["dk-stale"].eligible is False
+    assert by_ref["dk-stale"].reason == QuoteBlockReason.STALE
+    assert by_ref["fd-totals-stale"].eligible is False
+    assert by_ref["fd-totals-stale"].reason == QuoteBlockReason.STALE
+    summary = summarize_quote_eligibility(rows)
+    assert summary["eligible"] == 1
+    assert summary["blocked"] == 2
+
+
+def test_availability_unknown_blocks_only_that_book_market(tmp_path: Path) -> None:
+    from mma_model.db.tables.odds import OddsAvailabilityObservation
+    from mma_model.odds.store import OddsQuoteStore
+
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-av",
+        event_id="evt-av",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-av",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(minutes=10),
+        source_updated_at=OBSERVED - timedelta(minutes=10),
+        price_decimal=1.9,
+        raw_ref="fd-h2h",
+        bookmaker_key="fanduel",
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-av",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(minutes=10),
+        source_updated_at=OBSERVED - timedelta(minutes=10),
+        price_decimal=1.88,
+        raw_ref="dk-h2h",
+        bookmaker_key="draftkings",
+    )
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id="prov-av",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=start,
+            home_team="Alpha Fighter",
+            away_team="Bravo Fighter",
+        ),
+        provider=PROVIDER_THE_ODDS_API,
+    )
+    session.add(
+        OddsAvailabilityObservation(
+            dedupe_key="unk-dk-totals",
+            provider=PROVIDER_THE_ODDS_API,
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-av",
+            bookmaker_key="draftkings",
+            bookmaker_title="DraftKings",
+            provider_market_key="totals",
+            market_family=MarketFamily.TOTALS.value,
+            availability="unknown",
+            observed_at=OBSERVED - timedelta(minutes=5),
+            commence_time=start,
+            snapshot_at=None,
+        )
+    )
+    # Also mark draftkings h2h unknown — should block only DK moneyline quotes.
+    session.add(
+        OddsAvailabilityObservation(
+            dedupe_key="unk-dk-h2h",
+            provider=PROVIDER_THE_ODDS_API,
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-av",
+            bookmaker_key="draftkings",
+            bookmaker_title="DraftKings",
+            provider_market_key="h2h",
+            market_family=MarketFamily.MONEYLINE.value,
+            availability="unknown",
+            observed_at=OBSERVED - timedelta(minutes=5),
+            commence_time=start,
+            snapshot_at=None,
+        )
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-av",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    session.commit()
+    assert decision.lifecycle == OddsBoutLifecycleState.ACTIVE
+
+    rows = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-av",
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    by_ref = {
+        session.get(OddsQuote, row.quote_id).raw_ref: row for row in rows  # type: ignore[union-attr]
+    }
+    assert by_ref["fd-h2h"].eligible is True
+    assert by_ref["dk-h2h"].eligible is False
+    assert by_ref["dk-h2h"].reason == QuoteBlockReason.MARKET_UNKNOWN
+
+    # Historical PIT: unknown observed in the future must not block the past.
+    past = OBSERVED - timedelta(minutes=8)
+    past_rows = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-av",
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        as_of=past,
+        stale_after_minutes=360,
+    )
+    assert all(row.eligible for row in past_rows)
+
+
+def test_selection_scoped_lock_isolates_from_other_books(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-lock",
+        event_id="evt-lock",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-lock",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(minutes=5),
+        source_updated_at=OBSERVED - timedelta(minutes=5),
+        price_decimal=1.9,
+        raw_ref="fd-ok",
+        bookmaker_key="fanduel",
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-lock",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED - timedelta(minutes=5),
+        source_updated_at=OBSERVED - timedelta(minutes=5),
+        price_decimal=1.91,
+        raw_ref="dk-locked",
+        bookmaker_key="draftkings",
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-lock",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=OBSERVED,
+    )
+    persist_match_decision(session, decision, observed_at=OBSERVED)
+    apply_bout_lifecycle(
+        session,
+        bout_id="bout-lock",
+        lifecycle=OddsBoutLifecycleState.LOCKED,
+        evidence_kind="provider_lock_signal",
+        observed_at=OBSERVED,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-lock",
+        bookmaker_key="draftkings",
+        region="us",
+        market_family=MarketFamily.MONEYLINE.value,
+    )
+    session.commit()
+
+    # Bout-level lifecycle remains ACTIVE (selection lock is scoped).
+    bout_life = latest_bout_lifecycle(
+        session,
+        bout_id="bout-lock",
+        as_of=OBSERVED,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-lock",
+    )
+    assert bout_life is not None
+    assert bout_life.lifecycle == "active"
+
+    rows = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-lock",
+        bout_id="bout-lock",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED,
+        stale_after_minutes=360,
+    )
+    by_ref = {
+        session.get(OddsQuote, row.quote_id).raw_ref: row for row in rows  # type: ignore[union-attr]
+    }
+    assert by_ref["fd-ok"].eligible is True
+    assert by_ref["dk-locked"].eligible is False
+    assert by_ref["dk-locked"].reason == QuoteBlockReason.SELECTION_LOCKED
+
+    # Global bout cancel still blocks all quotes.
+    apply_bout_lifecycle(
+        session,
+        bout_id="bout-lock",
+        lifecycle=OddsBoutLifecycleState.CANCELLED,
+        evidence_kind="canonical_bout_cancelled",
+        observed_at=OBSERVED + timedelta(minutes=1),
+    )
+    session.commit()
+    after = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-lock",
+        bout_id="bout-lock",
+        match_status=MATCH_STATUS_MATCHED,
+        as_of=OBSERVED + timedelta(minutes=1),
+        stale_after_minutes=360,
+    )
+    assert all(row.reason == QuoteBlockReason.BOUT_TERMINAL for row in after)
+
+
+def test_legacy_dedupe_v1_repoll_and_replacement_insert(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 9, 1, 2, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="old-bout-v1",
+        event_id="evt-v1a",
+        fighter_a="Alex Original",
+        fighter_b="Blake Opponent",
+        start=start,
+    )
+    _seed_bout(
+        session,
+        bout_id="new-bout-v1",
+        event_id="evt-v1b",
+        fighter_a="Alex Original",
+        fighter_b="Casey Replacement",
+        start=start,
+    )
+    legacy_key = quote_dedupe_key_v1(
+        provider=PROVIDER_THE_ODDS_API,
+        event_id="prov-v1",
+        bookmaker_key="fanduel",
+        region="us",
+        market_family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        line_point=None,
+        price_decimal=1.9,
+        source_updated_at=None,
+        commence_time=start,
+        snapshot_at=None,
+    )
+    store = OddsQuoteStore(session)
+    event_row = store.upsert_event(
+        OddsEvent(
+            id="prov-v1",
+            sport_key="mma_mixed_martial_arts",
+            commence_time=start,
+            home_team="Alex Original",
+            away_team="Blake Opponent",
+        ),
+        provider=PROVIDER_THE_ODDS_API,
+    )
+    session.add(
+        OddsQuote(
+            dedupe_key=legacy_key,
+            dedupe_version=QUOTE_DEDUPE_VERSION_LEGACY,
+            provider=PROVIDER_THE_ODDS_API,
+            bookmaker_key="fanduel",
+            bookmaker_title="FanDuel",
+            region="us",
+            event_id=event_row.id,
+            external_event_id="prov-v1",
+            market_family=MarketFamily.MONEYLINE.value,
+            provider_market_key="h2h",
+            outcome_key=OutcomeKey.FIGHTER_A.value,
+            outcome_label="Alex Original",
+            line_point=None,
+            price_decimal=1.9,
+            availability=QuoteAvailability.AVAILABLE.value,
+            observed_at=OBSERVED - timedelta(hours=2),
+            source_updated_at=None,
+            commence_time=start,
+            snapshot_at=None,
+            raw_ref="legacy-raw",
+        )
+    )
+    session.commit()
+    assert len(session.scalars(select(OddsQuote)).all()) == 1
+
+    # Identical re-poll (same raw_ref) dedupes against legacy v1 key.
+    result = store.append_quotes(
+        [
+            NormalizedQuote(
+                provider=PROVIDER_THE_ODDS_API,
+                bookmaker_key="fanduel",
+                bookmaker_title="FanDuel",
+                region="us",
+                event_id="prov-v1",
+                home_team="Alex Original",
+                away_team="Blake Opponent",
+                market_family=MarketFamily.MONEYLINE,
+                provider_market_key="h2h",
+                outcome_key=OutcomeKey.FIGHTER_A,
+                outcome_label="Alex Original",
+                line_point=None,
+                price_decimal=1.9,
+                availability=QuoteAvailability.AVAILABLE,
+                observed_at=OBSERVED - timedelta(hours=1),
+                source_updated_at=None,
+                commence_time=start,
+                snapshot_at=None,
+                raw_ref="legacy-raw",
+                dedupe_key=quote_dedupe_key(
+                    provider=PROVIDER_THE_ODDS_API,
+                    event_id="prov-v1",
+                    bookmaker_key="fanduel",
+                    region="us",
+                    market_family=MarketFamily.MONEYLINE,
+                    outcome_key=OutcomeKey.FIGHTER_A,
+                    line_point=None,
+                    price_decimal=1.9,
+                    source_updated_at=None,
+                    commence_time=start,
+                    snapshot_at=None,
+                    raw_ref="legacy-raw",
+                    home_team="Alex Original",
+                    away_team="Blake Opponent",
+                ),
+            )
+        ],
+        events_by_external_id={"prov-v1": event_row},
+    )
+    session.commit()
+    assert result.deduped == 1
+    assert result.inserted == 0
+    assert len(session.scalars(select(OddsQuote)).all()) == 1
+
+    first = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-v1",
+        home_team="Alex Original",
+        away_team="Blake Opponent",
+        commence_time=start,
+    )
+    persist_match_decision(session, first, observed_at=OBSERVED - timedelta(hours=2))
+    apply_replacement(
+        session,
+        old_bout_id="old-bout-v1",
+        new_bout_id="new-bout-v1",
+        provider=PROVIDER_THE_ODDS_API,
+        old_external_event_id="prov-v1",
+        new_external_event_id="prov-v1",
+        new_home_team="Casey Replacement",
+        new_away_team="Alex Original",
+        new_commence_time=start,
+        observed_at=OBSERVED,
+    )
+    session.commit()
+
+    # Same price/source-null, different raw_ref → must insert (v2), not collide.
+    new_key = quote_dedupe_key(
+        provider=PROVIDER_THE_ODDS_API,
+        event_id="prov-v1",
+        bookmaker_key="fanduel",
+        region="us",
+        market_family=MarketFamily.MONEYLINE,
+        outcome_key=OutcomeKey.FIGHTER_A,
+        line_point=None,
+        price_decimal=1.9,
+        source_updated_at=None,
+        commence_time=start,
+        snapshot_at=None,
+        raw_ref="replacement-raw",
+        home_team="Casey Replacement",
+        away_team="Alex Original",
+    )
+    inserted = store.append_quotes(
+        [
+            NormalizedQuote(
+                provider=PROVIDER_THE_ODDS_API,
+                bookmaker_key="fanduel",
+                bookmaker_title="FanDuel",
+                region="us",
+                event_id="prov-v1",
+                home_team="Casey Replacement",
+                away_team="Alex Original",
+                market_family=MarketFamily.MONEYLINE,
+                provider_market_key="h2h",
+                outcome_key=OutcomeKey.FIGHTER_A,
+                outcome_label="Casey Replacement",
+                line_point=None,
+                price_decimal=1.9,
+                availability=QuoteAvailability.AVAILABLE,
+                observed_at=OBSERVED + timedelta(minutes=1),
+                source_updated_at=None,
+                commence_time=start,
+                snapshot_at=None,
+                raw_ref="replacement-raw",
+                dedupe_key=new_key,
+            )
+        ]
+    )
+    session.commit()
+    assert inserted.inserted == 1
+    quotes = session.scalars(select(OddsQuote)).all()
+    assert len(quotes) == 2
+    versions = {q.dedupe_version for q in quotes}
+    assert QUOTE_DEDUPE_VERSION_LEGACY in versions
+    assert QUOTE_DEDUPE_VERSION in versions
+    visible = quotes_visible_under_active_alias(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-v1",
+        as_of=OBSERVED + timedelta(minutes=2),
+    )
+    assert len(visible) == 1
+    assert visible[0].raw_ref == "replacement-raw"
+    assert visible[0].dedupe_version == QUOTE_DEDUPE_VERSION
+
+
+def test_quote_eligibility_pit_rejects_future_clocks(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    start = datetime(2026, 8, 12, 1, 0, tzinfo=UTC)
+    _seed_bout(
+        session,
+        bout_id="bout-qpit",
+        event_id="evt-qpit",
+        fighter_a="Alpha Fighter",
+        fighter_b="Bravo Fighter",
+        start=start,
+    )
+    past = OBSERVED - timedelta(hours=1)
+    _append_quote_full(
+        session,
+        external_id="prov-qpit",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=past,
+        source_updated_at=past,
+        price_decimal=1.9,
+        raw_ref="past-q",
+    )
+    _append_quote_full(
+        session,
+        external_id="prov-qpit",
+        home="Alpha Fighter",
+        away="Bravo Fighter",
+        commence=start,
+        observed_at=OBSERVED + timedelta(hours=1),
+        source_updated_at=OBSERVED + timedelta(hours=1),
+        price_decimal=1.91,
+        raw_ref="future-q",
+    )
+    session.commit()
+    decision = match_provider_event(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-qpit",
+        home_team="Alpha Fighter",
+        away_team="Bravo Fighter",
+        commence_time=start,
+        observed_at=past,
+    )
+    persist_match_decision(session, decision, observed_at=past)
+    session.commit()
+    rows = resolve_visible_quotes_value_eligibility(
+        session,
+        provider=PROVIDER_THE_ODDS_API,
+        external_event_id="prov-qpit",
+        bout_id=decision.bout_id,
+        match_status=decision.status,
+        as_of=past,
+        stale_after_minutes=360,
+    )
+    assert len(rows) == 1
+    assert rows[0].eligible is True
+    assert session.get(OddsQuote, rows[0].quote_id).raw_ref == "past-q"  # type: ignore[union-attr]
