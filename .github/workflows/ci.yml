@@ -13,6 +13,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: Install
         run: pip install -e ".[dev]"
       - name: Ruff
@@ -102,6 +107,15 @@ jobs:
           src/mma_model/observability
           tests/observability
           --select E,F,I,UP,B,SIM
+      - name: Ruff publish (strict)
+        run: >
+          ruff check
+          src/mma_model/publish
+          tests/publish
+          src/mma_model/jobs/handlers.py
+          src/mma_model/observability/publish_guard.py
+          src/mma_model/cli.py
+          --select E,F,I,UP,B,SIM
       - name: Ruff weekly lifecycle (strict)
         run: >
           ruff check
@@ -112,3 +126,7 @@ jobs:
           --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q
+      - name: Web typecheck (dashboard contracts)
+        run: |
+          npm --prefix web ci
+          npm --prefix web run typecheck

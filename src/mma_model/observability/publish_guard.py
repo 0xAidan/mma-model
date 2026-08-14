@@ -1,8 +1,11 @@
-"""Filesystem-backed last-known-good publish pointer (DWCS-403).
+"""Filesystem-backed last-known-good publish pointer (DWCS-403 / DWCS-500).
 
 Failed or partial publication must not replace the ``current`` release pointer
 or destroy the files it points at. Unvalidated payloads are written only to a
 staging directory; promotion happens after validation succeeds.
+
+DWCS-500 adds flush/fsync of completed candidate files (and directory fsync when
+practical) before promotion so partial durable writes cannot become current.
 """
 
 from __future__ import annotations
@@ -27,6 +30,27 @@ class PublishOutcome:
     replaced: bool
     path: Path
     detail: str = ""
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush file contents to stable storage."""
+    with open(path, "rb+") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    """Best-effort directory fsync (unsupported on some platforms)."""
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        return
+    finally:
+        os.close(fd)
 
 
 class FilesystemPublishPointer:
@@ -90,6 +114,10 @@ class FilesystemPublishPointer:
                 dest.write_bytes(body)
             else:
                 dest.write_text(str(body), encoding="utf-8")
+            _fsync_file(dest)
+            if dest.parent != staging:
+                _fsync_dir(dest.parent)
+        _fsync_dir(staging)
         return staging
 
     def validate_candidate(
@@ -138,6 +166,7 @@ class FilesystemPublishPointer:
             raise
         if backup is not None and backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
+        _fsync_dir(self.releases_dir)
         return final
 
     def promote(self, release_id: str) -> PublishOutcome:
@@ -148,7 +177,9 @@ class FilesystemPublishPointer:
             raise PublishValidationError(f"release directory missing: {release_id}")
         tmp = self.root / f".current.{os.getpid()}.tmp"
         tmp.write_text(release_id + "\n", encoding="utf-8")
+        _fsync_file(tmp)
         os.replace(tmp, self.current_path)
+        _fsync_dir(self.root)
         return PublishOutcome(
             release_id=release_id,
             current_release_id=release_id,

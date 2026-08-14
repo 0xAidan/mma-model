@@ -1,0 +1,43 @@
+{
+  "as_of": "2026-08-11T17:00:05Z",
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "event_id": "evt-1",
+  "files": [
+    {
+      "name": "current-event.json",
+      "sha256": "87fa24c8181c7629049177b7f640482334c0494a38decfe492179b73aa038ba9"
+    },
+    {
+      "name": "matchups.json",
+      "sha256": "1596283c9f519ea5678e39933ed56127f585ca820a9d9f1613e0d163d35422d6"
+    },
+    {
+      "name": "performance.json",
+      "sha256": "aef6c11286e0e477a401b18380c332f0313352c2db1a1df4a0926e658d4e01c5"
+    },
+    {
+      "name": "history.json",
+      "sha256": "1699114d096e3e177f9568aaef0521587658f0a17b2c93db860b723700ac5f4e"
+    },
+    {
+      "name": "health.json",
+      "sha256": "8c2ab73b560df745ad4c26ded412fa37cf0c2817faf2e13baeb8b8ae6d252f58"
+    }
+  ],
+  "hashes": {
+    "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "thresholds_hash": "7977ce2cb253601c6b1e210a2fc303f4771f77fb78f67b2f68e7be1619de643b"
+  },
+  "publications": 6,
+  "release_id": "golden-v1",
+  "schema_version": 1,
+  "series": "dwcs",
+  "ticket": "DWCS-500",
+  "window_slot": "t60"
+}

@@ -7,7 +7,6 @@ success without returning a ``HandlerResult`` the orchestrator records.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -41,6 +40,9 @@ from mma_model.observability.publish_guard import (
     FilesystemPublishPointer,
     PublishValidationError,
 )
+from mma_model.publish.builder import build_release_files
+from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
+from mma_model.publish.validator import validate_dashboard_release_dir
 from mma_model.recommend.policy import (
     PRODUCTION_BOOTSTRAP_REFITS,
     ProbabilitySemantics,
@@ -710,26 +712,26 @@ def handle_publish(
 
     new_release = f"release-{job.event_id}-{job.window_slot}"
     if fs_pointer is not None:
-        payload = {
-            "event_id": job.event_id,
-            "publications": pub_count,
-            "release_id": new_release,
-            "window_slot": job.window_slot,
-        }
-        files = {
-            "release.json": json.dumps(payload, sort_keys=True),
-            "manifest.json": json.dumps(
-                {"release_id": new_release, "files": ["release.json"]},
-                sort_keys=True,
-            ),
-        }
         if context.get("publish_invalid"):
-            files = {"release.json": "{not-json}"}
+            files: dict[str, str] = {"release.json": "{not-json}"}
+            required = ("release.json", "manifest.json")
+            validator = None
+        else:
+            files = build_release_files(
+                session,
+                release_id=new_release,
+                event_id=job.event_id,
+                window_slot=job.window_slot,
+                publications=pub_count,
+            )
+            required = DASHBOARD_RELEASE_FILES
+            validator = validate_dashboard_release_dir
         try:
             outcome = fs_pointer.publish_release(
                 new_release,
                 files,
-                required_files=("release.json", "manifest.json"),
+                required_files=required,
+                validator=validator,
             )
         except PublishValidationError as exc:
             return HandlerResult(
@@ -751,7 +753,7 @@ def handle_publish(
                 "current_replaced": True,
                 "publications": pub_count,
             },
-            detail="publish seam: filesystem LKG release + atomic current pointer",
+            detail="publish: validated dashboard JSON + atomic current pointer",
         )
 
     if registry is not None:

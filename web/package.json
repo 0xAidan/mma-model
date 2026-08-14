@@ -1,0 +1,12 @@
+{
+  "name": "mma-dashboard-contracts",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Typecheck-only package for generated DWCS-500 dashboard contracts (no UI)",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}
