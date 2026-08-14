@@ -5,9 +5,11 @@
 #
 # Usage (as root on the host, after copying this repo tree or the deploy/ files):
 #   ./deploy/install.sh [--skip-docker-install] [--skip-dns-check] [--apply-caddy]
+#   ./deploy/install.sh --apply-scheduler
 #
 # Secrets:
 #   - /etc/mma-model/mma.env          (0600) runtime env for the worker
+#   - /etc/mma-model/monitoring.env   (0600) Healthchecks URLs (placeholders OK)
 #   - /etc/mma-model/dashboard.basicauth.password  (0600) plaintext basic-auth password
 #   - /etc/mma-model/ghcr.token        (0600) optional read-only GHCR pull token
 # Never commit those files.
@@ -17,6 +19,7 @@ set -euo pipefail
 SKIP_DOCKER_INSTALL=0
 SKIP_DNS_CHECK=0
 APPLY_CADDY=0
+APPLY_SCHEDULER=0
 
 DIGEST="sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6"
 IMAGE="ghcr.io/0xaidan/mma-model@${DIGEST}"
@@ -25,6 +28,7 @@ CADDY_SNIPPET="${CADDY_SNIPPET:-deploy/Caddyfile.mma}"
 PUBLIC_ROOT="/srv/mma/public"
 DATA_ROOT="/srv/mma/data"
 ETC_ROOT="/etc/mma-model"
+OPT_ROOT="${OPT_ROOT:-/opt/mma-model}"
 CADDY_UID="${CADDY_UID:-999}"
 WORKER_UID="${WORKER_UID:-10001}"
 SUBDOMAIN="mma.shermandavison.com"
@@ -37,12 +41,16 @@ Usage: deploy/install.sh [options]
   --skip-docker-install   Assume Docker Engine + Compose plugin already present
   --skip-dns-check        Do not require subdomain A record resolution
   --apply-caddy           Merge Caddyfile.mma into /etc/caddy/Caddyfile and reload
+  --apply-scheduler       Install production systemd timers + logrotate (DWCS-504)
   -h, --help              Show this help
 
 Prerequisites (operator must confirm privately before --apply-caddy):
   - Cloud firewall / exposure verified; no MMA app/DB port will be public
   - Rollback commands rehearsed (see docs/runbooks/deploy.md)
   - Root-site baseline fingerprint recorded
+
+Scheduler (DWCS-504): production units live in deploy/systemd/ (not examples/).
+Healthchecks write URLs stay in /etc/mma-model/monitoring.env (0600).
 EOF
 }
 
@@ -58,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --skip-docker-install) SKIP_DOCKER_INSTALL=1; shift ;;
     --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
     --apply-caddy) APPLY_CADDY=1; shift ;;
+    --apply-scheduler) APPLY_SCHEDULER=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -324,7 +333,114 @@ assert_compose_no_publish() {
   fi
 }
 
+ensure_monitoring_env() {
+  local mon="${ETC_ROOT}/monitoring.env"
+  if [[ -f "${mon}" ]]; then
+    chmod 600 "${mon}"
+    chown root:root "${mon}"
+    log "monitoring.env already present (${mon})"
+    return
+  fi
+  local example="${REPO_ROOT}/deploy/examples/monitoring.env.example"
+  if [[ -f "${example}" ]]; then
+    cp "${example}" "${mon}"
+  else
+    cat > "${mon}" <<'EOF'
+# DWCS-504 monitoring env (host only, mode 0600). Replace PLACEHOLDER UUIDs.
+MMA_HC_SCHEDULER_URL=https://hc-ping.com/PLACEHOLDER_SCHEDULER_UUID
+MMA_HC_BACKUP_URL=https://hc-ping.com/PLACEHOLDER_BACKUP_UUID
+MMA_HC_MONITOR_URL=https://hc-ping.com/PLACEHOLDER_MONITOR_UUID
+EOF
+  fi
+  chmod 600 "${mon}"
+  chown root:root "${mon}"
+  log "wrote placeholder monitoring.env at ${mon} (replace Healthchecks UUIDs)"
+}
+
+sync_opt_tree() {
+  # Keep /opt/mma-model deploy scripts + units aligned with this checkout.
+  mkdir -p "${OPT_ROOT}/deploy" "${OPT_ROOT}/docs/runbooks" "${OPT_ROOT}/docs/deployment"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete \
+      --exclude '.git' \
+      --exclude '.firecrawl' \
+      --exclude '__pycache__' \
+      --exclude '.venv' \
+      --exclude 'node_modules' \
+      "${REPO_ROOT}/deploy/" "${OPT_ROOT}/deploy/"
+    if [[ -d "${REPO_ROOT}/docs/runbooks" ]]; then
+      rsync -a "${REPO_ROOT}/docs/runbooks/" "${OPT_ROOT}/docs/runbooks/"
+    fi
+    if [[ -d "${REPO_ROOT}/docs/deployment" ]]; then
+      rsync -a "${REPO_ROOT}/docs/deployment/" "${OPT_ROOT}/docs/deployment/"
+    fi
+  else
+    rm -rf "${OPT_ROOT}/deploy"
+    cp -a "${REPO_ROOT}/deploy" "${OPT_ROOT}/deploy"
+    if [[ -d "${REPO_ROOT}/docs/runbooks" ]]; then
+      rm -rf "${OPT_ROOT}/docs/runbooks"
+      cp -a "${REPO_ROOT}/docs/runbooks" "${OPT_ROOT}/docs/runbooks"
+    fi
+    if [[ -d "${REPO_ROOT}/docs/deployment" ]]; then
+      rm -rf "${OPT_ROOT}/docs/deployment"
+      cp -a "${REPO_ROOT}/docs/deployment" "${OPT_ROOT}/docs/deployment"
+    fi
+  fi
+  chmod +x "${OPT_ROOT}/deploy/run-job.sh" \
+    "${OPT_ROOT}/deploy/backup-hook.sh" \
+    "${OPT_ROOT}/deploy/monitor-check.sh" \
+    "${OPT_ROOT}/deploy/install.sh" \
+    "${OPT_ROOT}/deploy/rollback.sh" 2>/dev/null || true
+  log "synced deploy tree to ${OPT_ROOT}"
+}
+
+apply_scheduler() {
+  local unit_src="${REPO_ROOT}/deploy/systemd"
+  local logrotate_src="${REPO_ROOT}/deploy/logrotate/mma-model"
+  [[ -d "${unit_src}" ]] || die "missing ${unit_src}"
+  [[ -f "${logrotate_src}" ]] || die "missing ${logrotate_src}"
+
+  sync_opt_tree
+  ensure_monitoring_env
+  mkdir -p /var/log/mma-model /var/lib/mma-model
+  chmod 755 /var/log/mma-model /var/lib/mma-model
+
+  install -m 0644 "${unit_src}/mma-scheduler.service" /etc/systemd/system/mma-scheduler.service
+  install -m 0644 "${unit_src}/mma-scheduler.timer" /etc/systemd/system/mma-scheduler.timer
+  install -m 0644 "${unit_src}/mma-backup.service" /etc/systemd/system/mma-backup.service
+  install -m 0644 "${unit_src}/mma-backup.timer" /etc/systemd/system/mma-backup.timer
+  install -m 0644 "${logrotate_src}" /etc/logrotate.d/mma-model
+
+  if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify \
+      /etc/systemd/system/mma-scheduler.service \
+      /etc/systemd/system/mma-scheduler.timer \
+      /etc/systemd/system/mma-backup.service \
+      /etc/systemd/system/mma-backup.timer \
+      || die "systemd-analyze verify failed"
+    log "systemd-analyze verify ok"
+  fi
+
+  systemctl daemon-reload
+  systemctl enable --now mma-scheduler.timer
+  systemctl enable --now mma-backup.timer
+  log "enabled mma-scheduler.timer and mma-backup.timer"
+  systemctl list-timers 'mma-*' --no-pager || true
+}
+
 main() {
+  if [[ "${APPLY_SCHEDULER}" -eq 1 && "${APPLY_CADDY}" -eq 0 && "${SKIP_DOCKER_INSTALL}" -eq 0 ]]; then
+    # Scheduler-only path: do not re-seed assets or touch Caddy.
+    log "DWCS-504 scheduler install starting"
+    require_root
+    assert_compose_no_publish
+    ensure_paths
+    ensure_env_file
+    apply_scheduler
+    log "done"
+    return
+  fi
+
   log "DWCS-503 install starting"
   record_root_baseline
   assert_compose_no_publish
@@ -340,6 +456,9 @@ main() {
     apply_caddy_merge
   else
     log "paths/image/assets ready; re-run with --apply-caddy after DNS + firewall sign-off"
+  fi
+  if [[ "${APPLY_SCHEDULER}" -eq 1 ]]; then
+    apply_scheduler
   fi
   log "done"
 }

@@ -24,7 +24,9 @@ These snippets document the intended production seam for later tickets
 | `Caddyfile.mma.snippet` | Separate site block to merge into the existing Caddyfile later |
 | `docker-compose.yml` | Immutable worker image, mounts only, no ports |
 | `mma.env.example` | Placeholder env keys (never real credentials) |
-| `systemd/*.service` / `*.timer` | Scheduler + backup timer shape with flock |
+| `systemd/*.service` / `*.timer` | Scheduler + backup timer shape with flock (**EXAMPLE ONLY**) |
+
+Production DWCS-504 units live in [`../systemd/`](../systemd/), not here.
 
 ## Rollback (documented for later tickets)
 

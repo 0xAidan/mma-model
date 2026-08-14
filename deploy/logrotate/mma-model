@@ -1,0 +1,14 @@
+# Log rotation for MMA host job logs (DWCS-504).
+# Journald still captures systemd unit output; this rotates file logs written
+# by deploy/run-job.sh and deploy/backup-hook.sh under /var/log/mma-model/.
+
+/var/log/mma-model/*.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 root root
+}

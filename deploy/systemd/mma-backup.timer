@@ -1,0 +1,15 @@
+# Production systemd timer (DWCS-504).
+# Nightly backup with Persistent=true so a missed night still runs after downtime.
+
+[Unit]
+Description=MMA model nightly backup timer (DWCS-504)
+Documentation=file:///opt/mma-model/docs/runbooks/monitoring.md
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=90
+Unit=mma-backup.service
+
+[Install]
+WantedBy=timers.target

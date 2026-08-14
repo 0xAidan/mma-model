@@ -1,8 +1,9 @@
-# Packaging and deploy notes (DWCS-502 / DWCS-503)
+# Packaging and deploy notes (DWCS-502 / DWCS-503 / DWCS-504)
 
 This directory holds the **production-shaped** Compose file, digest pin, Caddy
-snippet, and host install/rollback helpers. Scripts mutate a live host only when
-an operator runs them deliberately (see `docs/runbooks/deploy.md`).
+snippet, host install/rollback helpers, and production systemd timers. Scripts
+mutate a live host only when an operator runs them deliberately (see
+`docs/runbooks/deploy.md` and `docs/runbooks/monitoring.md`).
 
 | Path | Role |
 |------|------|
@@ -10,7 +11,10 @@ an operator runs them deliberately (see `docs/runbooks/deploy.md`).
 | `compose.ci.yaml` + `ci-mma.env` | CI/local `docker compose config` overlay; uses `env_file: !override` so runners need no `/etc/mma-model/mma.env` |
 | `image-digest.txt` | `current` + `previous` digests for rollback |
 | `Caddyfile.mma` | Production site block for existing host Caddy **2.6.2** (`basicauth`, CSP, cache rules) |
-| `install.sh` / `rollback.sh` | Host path/image/Caddy helpers (no second proxy; no compose ports) |
+| `install.sh` / `rollback.sh` | Host path/image/Caddy helpers; `--apply-scheduler` installs DWCS-504 timers |
+| `systemd/` | **Production** scheduler + backup units (DWCS-504) |
+| `run-job.sh` / `backup-hook.sh` / `monitor-check.sh` | Flock runner, backup stub, host monitors |
+| `logrotate/mma-model` | File log rotation for `/var/log/mma-model` |
 | `examples/` | **EXAMPLE ONLY — NOT INSTALLED** (DWCS-004); keep for topology docs/tests |
 
 ## Image
@@ -43,4 +47,11 @@ then falls back to `./` for local Vite fixtures.
 - Serve `mma.shermandavison.com` from `/srv/mma/public` via the **existing** host Caddy.
 - Runbook: `docs/runbooks/deploy.md`
 - Redacted evidence: `docs/deployment/dwcs-503-evidence.md`
-- systemd timers / restic remain DWCS-504 / DWCS-505.
+
+## DWCS-504 scheduler + monitoring
+
+- Production units: `deploy/systemd/` (not `examples/systemd/`).
+- Install: `sudo ./deploy/install.sh --apply-scheduler`
+- Runbook: `docs/runbooks/monitoring.md`
+- Evidence: `docs/deployment/dwcs-504-evidence.md`
+- Backup internals remain DWCS-505 (`backup-hook.sh` is a stamp stub).
