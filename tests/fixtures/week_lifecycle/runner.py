@@ -14,8 +14,13 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from mma_model.db.session import _attach_sqlite_listeners, create_all_for_tests
+from mma_model.db.tables.model_registry import ModelRegistryDecision
 from mma_model.db.tables.pipeline_jobs import PipelineJobRun
-from mma_model.db.tables.recommendations import OfficialPublication
+from mma_model.db.tables.recommendations import (
+    OfficialPublication,
+    PriceTarget,
+    RecommendationSettlement,
+)
 from mma_model.domain.markets import MarketFamily, OutcomeKey, RecommendationState
 from mma_model.grade.service import (
     StateEventType,
@@ -29,20 +34,26 @@ from mma_model.grade.service import (
 from mma_model.jobs.due import OrchestratorCadence
 from mma_model.jobs.handlers import HandlerRegistry
 from mma_model.jobs.orchestrator import run_jobs_tick
-from mma_model.jobs.types import (
-    EventContext,
-    HandlerResult,
-    JobErrorClass,
-    JobStatus,
-    JobType,
-)
+from mma_model.jobs.types import EventContext, JobErrorClass, JobStatus, JobType
 from mma_model.markets.settlement import BoutSettlementFacts
+from mma_model.modeling.artifacts import PINNED_RIDGE_SPEC_HASH
+from mma_model.modeling.baselines import TrainReport, run_protocol_train
+from mma_model.modeling.promotion import DecisionAction
+from mma_model.modeling.registry import (
+    load_model_registry,
+    store_artifact_by_digest,
+    write_registry_document,
+)
 from mma_model.observability.health import (
+    HEALTH_COMPONENT_NAMES,
     HealthStatus,
     build_health_report,
+    dumps_health,
     make_component,
 )
 from mma_model.observability.publish_guard import FilesystemPublishPointer
+from mma_model.quality.constants import EXIT_OK
+from mma_model.quality.models import GateResult
 from mma_model.recommend.policy import (
     SelectionCandidate,
     load_recommendation_policy,
@@ -63,6 +74,8 @@ BOUT_NOBET = "bout-nobet"
 BOUT_STALE = "bout-stale"
 BOUT_OLD = "bout-old"
 BOUT_NEW = "bout-new"
+# Extra identity-only bout: blocked without failing the five-bout card.
+BOUT_ISO = "bout-iso-unresolved"
 
 ACTIVE_AT_T60 = (BOUT_CV, BOUT_UNPRICED, BOUT_NOBET, BOUT_STALE, BOUT_NEW)
 HASH_A = "a" * 64
@@ -71,9 +84,24 @@ HASH_C = "c" * 64
 HASH_D = "d" * 64
 HASH_E = "e" * 64
 
-# Hard upper bounds for the fixture run (not flake-prone exact counts).
 MAX_RUNTIME_SEC = 120.0
 MAX_DB_GROWTH_BYTES = 8 * 1024 * 1024
+
+
+@dataclass
+class HealthEvidence:
+    """Facts collected during the lifecycle used to derive health statuses."""
+
+    discover_succeeded: bool = False
+    unresolved_identity_bouts: tuple[str, ...] = ()
+    has_stale_line_bout: bool = False
+    publish_failed_lkg_retained: bool = False
+    publish_succeeded_later: bool = False
+    grade_event_night_ok: bool = False
+    retrain_failed: bool = False
+    backup_job_ran: bool = False
+    quota_probed: bool = False
+    odds_auth_or_schema_failed: bool = False
 
 
 @dataclass
@@ -87,15 +115,22 @@ class LifecycleResult:
     db_bytes: int
     champion_digest_before: str
     champion_digest_after: str
+    model_registry_path: Path
     lkg_release_id: str
     final_release_id: str | None
-    quote_ledger: list[dict[str, Any]] = field(default_factory=list)
+    health_state_path: Path
     health_statuses: dict[str, str] = field(default_factory=dict)
+    health_evidence: dict[str, Any] = field(default_factory=dict)
+    price_target_snapshot: dict[str, Any] = field(default_factory=dict)
+    event_night_cv_settlement: dict[str, Any] = field(default_factory=dict)
+    current_cv_settlement: dict[str, Any] = field(default_factory=dict)
+    quote_ledger: list[dict[str, Any]] = field(default_factory=list)
     tick_summaries: list[dict[str, Any]] = field(default_factory=list)
     prediction_ids: list[str] = field(default_factory=list)
     publication_ids: list[str] = field(default_factory=list)
     auth_attempts: int = 0
     schema_attempts: int = 0
+    registry_reject_count: int = 0
     card: dict[str, Any] = field(default_factory=dict)
 
 
@@ -140,13 +175,96 @@ def _open_session(db_path: Path) -> tuple[Session, Any]:
     return SessionLocal(), engine
 
 
+def _pass_health_gate() -> GateResult:
+    return GateResult(
+        ok=True,
+        exit_code=EXIT_OK,
+        blocker_codes=(),
+        passed_codes=("lifecycle_fixture_health",),
+        informational_codes=(),
+        gates=(),
+    )
+
+
+def _seed_model_registry(work_dir: Path) -> tuple[Path, Path, str]:
+    """Seed a real champion registry (same pattern as DWCS-402 tests)."""
+    artifacts = work_dir / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    report = run_protocol_train(output_path=artifacts / "seed.json")
+    digest, stored = store_artifact_by_digest(
+        artifacts_dir=artifacts,
+        payload_path=report.artifact.payload_path,
+    )
+    registry_path = work_dir / "model_registry.yaml"
+    write_registry_document(
+        registry_path,
+        champion_digest=digest,
+        artifact_relpath=str(stored),
+        champion_config_hash=PINNED_RIDGE_SPEC_HASH,
+    )
+    return registry_path, artifacts, digest
+
+
+def derive_health_from_evidence(
+    evidence: HealthEvidence,
+    *,
+    as_of: str,
+) -> dict[str, HealthStatus]:
+    """Map lifecycle evidence onto real HEALTH_COMPONENT_NAMES statuses."""
+    statuses: dict[str, HealthStatus] = {}
+
+    statuses["sources"] = (
+        HealthStatus.HEALTHY if evidence.discover_succeeded else HealthStatus.MISSING
+    )
+    statuses["identity"] = (
+        HealthStatus.BLOCKED
+        if evidence.unresolved_identity_bouts
+        else HealthStatus.HEALTHY
+    )
+    # Stale observed line on the card drives odds + staleness.
+    statuses["odds"] = (
+        HealthStatus.STALE if evidence.has_stale_line_bout else HealthStatus.HEALTHY
+    )
+    if evidence.odds_auth_or_schema_failed and statuses["odds"] is HealthStatus.HEALTHY:
+        statuses["odds"] = HealthStatus.FAILED
+    statuses["staleness"] = (
+        HealthStatus.STALE if evidence.has_stale_line_bout else HealthStatus.HEALTHY
+    )
+    statuses["model"] = (
+        HealthStatus.FAILED if evidence.retrain_failed else HealthStatus.HEALTHY
+    )
+    # Failed publish that retained LKG is blocked (current not advanced).
+    if evidence.publish_failed_lkg_retained and not evidence.publish_succeeded_later:
+        statuses["publish"] = HealthStatus.BLOCKED
+    elif evidence.publish_failed_lkg_retained:
+        # Failure occurred; later success recovered current — still record failure.
+        statuses["publish"] = HealthStatus.FAILED
+    elif evidence.publish_succeeded_later:
+        statuses["publish"] = HealthStatus.HEALTHY
+    else:
+        statuses["publish"] = HealthStatus.MISSING
+    statuses["grade"] = (
+        HealthStatus.HEALTHY if evidence.grade_event_night_ok else HealthStatus.MISSING
+    )
+    statuses["backup"] = (
+        HealthStatus.HEALTHY if evidence.backup_job_ran else HealthStatus.MISSING
+    )
+    statuses["quota"] = (
+        HealthStatus.HEALTHY if evidence.quota_probed else HealthStatus.MISSING
+    )
+
+    # Every packaged component must appear.
+    for name in HEALTH_COMPONENT_NAMES:
+        statuses.setdefault(name, HealthStatus.MISSING)
+    return statuses
+
+
 def _build_candidates(
     *,
     policy: Any,
     quote_ledger: list[dict[str, Any]],
 ) -> dict[str, SelectionCandidate]:
     """Frozen-policy candidates for the five-bout active card."""
-    # Latest pre-cutoff fresh quote for bout-cv (line-cross to actionable).
     cv_quote_raw = None
     for row in quote_ledger:
         if (
@@ -182,7 +300,9 @@ def _build_candidates(
         BOUT_NOBET: make_candidate(
             event_id=EVENT_ID,
             bout_id=BOUT_NOBET,
-            quote=eligible_quote(5.0, observed_at=CUTOFF - timedelta(minutes=20), cutoff=CUTOFF),
+            quote=eligible_quote(
+                5.0, observed_at=CUTOFF - timedelta(minutes=20), cutoff=CUTOFF
+            ),
             data_quality_pass=False,
             model_qualified=False,
             policy=policy,
@@ -295,6 +415,38 @@ def _record_quote_snapshot(
     )
 
 
+def _snapshot_price_target(session: Session, publication_id: str) -> dict[str, Any]:
+    pub = session.get(OfficialPublication, publication_id)
+    if pub is None or pub.price_target_id is None:
+        raise RuntimeError("expected confirmed_value publication with price target")
+    target = session.get(PriceTarget, pub.price_target_id)
+    if target is None:
+        raise RuntimeError("missing price target row")
+    return {
+        "price_target_id": target.id,
+        "fair_decimal": target.fair_decimal,
+        "actionable_decimal": target.actionable_decimal,
+        "strong_value_decimal": target.strong_value_decimal,
+        "fair_american": target.fair_american,
+        "actionable_american": target.actionable_american,
+        "strong_value_american": target.strong_value_american,
+        "thresholds_hash": target.thresholds_hash,
+    }
+
+
+def _settlement_snapshot(row: RecommendationSettlement) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "reason_code": row.reason_code,
+        "settlement_result": row.settlement_result,
+        "profit": row.profit,
+        "roi": row.roi,
+        "clv": row.clv,
+        "result_version_kind": row.result_version_kind,
+        "revision": row.revision,
+    }
+
+
 def run_week_lifecycle(
     work_dir: Path,
     *,
@@ -309,27 +461,37 @@ def run_week_lifecycle(
     assert_not_live_db(db_path)
     publish_root = work_dir / "publish"
     lock_path = work_dir / "tick.lock"
+    health_state_path = work_dir / "health_state.json"
     publish_root.mkdir(parents=True, exist_ok=True)
 
     session, engine = _open_session(db_path)
     policy = load_recommendation_policy()
     registry = HandlerRegistry()
-    registry.artifact.digest = HASH_A
     registry.missing_odds_bouts.update({BOUT_UNPRICED, BOUT_NEW})
     registry.stale_line_bouts.add(BOUT_STALE)
+    registry.unresolved_identity_bouts.add(BOUT_ISO)
+
+    model_registry_path, artifacts_dir, champion_digest = _seed_model_registry(work_dir)
+    registry.artifact.digest = champion_digest
+    champion_before = load_model_registry(
+        path=model_registry_path, enforce_pinned_digest=False
+    ).champion.artifact_digest
+    assert champion_before == champion_digest
 
     lkg_id = _seed_lkg(publish_root)
     registry.publish.current_release_id = lkg_id
     registry.publish.releases = [lkg_id]
 
     quote_ledger: list[dict[str, Any]] = []
-    # Seed early below-actionable line for bout-cv (line-cross later).
     for row in card.get("quote_timeline") or []:
         if row.get("post_official"):
             continue
         quote_ledger.append(dict(row))
 
-    champion_before = registry.artifact.digest
+    evidence = HealthEvidence(
+        has_stale_line_bout=True,
+        unresolved_identity_bouts=(BOUT_ISO,),
+    )
     auth_attempts = 0
     schema_attempts = 0
     tick_summaries: list[dict[str, Any]] = []
@@ -337,10 +499,12 @@ def run_week_lifecycle(
     predictions_by_bout: dict[str, dict[str, str]] = {}
     model_run_id: str | None = None
     publication_ids: list[str] = []
+    price_target_snapshot: dict[str, Any] = {}
+    event_night_cv_settlement: dict[str, Any] = {}
+    current_cv_settlement: dict[str, Any] = {}
 
-    # Early card includes bout-old; after replacement the active five use bout-new.
-    early_bouts = (BOUT_CV, BOUT_UNPRICED, BOUT_NOBET, BOUT_STALE, BOUT_OLD)
-    active_bouts = ACTIVE_AT_T60
+    early_bouts = (BOUT_CV, BOUT_UNPRICED, BOUT_NOBET, BOUT_STALE, BOUT_OLD, BOUT_ISO)
+    active_bouts = (*ACTIVE_AT_T60, BOUT_ISO)
     event = EventContext(
         event_id=EVENT_ID,
         event_start=EVENT_START,
@@ -366,6 +530,11 @@ def run_week_lifecycle(
             "facts_by_bout": facts,
             "results_final": False,
             "no_bet_bouts": {BOUT_NOBET},
+            "model_registry_path": str(model_registry_path),
+            "artifacts_dir": str(artifacts_dir),
+            "health_result": _pass_health_gate(),
+            "backtest_ok": True,
+            "calibration_ok": True,
         }
         base.update(extra)
         return base
@@ -401,13 +570,21 @@ def run_week_lifecycle(
                 ],
             }
         )
+        if any(
+            row.job_type == JobType.DISCOVER.value and row.status == JobStatus.SUCCESS.value
+            for row in result.executed
+        ):
+            evidence.discover_succeeded = True
+        if any(
+            row.job_type == JobType.BACKUP.value and row.status == JobStatus.SUCCESS.value
+            for row in result.executed
+        ):
+            evidence.backup_job_ran = True
         return result
 
     try:
-        # --- T−72h discover / identity / odds ---
         _tick(EVENT_START - timedelta(hours=72))
 
-        # --- Mid-window odds: capture below-actionable CV line ---
         _record_quote_snapshot(
             quote_ledger,
             bout_id=BOUT_CV,
@@ -416,7 +593,6 @@ def run_week_lifecycle(
         )
         _tick(datetime(2024, 8, 12, 12, 0, tzinfo=UTC))
 
-        # --- Inject AUTH failure on snapshot-odds (non-retryable) ---
         registry.forced_failures[JobType.SNAPSHOT_ODDS] = JobErrorClass.AUTHENTICATION
         auth_result = _tick(datetime(2024, 8, 12, 15, 0, tzinfo=UTC))
         auth_rows = [
@@ -433,9 +609,9 @@ def run_week_lifecycle(
             ).all()
         )
         assert auth_rows, "expected snapshot-odds auth failure row"
+        evidence.odds_auth_or_schema_failed = True
         del registry.forced_failures[JobType.SNAPSHOT_ODDS]
 
-        # --- Inject SCHEMA failure on snapshot-odds (non-retryable) ---
         registry.forced_failures[JobType.SNAPSHOT_ODDS] = JobErrorClass.SCHEMA
         schema_result = _tick(datetime(2024, 8, 12, 16, 0, tzinfo=UTC))
         schema_rows = [
@@ -454,7 +630,6 @@ def run_week_lifecycle(
         assert schema_rows, "expected snapshot-odds schema failure row"
         del registry.forced_failures[JobType.SNAPSHOT_ODDS]
 
-        # --- Line cross + replacement before T−60 ---
         cross_at = datetime(2024, 8, 13, 0, 30, tzinfo=UTC)
         _record_quote_snapshot(
             quote_ledger,
@@ -462,7 +637,6 @@ def run_week_lifecycle(
             as_of=cross_at,
             offered=2.60,
         )
-        # Pre-publish bout-old so recommend can invalidate without delete.
         old_thresholds = render_thresholds(0.50, 0.40, family=MarketFamily.MONEYLINE)
         old_pub, _ = publish_official_t60(
             session,
@@ -492,10 +666,9 @@ def run_week_lifecycle(
         )
         _tick(cross_at)
 
-        # --- T−61m score: seed predictions for sporting grades ---
         score_at = EVENT_START - timedelta(minutes=61)
         model_run_id, predictions_by_bout, prediction_ids = _seed_predictions(
-            session, bout_ids=active_bouts, as_of=score_at
+            session, bout_ids=ACTIVE_AT_T60, as_of=score_at
         )
         session.commit()
         _tick(score_at)
@@ -513,9 +686,10 @@ def run_week_lifecycle(
         pointer = FilesystemPublishPointer(publish_root)
         assert pointer.current_release_id == lkg_id
         assert (publish_root / "releases" / lkg_id / "release.json").is_file()
+        evidence.publish_failed_lkg_retained = True
         registry.publish_should_fail = False
 
-        # Post-official line change → state event only (official row immutable).
+        # Capture immutable price-target fields immediately after official T−60.
         cv_pub = session.scalar(
             select(OfficialPublication).where(
                 OfficialPublication.event_id == EVENT_ID,
@@ -523,6 +697,9 @@ def run_week_lifecycle(
             )
         )
         assert cv_pub is not None
+        assert cv_pub.state == RecommendationState.CONFIRMED_VALUE.value
+        price_target_snapshot = _snapshot_price_target(session, cv_pub.id)
+
         post_at = datetime(2024, 8, 13, 1, 30, tzinfo=UTC)
         append_state_event(
             session,
@@ -543,7 +720,6 @@ def run_week_lifecycle(
             post_official=True,
         )
 
-        # --- Later publish success (same T-60 publish key retries) ---
         ok_pub = _tick(post_at)
         publish_ok = next(
             (r for r in ok_pub.executed if r.job_type == JobType.PUBLISH.value),
@@ -556,10 +732,9 @@ def run_week_lifecycle(
         assert final_release is not None
         assert final_release != lkg_id
         assert (publish_root / "releases" / final_release / "release.json").is_file()
-        # LKG files survive.
         assert (publish_root / "releases" / lkg_id / "release.json").is_file()
+        evidence.publish_succeeded_later = True
 
-        # --- Event start: grade deferred until finals ---
         _tick(EVENT_START, results_final=False)
         grade_success = session.scalar(
             select(func.count()).select_from(PipelineJobRun).where(
@@ -569,7 +744,6 @@ def run_week_lifecycle(
         )
         assert grade_success == 0
 
-        # --- Event-night finals + grade ---
         night = EVENT_START + timedelta(minutes=20)
         registry.results_final = True
         _tick(
@@ -579,12 +753,40 @@ def run_week_lifecycle(
             official_publication_ids=list(publication_ids),
             facts_by_bout=facts,
         )
+        evidence.grade_event_night_ok = (
+            session.scalar(
+                select(func.count()).select_from(PipelineJobRun).where(
+                    PipelineJobRun.job_type == JobType.GRADE.value,
+                    PipelineJobRun.success_token == 1,
+                )
+            )
+            == 1
+        )
 
-        # Append a later result correction (current revision) without rewrite.
+        # Capture event-night settlement for bout-cv before overturning facts.
+        night_settle = session.scalar(
+            select(RecommendationSettlement).where(
+                RecommendationSettlement.official_publication_id == cv_pub.id,
+                RecommendationSettlement.result_version_kind == "event_night",
+                RecommendationSettlement.revision == 1,
+            )
+        )
+        assert night_settle is not None
+        event_night_cv_settlement = _settlement_snapshot(night_settle)
+
+        # Overturn bout-cv draw → decisive winner (append-only current revision).
+        corrected_facts = dict(facts)
+        corrected_facts[BOUT_CV] = BoutSettlementFacts(
+            scheduled_rounds=3,
+            result_class="decisive",
+            winner_side="a",
+            method="decision",
+            ending_round=3,
+        )
         grade_predictions(
             session,
             prediction_ids=prediction_ids,
-            facts_by_bout=facts,
+            facts_by_bout=corrected_facts,
             result_version_kind="current",
             revision=2,
             graded_at=night + timedelta(hours=1),
@@ -592,14 +794,24 @@ def run_week_lifecycle(
         settle_recommendations(
             session,
             official_publication_ids=publication_ids,
-            facts_by_bout=facts,
+            facts_by_bout=corrected_facts,
             result_version_kind="current",
             revision=2,
             settled_at=night + timedelta(hours=1),
         )
         session.commit()
 
-        # Idempotent re-grade of event_night.
+        current_settle = session.scalar(
+            select(RecommendationSettlement).where(
+                RecommendationSettlement.official_publication_id == cv_pub.id,
+                RecommendationSettlement.result_version_kind == "current",
+                RecommendationSettlement.revision == 2,
+            )
+        )
+        assert current_settle is not None
+        current_cv_settlement = _settlement_snapshot(current_settle)
+
+        # Idempotent re-grade of event_night (same original facts).
         grade_predictions(
             session,
             prediction_ids=prediction_ids,
@@ -618,47 +830,66 @@ def run_week_lifecycle(
         )
         session.commit()
 
-        # --- +24h: inject retrain failure; champion unchanged ---
-        def _failing_retrain(
-            _session: Session,
-            *,
-            job: Any,
-            as_of: datetime,
-            events: Any,
-            context: Any,
-        ) -> HandlerResult:
-            _ = (job, as_of, events, context)
-            return HandlerResult(
-                status=JobStatus.FAILED,
-                error_class=JobErrorClass.INTERNAL,
-                detail="injected model-training failure; champion unchanged",
-                artifact_digest=registry.artifact.digest,
-                counts={"promoted": False, "champion_unchanged": True},
-            )
+        # --- +24h: real retrain_fixed_spec path with failing train_runner ---
+        def _boom(*, output_path: Path, include_holdout: bool = False) -> TrainReport:
+            _ = (output_path, include_holdout)
+            raise RuntimeError("injected model-training failure")
 
         plus24 = EVENT_START + timedelta(hours=24)
-        _tick(
+        retrain_tick = _tick(
             plus24,
             results_final=True,
             prediction_ids=list(prediction_ids),
             official_publication_ids=list(publication_ids),
             facts_by_bout=facts,
-            retrain_runner=_failing_retrain,
+            train_runner=_boom,
+            # Explicitly no retrain_runner stub — handle_retrain → retrain_fixed_spec.
         )
-        champion_after = registry.artifact.digest
+        retrain_rows = [
+            r for r in retrain_tick.executed if r.job_type == JobType.RETRAIN.value
+        ]
+        assert retrain_rows
+        assert retrain_rows[0].status == JobStatus.FAILED.value
+        evidence.retrain_failed = True
 
-        # Health status distinctions (fixture-assembled, no live probes).
+        champion_after = load_model_registry(
+            path=model_registry_path, enforce_pinned_digest=False
+        ).champion.artifact_digest
+        registry_reject_count = int(
+            session.scalar(
+                select(func.count()).select_from(ModelRegistryDecision).where(
+                    ModelRegistryDecision.action == DecisionAction.REJECT.value
+                )
+            )
+            or 0
+        )
+        assert champion_after == champion_before == champion_digest
+        assert registry_reject_count >= 1
+
+        # Price targets still byte-identical after line-change + re-grade.
+        after_pt = _snapshot_price_target(session, cv_pub.id)
+        assert after_pt == price_target_snapshot
+
+        # Night settlement unchanged after overturn.
+        night_again = session.get(RecommendationSettlement, event_night_cv_settlement["id"])
+        assert night_again is not None
+        assert _settlement_snapshot(night_again) == event_night_cv_settlement
+
         as_of_stamp = plus24.isoformat().replace("+00:00", "Z")
+        derived = derive_health_from_evidence(evidence, as_of=as_of_stamp)
         report = build_health_report(
             [
-                make_component("scheduler", HealthStatus.HEALTHY, as_of=as_of_stamp),
-                make_component("database", HealthStatus.MISSING, as_of=as_of_stamp),
-                make_component("odds", HealthStatus.STALE, as_of=as_of_stamp),
-                make_component("publish", HealthStatus.BLOCKED, as_of=as_of_stamp),
-                make_component("model", HealthStatus.FAILED, as_of=as_of_stamp),
+                make_component(
+                    name,
+                    derived[name],
+                    as_of=as_of_stamp,
+                    detail=f"derived from lifecycle evidence ({name})",
+                )
+                for name in HEALTH_COMPONENT_NAMES
             ],
             as_of=as_of_stamp,
         )
+        health_state_path.write_text(dumps_health(report), encoding="utf-8")
         health_statuses = {c.name: c.status.value for c in report.components}
 
         runtime_sec = time.perf_counter() - t0
@@ -674,15 +905,33 @@ def run_week_lifecycle(
             db_bytes=db_bytes,
             champion_digest_before=champion_before,
             champion_digest_after=champion_after,
+            model_registry_path=model_registry_path,
             lkg_release_id=lkg_id,
             final_release_id=final_release,
-            quote_ledger=quote_ledger,
+            health_state_path=health_state_path,
             health_statuses=health_statuses,
+            health_evidence={
+                "discover_succeeded": evidence.discover_succeeded,
+                "unresolved_identity_bouts": list(evidence.unresolved_identity_bouts),
+                "has_stale_line_bout": evidence.has_stale_line_bout,
+                "publish_failed_lkg_retained": evidence.publish_failed_lkg_retained,
+                "publish_succeeded_later": evidence.publish_succeeded_later,
+                "grade_event_night_ok": evidence.grade_event_night_ok,
+                "retrain_failed": evidence.retrain_failed,
+                "backup_job_ran": evidence.backup_job_ran,
+                "quota_probed": evidence.quota_probed,
+                "odds_auth_or_schema_failed": evidence.odds_auth_or_schema_failed,
+            },
+            price_target_snapshot=price_target_snapshot,
+            event_night_cv_settlement=event_night_cv_settlement,
+            current_cv_settlement=current_cv_settlement,
+            quote_ledger=quote_ledger,
             tick_summaries=tick_summaries,
             prediction_ids=prediction_ids,
             publication_ids=publication_ids,
             auth_attempts=auth_attempts,
             schema_attempts=schema_attempts,
+            registry_reject_count=registry_reject_count,
             card=card,
         )
     except Exception:
