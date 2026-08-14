@@ -57,7 +57,7 @@ Internet
 | Process | Keep the running host `caddy.service` |
 | Config | Add **one** site block to `/etc/caddy/Caddyfile` (see example snippet) |
 | Static root | `/srv/mma/public` |
-| Auth | `basic_auth` with a strong **hashed** password (never plaintext in git) |
+| Auth | Hashed basic auth (`basicauth` on host Caddy **2.6.2**; `basic_auth` is Caddy 2.8+ only). Never commit plaintext or live hashes. |
 | TLS | Automatic HTTPS on the subdomain after DNS exists |
 | Reload | `caddy validate` then graceful reload only in a later ticket |
 

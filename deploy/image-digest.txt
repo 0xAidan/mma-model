@@ -1,13 +1,13 @@
-# Immutable GHCR image digests for the worker (DWCS-502).
+# Immutable GHCR image digests for the worker (DWCS-502/503).
 # Update current after a successful merge-only release workflow push.
 # Retain previous for rollback: retarget compose `image:` to previous.
 #
 # image: ghcr.io/0xaidan/mma-model@sha256:<digest>
 #
-# current and previous start as placeholders until the first release publish.
+# previous= stays empty on the first real production pin (do not invent a digest).
 
-current=sha256:DIGEST_PLACEHOLDER_REPLACE_AFTER_CI_PUBLISH
+current=sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6
 previous=
 image_repo=ghcr.io/0xaidan/mma-model
-updated_at=
-note=Populated by .github/workflows/release.yml (merge to main / workflow_dispatch only). Never auto-deploy from PRs.
+updated_at=2026-08-14T03:12:00Z
+note=Pinned for DWCS-503 from release run 31765682285. Never auto-deploy from PRs.

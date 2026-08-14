@@ -1,0 +1,54 @@
+# DWCS-503 production site block for the EXISTING host Caddy (2.6.2).
+# Merge into /etc/caddy/Caddyfile. Do not start a second reverse proxy.
+# Compatible directive: basicauth (Caddy < 2.8). Do not use basic_auth here.
+#
+# Before merge: back up the live Caddyfile, validate, then graceful reload only.
+# Never commit a live bcrypt hash or plaintext password.
+# Generate on the host:
+#   caddy hash-password
+# Store plaintext only in a root-only host file (see docs/runbooks/deploy.md).
+
+mma.shermandavison.com {
+	# Replace REDACTED_HASH_PLACEHOLDER with the host-generated bcrypt hash.
+	basicauth {
+		mma_dashboard REDACTED_HASH_PLACEHOLDER
+	}
+
+	root * /srv/mma/public
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	}
+
+	# Hashed Vite assets: long-lived immutable cache.
+	@immutable_assets path /assets/*
+	header @immutable_assets Cache-Control "public, max-age=31536000, immutable"
+
+	# Dashboard JSON + live tree + health: never cache.
+	@dashboard_nocache {
+		path /live/*
+		path /current-event.json
+		path /matchups.json
+		path /performance.json
+		path /history.json
+		path /health.json
+		path /release.json
+		path /manifest.json
+		path /current
+		path /health
+		path /health/*
+	}
+	header @dashboard_nocache Cache-Control "no-store, no-cache, must-revalidate"
+	header @dashboard_nocache Pragma "no-cache"
+
+	file_server
+
+	log {
+		output stdout
+	}
+}

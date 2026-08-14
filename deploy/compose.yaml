@@ -18,9 +18,9 @@
 
 services:
   worker:
-    # Replace DIGEST_PLACEHOLDER after a main-branch release workflow publishes to GHCR.
-    # Keep the previous digest in deploy/image-digest.txt for rollback.
-    image: ghcr.io/0xaidan/mma-model@sha256:DIGEST_PLACEHOLDER_REPLACE_AFTER_CI_PUBLISH
+    # Immutable digest from release run 31765682285 (DWCS-503 pin).
+    # Keep the previous digest in deploy/image-digest.txt for rollback when set.
+    image: ghcr.io/0xaidan/mma-model@sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6
     pull_policy: never
     user: "10001:10001"
     read_only: true
