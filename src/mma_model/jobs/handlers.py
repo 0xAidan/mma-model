@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,12 +18,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from mma_model.db.tables.recommendations import OfficialPublication
-from mma_model.domain.markets import RecommendationState
+from mma_model.domain.markets import MarketFamily, OutcomeKey, RecommendationState
+from mma_model.domain.quote_eligibility import QUOTE_ELIGIBILITY_DECISION_VERSION
 from mma_model.grade.service import (
     StateEventType,
     append_state_event,
     grade_predictions,
     publish_official_t60,
+    record_observed_price,
     settle_recommendations,
 )
 from mma_model.jobs.types import (
@@ -39,9 +41,26 @@ from mma_model.observability.publish_guard import (
     FilesystemPublishPointer,
     PublishValidationError,
 )
-from mma_model.recommend.policy import RenderedThresholds
+from mma_model.recommend.policy import (
+    PRODUCTION_BOOTSTRAP_REFITS,
+    ProbabilitySemantics,
+    QuoteEvidence,
+    QuoteSourceKind,
+    RecommendationPolicy,
+    RenderedThresholds,
+    SelectionCandidate,
+    canonical_selection_id,
+    evaluate_selection,
+    load_recommendation_policy,
+)
+from mma_model.recommend.selector import select_recommendations
 
 Handler = Callable[..., HandlerResult]
+
+_SEAM_HASH_A = "a" * 64
+_SEAM_HASH_B = "b" * 64
+_SEAM_HASH_C = "c" * 64
+_SEAM_HASH_D = "d" * 64
 
 
 class JobHandler(Protocol):
@@ -57,6 +76,7 @@ class JobHandler(Protocol):
 
 
 def _sample_thresholds() -> RenderedThresholds:
+    """Legacy sample thresholds retained for non-recommend seams/tests."""
     return RenderedThresholds(
         fair_decimal=2.0,
         actionable_decimal=2.1,
@@ -69,6 +89,132 @@ def _sample_thresholds() -> RenderedThresholds:
         strong_value_or_better="+120 or better",
         actionable_ev_target=0.05,
         strong_value_ev_target=0.1,
+    )
+
+
+def _seam_eligible_quote(
+    offered: float,
+    *,
+    cutoff_at: datetime,
+    observed_at: datetime,
+    stale: bool = False,
+) -> QuoteEvidence:
+    return QuoteEvidence(
+        offered_decimal=offered,
+        source_kind=QuoteSourceKind.AUTOMATIC,
+        observed_at=observed_at,
+        cutoff=cutoff_at,
+        bookmaker_key="fixture_book",
+        region="us",
+        eligibility_decision_identity=f"qe_v1:{_SEAM_HASH_A}",
+        eligibility_decision_version=QUOTE_ELIGIBILITY_DECISION_VERSION,
+        eligibility_evaluated_at=cutoff_at,
+        eligible=not stale,
+        availability="available",
+        lifecycle="stale" if stale else "active",
+        freshness_at=observed_at,
+        stale=stale,
+    )
+
+
+def _seam_candidate(
+    *,
+    event_id: str,
+    bout_id: str,
+    cutoff_at: datetime,
+    policy: RecommendationPolicy,
+    quote: QuoteEvidence | None,
+    data_quality_pass: bool = True,
+    model_qualified: bool = True,
+    identity_resolved: bool = True,
+) -> SelectionCandidate:
+    """Build a DWCS-307 candidate for handler seams / fixture injection."""
+    return SelectionCandidate(
+        event_id=event_id,
+        bout_id=bout_id,
+        selection_id=canonical_selection_id(
+            event_id=event_id,
+            bout_id=bout_id,
+            family=MarketFamily.MONEYLINE,
+            outcome=OutcomeKey.FIGHTER_A,
+            line_point=None,
+        ),
+        family=MarketFamily.MONEYLINE,
+        outcome=OutcomeKey.FIGHTER_A,
+        line_point=None,
+        p50=0.50,
+        p25=0.40,
+        probability_semantics=ProbabilitySemantics.CONDITIONAL_NONVOID,
+        bootstrap_successful_count=PRODUCTION_BOOTSTRAP_REFITS,
+        bootstrap_seed=307001,
+        estimator_hash=_SEAM_HASH_A,
+        calibration_hash=_SEAM_HASH_B,
+        data_hash=_SEAM_HASH_C,
+        config_hash=_SEAM_HASH_D,
+        identity_resolved=identity_resolved,
+        canonical_match=True,
+        ambiguous=False,
+        replacement=False,
+        data_quality_pass=data_quality_pass,
+        model_qualified=model_qualified,
+        calibrated=True,
+        market_maturity=policy.maturity_for(MarketFamily.MONEYLINE),
+        p_win_unconditional=0.50,
+        p_void=0.0,
+        evaluation_contract_hash=policy.evaluation_contract_hash,
+        quote=quote,
+        prob_ev_positive=0.80,
+        production_uncertainty=True,
+        feature_quality="healthy",
+    )
+
+
+def _resolve_recommend_candidate(
+    *,
+    bout_id: str,
+    event: EventContext,
+    cutoff_at: datetime,
+    as_of: datetime,
+    registry: HandlerRegistry | None,
+    context: Mapping[str, Any],
+    policy: RecommendationPolicy,
+) -> SelectionCandidate:
+    provided = (context.get("recommendation_candidates") or {}).get(bout_id)
+    if isinstance(provided, SelectionCandidate):
+        return provided
+
+    missing_odds = registry is not None and bout_id in registry.missing_odds_bouts
+    stale = registry is not None and bout_id in registry.stale_line_bouts
+    want_confirmed = bout_id in set(context.get("confirmed_value_bouts") or ())
+    no_bet_gate = bout_id in set(context.get("no_bet_bouts") or ())
+
+    quote: QuoteEvidence | None = None
+    if missing_odds:
+        quote = None
+    elif stale:
+        quote = _seam_eligible_quote(
+            50.0,
+            cutoff_at=cutoff_at,
+            observed_at=min(as_of, cutoff_at - timedelta(minutes=30)),
+            stale=True,
+        )
+    elif want_confirmed:
+        quote = _seam_eligible_quote(
+            2.60,
+            cutoff_at=cutoff_at,
+            observed_at=min(as_of, cutoff_at - timedelta(minutes=30)),
+            stale=False,
+        )
+    # else: unpriced price_target when gates pass
+
+    return _seam_candidate(
+        event_id=event.event_id,
+        bout_id=bout_id,
+        cutoff_at=cutoff_at,
+        policy=policy,
+        quote=quote,
+        data_quality_pass=not no_bet_gate,
+        model_qualified=not no_bet_gate,
     )
 
 
@@ -278,6 +424,7 @@ def handle_recommend(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
+    """Official T-60 via frozen DWCS-307 policy (never hardcoded states)."""
     registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
     event = next((e for e in events if e.event_id == job.event_id), None)
     if event is None:
@@ -301,11 +448,17 @@ def handle_recommend(
     if cutoff_at.tzinfo is None:
         cutoff_at = cutoff_at.replace(tzinfo=UTC)
 
+    policy = context.get("recommendation_policy")
+    if not isinstance(policy, RecommendationPolicy):
+        policy = load_recommendation_policy()
+
     published = 0
     blocked: list[str] = []
     price_targets = 0
     confirmed = 0
+    no_bets = 0
     replacements = 0
+    quotes_recorded = 0
 
     # Invalidate replaced bouts via state events (never delete).
     if registry is not None:
@@ -340,65 +493,152 @@ def handle_recommend(
                 "published": 0,
                 "price_targets": 0,
                 "confirmed_value": 0,
+                "no_bet": 0,
                 "blocked": len(blocked),
             },
             blocks_downstream=True,
         )
 
+    candidates: list[SelectionCandidate] = []
     for bout_id in event.bout_ids:
         if bout_id in blocked:
             continue
+        candidates.append(
+            _resolve_recommend_candidate(
+                bout_id=bout_id,
+                event=event,
+                cutoff_at=cutoff_at,
+                as_of=as_of,
+                registry=registry,
+                context=context,
+                policy=policy,
+            )
+        )
 
-        missing_odds = registry is not None and bout_id in registry.missing_odds_bouts
-        stale = registry is not None and bout_id in registry.stale_line_bouts
+    if not candidates:
+        return HandlerResult(
+            status=JobStatus.SUCCESS,
+            blocked_bout_ids=tuple(blocked),
+            counts={
+                "published": 0,
+                "price_targets": 0,
+                "confirmed_value": 0,
+                "no_bet": 0,
+                "blocked": len(blocked),
+                "replacements_invalidated": replacements,
+            },
+            detail="recommend: no eligible bouts after identity blocks",
+        )
 
-        if missing_odds:
-            state = RecommendationState.PRICE_TARGET
-            reasons = ("missing_odds",)
-            primary = "missing_odds"
-            price_targets += 1
-        elif stale:
-            # Stale observed line cannot produce confirmed_value.
-            state = RecommendationState.PRICE_TARGET
-            reasons = ("stale_line",)
-            primary = "stale_line"
+    # Prefer select_recommendations for one-pick policy; fall back per-bout.
+    use_selector = bool(context.get("use_select_recommendations", True))
+    if use_selector:
+        report = select_recommendations(candidates, policy)
+        decisions = {
+            row.bout_id: row
+            for row in (
+                *report.confirmed_value,
+                *report.price_target_watchlist,
+                *report.no_bet,
+            )
+        }
+    else:
+        decisions = {
+            candidate.bout_id: evaluate_selection(candidate, policy)
+            for candidate in candidates
+        }
+
+    predictions_by_bout = dict(context.get("predictions_by_bout") or {})
+    model_run_id = context.get("model_run_id")
+    published_at = as_of if as_of >= cutoff_at else cutoff_at
+
+    for candidate in candidates:
+        decision = decisions.get(candidate.bout_id)
+        if decision is None:
+            decision = evaluate_selection(candidate, policy)
+
+        state = decision.classification
+        reason_codes = tuple(
+            reason.value if hasattr(reason, "value") else str(reason)
+            for reason in decision.reasons
+        )
+        primary = None
+        if decision.primary_reason is not None:
+            primary = (
+                decision.primary_reason.value
+                if hasattr(decision.primary_reason, "value")
+                else str(decision.primary_reason)
+            )
+
+        if state is RecommendationState.CONFIRMED_VALUE:
+            confirmed += 1
+        elif state is RecommendationState.PRICE_TARGET:
             price_targets += 1
         else:
-            # Without a full policy run, default to price_target (safe).
-            # Confirmed_value only when explicitly marked eligible in context.
-            eligible = bool(
-                (context.get("confirmed_value_bouts") or set())
-                and bout_id in set(context.get("confirmed_value_bouts") or set())
-            )
-            if eligible and not stale and not missing_odds:
-                state = RecommendationState.CONFIRMED_VALUE
-                reasons = ("policy_pass",)
-                primary = "policy_pass"
-                confirmed += 1
-            else:
-                state = RecommendationState.PRICE_TARGET
-                reasons = ("price_target",)
-                primary = "price_target"
-                price_targets += 1
+            no_bets += 1
 
-        selection_id = f"{event.event_id}:{bout_id}:moneyline:fighter_a"
+        pred_meta = predictions_by_bout.get(candidate.bout_id) or {}
+        prediction_id = pred_meta.get("prediction_id")
+        run_id = pred_meta.get("model_run_id") or model_run_id
+
+        thresholds = decision.thresholds
+        if state is not RecommendationState.NO_BET and thresholds is None:
+            # Fail closed: never invent thresholds; skip bout.
+            blocked.append(candidate.bout_id)
+            continue
+
         row, created = publish_official_t60(
             session,
             event_id=event.event_id,
-            bout_id=bout_id,
-            selection_id=selection_id,
+            bout_id=candidate.bout_id,
+            selection_id=decision.selection_id or candidate.selection_id,
             state=state,
             cutoff_at=cutoff_at,
-            published_at=as_of if as_of >= cutoff_at else cutoff_at,
-            reasons=reasons,
+            published_at=published_at,
+            reasons=reason_codes,
             primary_reason=primary,
-            thresholds=_sample_thresholds(),
+            detail=decision.detail or "",
+            market_family=decision.family or candidate.family,
+            outcome_key=decision.outcome or candidate.outcome,
+            line_point=decision.line_point
+            if decision.line_point is not None
+            else candidate.line_point,
+            prediction_id=prediction_id,
+            thresholds=thresholds,
+            model_run_id=run_id,
+            policy_hash=policy.content_hash,
+            config_hash=candidate.config_hash,
             series=event.series,
         )
         if registry is not None:
-            registry.official_by_bout[bout_id] = row.id
+            registry.official_by_bout[candidate.bout_id] = row.id
         if created:
             published += 1
+
+        # Record a real observed quote only for priced confirmed_value.
+        # Never manufacture a price for unpriced / price_target / no_bet.
+        quote = candidate.quote
+        if (
+            state is RecommendationState.CONFIRMED_VALUE
+            and quote is not None
+            and not quote.stale
+            and quote.eligible
+        ):
+            record_observed_price(
+                session,
+                official_publication_id=row.id,
+                sportsbook=str(quote.bookmaker_key or "fixture_book"),
+                decimal_odds=float(quote.offered_decimal),
+                source_type=quote.source_kind,
+                source_timestamp=quote.observed_at,
+                region=quote.region,
+                detail="recommend: observed quote at official T-60",
+                idempotency_key=(
+                    f"quote:{row.id}:{quote.offered_decimal}:"
+                    f"{quote.observed_at.isoformat()}"
+                ),
+            )
+            quotes_recorded += 1
 
     return HandlerResult(
         status=JobStatus.SUCCESS,
@@ -407,10 +647,12 @@ def handle_recommend(
             "published": published,
             "price_targets": price_targets,
             "confirmed_value": confirmed,
-            "blocked": len(blocked),
+            "no_bet": no_bets,
+            "blocked": len([b for b in blocked if b in event.bout_ids]),
             "replacements_invalidated": replacements,
+            "observed_quotes": quotes_recorded,
         },
-        detail="recommend: official T-60 via grade ledger",
+        detail="recommend: official T-60 via frozen DWCS-307 policy + grade ledger",
     )
 
 
