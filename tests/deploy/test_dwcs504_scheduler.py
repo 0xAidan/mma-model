@@ -126,6 +126,28 @@ def test_run_job_script_invariants():
     assert "ports" not in text.lower() or "no ports" in text.lower()
 
 
+def test_run_job_uses_image_app_not_whole_repo_mount():
+    """Tick must use image /app; never whole-repo /opt/mma-model-src as tick_root."""
+    text = _read(RUN_JOB)
+    assert "cd /app && PYTHONPATH=src" in text
+    assert "/opt/mma-model-src" not in text
+    assert 'tick_root="/opt/mma-model-src"' not in text
+    assert 'tick_root=/opt/mma-model-src' not in text
+    # Narrow overlay only (guard + cli), not the entire host tree.
+    assert "/app/src/mma_model/jobs/db_guard.py:ro" in text
+    assert "/app/src/mma_model/cli.py:ro" in text
+    assert "host_guard" in text and "host_cli" in text
+    # Must not mount REPO_ROOT as a directory tick_root.
+    assert not re.search(
+        r'-v\s+"\$\{REPO_ROOT\}:/opt/mma-model-src',
+        text,
+    )
+    assert not re.search(
+        r'-v\s+"\$\{REPO_ROOT\}:[^"\s]+:ro"',
+        text,
+    )
+
+
 def test_backup_hook_is_stub_not_restic():
     text = _read(BACKUP_HOOK)
     assert BACKUP_HOOK.stat().st_mode & 0o111

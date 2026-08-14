@@ -16,8 +16,10 @@
 #
 # Pinned-image note (DWCS-503 digest): the console script resolves alembic /
 # contracts relative to site-packages. The worker therefore runs the CLI from
-# the host-synced tree (or /app) via PYTHONPATH=src. Production jobs use the
-# explicit absolute URL sqlite:////data/mma.db (canonical /data/mma.db).
+# /app via PYTHONPATH=src. Until a later digest includes the DWCS-504 DB guard,
+# run-job may overlay only jobs/db_guard.py + cli.py onto /app/src/mma_model.
+# Never bind-mount the whole host repo as tick_root (circular import failure).
+# Production jobs use explicit sqlite:////data/mma.db (canonical /data/mma.db).
 
 set -euo pipefail
 
@@ -149,15 +151,24 @@ require_compose() {
 run_compose_tick() {
   local now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # Prefer host-synced tree so DWCS-504 DB guard lands before the next image
-  # digest. Fall back to the image /app checkout.
-  local tick_root="/app"
+  # Default: image /app + PYTHONPATH=src (working path proven at 17:40Z).
+  # Do NOT bind-mount the whole host git tree as tick_root — that causes
+  # circular module load failures (compute_code_hash / modeling.artifacts).
+  #
+  # Until the next digest includes the DWCS-504 DB guard, overlay only:
+  #   jobs/db_guard.py  and  cli.py  (the guard call site)
+  # onto /app/src/mma_model/... when those host files exist.
   local -a volume_args=()
-  if [[ -f "${REPO_ROOT}/src/mma_model/jobs/db_guard.py" \
-     && -f "${REPO_ROOT}/alembic.ini" \
-     && -d "${REPO_ROOT}/migrations" ]]; then
-    volume_args=(-v "${REPO_ROOT}:/opt/mma-model-src:ro")
-    tick_root="/opt/mma-model-src"
+  local host_cli="${REPO_ROOT}/src/mma_model/cli.py"
+  local host_guard="${REPO_ROOT}/src/mma_model/jobs/db_guard.py"
+  if [[ -f "${host_guard}" && -f "${host_cli}" ]]; then
+    volume_args=(
+      -v "${host_guard}:/app/src/mma_model/jobs/db_guard.py:ro"
+      -v "${host_cli}:/app/src/mma_model/cli.py:ro"
+    )
+    log "overlay: db_guard.py + cli.py onto /app/src/mma_model"
+  else
+    log "overlay: skipped (host guard/cli missing; using image sources)"
   fi
   local -a cmd=(
     docker compose -f "${COMPOSE_FILE}" run --rm --no-deps
@@ -165,7 +176,7 @@ run_compose_tick() {
     --entrypoint /bin/sh
     worker
     -c
-    "cd '${tick_root}' && PYTHONPATH=src python -m mma_model.cli jobs tick --now '${now}' --database-url '${JOBS_DATABASE_URL}'"
+    "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick --now '${now}' --database-url '${JOBS_DATABASE_URL}'"
   )
   if command -v timeout >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=30s "${RUNTIME_BOUND_SEC}" "${cmd[@]}"

@@ -160,18 +160,24 @@ the service ran (journal + `systemctl status`) because `Persistent=true`.
 
 ## Pinned worker invoke
 
-`run-job.sh tick` calls the digest-pinned Compose worker under flock. The current
-DWCS-503 image console script resolves alembic paths incorrectly, so the runner
-preferentially bind-mounts the host-synced `/opt/mma-model` tree (src +
-migrations + `alembic.ini`) and executes:
+`run-job.sh tick` calls the digest-pinned Compose worker under flock. Default
+invocation (working path):
 
 ```text
 docker compose -f /opt/mma-model/deploy/compose.yaml run --rm --no-deps \
-  -v /opt/mma-model:/opt/mma-model-src:ro \
   --entrypoint /bin/sh worker -c \
-  "cd /opt/mma-model-src && PYTHONPATH=src python -m mma_model.cli jobs tick \
+  "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick \
    --now <utc> --database-url sqlite:////data/mma.db"
 ```
+
+Until the next digest includes the DWCS-504 DB guard, `run-job.sh` may
+bind-mount **only** these host files onto the image tree:
+
+- `/opt/mma-model/src/mma_model/jobs/db_guard.py` → `/app/src/mma_model/jobs/db_guard.py`
+- `/opt/mma-model/src/mma_model/cli.py` → `/app/src/mma_model/cli.py`
+
+Do **not** mount the whole host repo as `tick_root` (that caused circular
+import failures).
 
 `--database-url` is required. Relative live URLs (`sqlite:///data/mma.db`,
 `sqlite:///./data/mma.db`) remain refused. The explicit absolute container URL
