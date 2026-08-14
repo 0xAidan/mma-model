@@ -26,31 +26,34 @@ password hashes, plaintext passwords, or forbidden host correlators.
 
 ---
 
-## Host install (filled during verification)
+## Host install
+
+Observed-at: `2026-08-14T17:26:38Z` install; reboot verify `2026-08-14T17:37:15Z`.
 
 | Step | Result |
 |------|--------|
-| `sudo ./deploy/install.sh --apply-scheduler` | ok; both timers enabled and active |
-| `systemd-analyze verify` on four units | ok (exit 0; no parse errors) |
-| Timers enabled | `mma-scheduler.timer` and `mma-backup.timer` enabled/active |
-| Concurrent flock rejection (exit 75) | ok — second `run-job.sh tick` exited 75 |
-| `--force-fail` heartbeat path | ok — exit 1; heartbeat logged `skipped` (placeholders) |
-| Secret-redacted logs | ok — no Healthchecks UUID in `/var/log/mma-model/scheduler.log` |
-| `Persistent=true` missed-run proof | ok — timer stopped across a `*:0/5` boundary; restart fired catch-up |
-| Root-site fingerprint (if reboot) | no reboot; localhost SNI still 200 / same sha256+etag as DWCS-503 |
-| Healthchecks real ping | blocker — placeholders remain; heartbeats log `skipped` |
-| External HTTPS uptime monitor | blocker — `monitor-check.sh` loopback probe is 401 (expected) |
+| `sudo ./deploy/install.sh --apply-scheduler` | **pass** — units + logrotate installed; timers enabled |
+| `systemd-analyze verify` on four units | **pass** (unrelated sibling unit warnings ignored) |
+| Timers enabled | **pass** — `mma-scheduler.timer`, `mma-backup.timer` enabled/active after reboot |
+| Concurrent flock rejection | **pass** — first tick exit `0`, overlapping tick exit `75` (`overlap rejected`) |
+| `--force-fail` path | **pass** — exit `1`; heartbeat fail attempted (skipped: placeholder URL) |
+| Backup stub | **pass** — stamped `/srv/mma/data/backup.last_ok` |
+| Secret redaction | **pass** — `API_KEY` / `hc-ping` / `password` → `[REDACTED]` |
+| Monitor rollup (normal) | **pass** — `yellow` (fixture `health.json` components still `missing`); disk 56%; TLS ~89d; dashboard `401` |
+| Stopped-dashboard alert | **pass** — forced `MMA_DASHBOARD_HOST=invalid.invalid` → rollup `red` / `dashboard_https_000000`; restored to `yellow`/`401` |
+| `Persistent=true` | **pass** — both timers declare it; after intentional stop across a `:0/5` boundary the service ran on catch-up (`17:35:14Z` activation) |
+| Reboot persistence | **pass** — Caddy `active`; both MMA timers `enabled` and scheduled; downtime short |
+| Root-site fingerprint | **unchanged** — status `200`, sha256 `f02a0caa5f2f2f77139c5cff24dca1d44d661968bc6ae3447042b900384387d0`, etag `"tjighu98o"` (before and after reboot) |
+| MMA HTTPS after reboot | **401** (basicauth challenge intact) |
+| Healthchecks real ping | **blocker** — no Healthchecks.io account/URLs configured; placeholders remain in `/etc/mma-model/monitoring.env` |
+| External HTTPS uptime SaaS | **blocker** — not configured; host loopback probe covers local availability |
 
 ---
 
 ## Operator blockers (exact)
 
-Record here if free Healthchecks / uptime accounts are unavailable at verify time:
-
-1. Healthchecks.io account / three ping URLs not configured → placeholders remain in
-   `/etc/mma-model/monitoring.env`; heartbeats log `skipped`.
-2. External HTTPS uptime SaaS not configured → rely on `monitor-check.sh`
-   loopback dashboard probe until an operator adds UptimeRobot (or equivalent).
+1. **Healthchecks.io**: no account / ping URLs on the host. `/etc/mma-model/monitoring.env` still has `PLACEHOLDER_*` values. Heartbeats log `skipped` until the operator pastes three `hc-ping.com/<uuid>` URLs (mode `0600`). Do not commit those UUIDs.
+2. **External HTTPS uptime SaaS** (UptimeRobot / Better Stack / etc.): not configured. Until then, rely on `monitor-check.sh` loopback dashboard probe (`401` expected).
 
 ---
 
@@ -60,5 +63,7 @@ Record here if free Healthchecks / uptime accounts are unavailable at verify tim
   uses `/app` + `PYTHONPATH=src` workaround until a later digest.
 - CLI refuses `*data/mma.db` URLs; jobs use `sqlite:////data/dwcs.db` by default.
 - Backup hook is a stamp-only stub until DWCS-505.
+- Published `live/health.json` is still bootstrap fixture (`missing` components) →
+  monitor stays `yellow` until pipeline health is published.
 - Host UFW remains inactive (unchanged from DWCS-503); cloud firewall + no compose
   publish surface remain the exposure controls.

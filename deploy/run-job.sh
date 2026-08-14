@@ -82,9 +82,9 @@ redact() {
 
 log() {
   local line
-  line="$(printf '[run-job] %s\n' "$*" | redact)"
-  printf '%s' "${line}"
-  printf '%s' "${line}" >> "${LOG_DIR}/scheduler.log" 2>/dev/null || true
+  line="$(printf '[run-job] %s' "$*" | redact)"
+  printf '%s\n' "${line}"
+  printf '%s\n' "${line}" >> "${LOG_DIR}/scheduler.log" 2>/dev/null || true
 }
 
 die() {
