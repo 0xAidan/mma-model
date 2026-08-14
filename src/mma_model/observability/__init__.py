@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from mma_model.observability.assemble import assemble_health
 from mma_model.observability.errors import (
     BoundedRetryPolicy,
     is_non_retryable,
     is_retryable,
 )
-from mma_model.observability.assemble import assemble_health
 from mma_model.observability.health import (
     HEALTH_COMPONENT_NAMES,
     HealthComponent,

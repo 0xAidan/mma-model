@@ -94,7 +94,12 @@ def test_demo_live_json_is_not_healthy_publish(tmp_path: Path) -> None:
         live = root / "live"
         live.mkdir(parents=True)
         (live / "current-event.json").write_text(
-            json.dumps({"event_id": {"value": "evt-1"}, "title": {"value": "fixture confirmed_value"}}),
+            json.dumps(
+                {
+                    "event_id": {"value": "evt-1"},
+                    "title": {"value": "fixture confirmed_value"},
+                }
+            ),
             encoding="utf-8",
         )
         report = assemble_health(session, as_of=AS_OF, publish_root=root)
