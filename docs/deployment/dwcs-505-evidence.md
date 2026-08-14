@@ -61,6 +61,35 @@ Scope is empty-target restore verification, not a full replacement-VPS rebuild.
   `/srv/mma/public` or the Caddyfile.
 - Production online backup of `/srv/mma/data/mma.db` succeeded; live DB left intact.
 
+### Scheduler tick overlay hotfix (post-PR-49)
+
+After DWCS-505 merged, host-overlaid `cli.py` imported `mma_model.backup` at
+module load while the pinned worker digest still lacked that package. Tick
+failed every 5 minutes with `ModuleNotFoundError: No module named
+'mma_model.backup'`.
+
+Fix (no image repin):
+
+- `deploy/run-job.sh` also overlays host `src/mma_model/backup/` →
+  `/app/src/mma_model/backup:ro` when present (still with `db_guard.py` +
+  `cli.py`; never whole-repo `tick_root`).
+- `cli.py` imports backup symbols only inside the `backup create` handler.
+
+Host apply proof (redacted):
+
+| Check | Result |
+|-------|--------|
+| `run-job.sh tick` exit | **0** |
+| Overlay log line | `overlay: db_guard.py + cli.py + backup/ onto /app/src/mma_model` |
+| `systemctl start mma-scheduler.service` Result | **success** |
+| ExecMainStatus | **0** |
+| Journal after apply | `job=tick success`; no new `mma_model.backup` ModuleNotFoundError |
+| Live MMA unauthenticated | **401** |
+| Root site body sha256 | `f02a0caa5f2f2f77139c5cff24dca1d44d661968bc6ae3447042b900384387d0` |
+| Root site etag | `"tjighu98o"` |
+
+Caddy and `/srv/mma/public` were not rewritten for this hotfix.
+
 ---
 
 ## Leftover blockers
