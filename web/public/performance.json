@@ -1,0 +1,98 @@
+{
+  "as_of": "2026-08-11T17:00:05Z",
+  "by_lane": [
+    {
+      "confirmed_price": {
+        "clv": null,
+        "drawdown": null,
+        "flat_unit_roi": null,
+        "hit_rate": 0.0,
+        "pick_count": 1
+      },
+      "lane": "qualified",
+      "predictive": {
+        "brier": null,
+        "calibration_intercept": null,
+        "calibration_slope": null,
+        "log_loss": null,
+        "sample_count": 0
+      },
+      "price_target_only": {
+        "pick_count": 0,
+        "sporting_grade_count": 0
+      }
+    },
+    {
+      "confirmed_price": {
+        "clv": null,
+        "drawdown": null,
+        "flat_unit_roi": null,
+        "hit_rate": null,
+        "pick_count": 0
+      },
+      "lane": "paper",
+      "predictive": {
+        "brier": null,
+        "calibration_intercept": null,
+        "calibration_slope": null,
+        "log_loss": null,
+        "sample_count": 0
+      },
+      "price_target_only": {
+        "pick_count": 3,
+        "sporting_grade_count": 0
+      }
+    },
+    {
+      "confirmed_price": {
+        "clv": null,
+        "drawdown": null,
+        "flat_unit_roi": null,
+        "hit_rate": null,
+        "pick_count": 0
+      },
+      "lane": "experimental",
+      "predictive": {
+        "brier": null,
+        "calibration_intercept": null,
+        "calibration_slope": null,
+        "log_loss": null,
+        "sample_count": 0
+      },
+      "price_target_only": {
+        "pick_count": 0,
+        "sporting_grade_count": 0
+      }
+    }
+  ],
+  "confirmed_price": {
+    "clv": null,
+    "drawdown": null,
+    "flat_unit_roi": null,
+    "hit_rate": 0.0,
+    "pick_count": 1
+  },
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "filters": {
+    "data_quality": null,
+    "market": null,
+    "model": null,
+    "season": null,
+    "source": null
+  },
+  "predictive": {
+    "brier": null,
+    "calibration_intercept": null,
+    "calibration_slope": null,
+    "log_loss": null,
+    "sample_count": 0
+  },
+  "price_target_only": {
+    "pick_count": 3,
+    "sporting_grade_count": 0
+  },
+  "schema_version": 1,
+  "series": "dwcs",
+  "ticket": "DWCS-500"
+}

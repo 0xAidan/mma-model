@@ -1,0 +1,32 @@
+{
+  "as_of": "2026-08-11T17:00:05Z",
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "countdown": {
+    "event_start_at": {
+      "presence": "unknown",
+      "value": null
+    },
+    "is_past": null,
+    "seconds_until_start": null
+  },
+  "event_date": {
+    "presence": "unknown",
+    "value": null
+  },
+  "event_id": {
+    "presence": "known",
+    "value": "evt-1"
+  },
+  "last_successful_update_at": {
+    "presence": "known",
+    "value": "2026-08-11T17:00:05Z"
+  },
+  "schema_version": 1,
+  "series": "dwcs",
+  "ticket": "DWCS-500",
+  "title": {
+    "presence": "unknown",
+    "value": null
+  }
+}

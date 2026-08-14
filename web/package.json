@@ -1,12 +1,42 @@
 {
-  "name": "mma-dashboard-contracts",
+  "name": "mma-dashboard",
   "private": true,
   "version": "1.0.0",
-  "description": "Typecheck-only package for generated DWCS-500 dashboard contracts (no UI)",
+  "description": "Static DWCS weekly betting dashboard (reads published JSON only)",
+  "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
   },
   "devDependencies": {
-    "typescript": "5.8.3"
+    "@eslint/js": "9.27.0",
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
+    "@types/react": "19.1.4",
+    "@types/react-dom": "19.1.5",
+    "@vitejs/plugin-react": "4.4.1",
+    "autoprefixer": "10.4.21",
+    "eslint": "9.27.0",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "eslint-plugin-react-refresh": "0.4.20",
+    "globals": "16.1.0",
+    "jest-axe": "10.0.0",
+    "jsdom": "26.1.0",
+    "postcss": "8.5.3",
+    "tailwindcss": "3.4.17",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.32.1",
+    "vite": "6.3.5",
+    "vitest": "3.1.4",
+    "@types/jest-axe": "3.5.9"
   }
 }

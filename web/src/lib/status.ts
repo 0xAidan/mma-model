@@ -1,0 +1,114 @@
+import type {
+  HealthStatusView,
+  RecommendationStateView,
+} from "../generated/dashboard";
+
+export type StatusVisual = {
+  label: string;
+  icon: string;
+  className: string;
+};
+
+export const primaryStateVisual = (state: RecommendationStateView): StatusVisual => {
+  switch (state) {
+    case "confirmed_value":
+      return {
+        label: "Confirmed value",
+        icon: "✓",
+        className: "bg-emerald-100 text-emerald-950 border-emerald-700",
+      };
+    case "price_target":
+      return {
+        label: "Actionable price target",
+        icon: "◎",
+        className: "bg-amber-100 text-amber-950 border-amber-700",
+      };
+    case "no_bet":
+      return {
+        label: "No bet",
+        icon: "⊘",
+        className: "bg-slate-200 text-slate-900 border-slate-600",
+      };
+    default: {
+      const _exhaustive: never = state;
+      return _exhaustive;
+    }
+  }
+};
+
+export const healthStatusVisual = (status: HealthStatusView): StatusVisual => {
+  switch (status) {
+    case "healthy":
+      return {
+        label: "Healthy",
+        icon: "●",
+        className: "bg-emerald-100 text-emerald-950 border-emerald-700",
+      };
+    case "missing":
+      return {
+        label: "Missing",
+        icon: "○",
+        className: "bg-slate-200 text-slate-900 border-slate-600",
+      };
+    case "stale":
+      return {
+        label: "Stale",
+        icon: "◷",
+        className: "bg-amber-100 text-amber-950 border-amber-700",
+      };
+    case "blocked":
+      return {
+        label: "Blocked",
+        icon: "■",
+        className: "bg-orange-100 text-orange-950 border-orange-700",
+      };
+    case "failed":
+      return {
+        label: "Failed",
+        icon: "✕",
+        className: "bg-rose-100 text-rose-950 border-rose-700",
+      };
+    default: {
+      const _exhaustive: never = status;
+      return _exhaustive;
+    }
+  }
+};
+
+const HEALTH_RANK: Record<HealthStatusView, number> = {
+  healthy: 0,
+  missing: 1,
+  stale: 2,
+  blocked: 3,
+  failed: 4,
+};
+
+export const rollupHealthStatus = (
+  statuses: ReadonlyArray<HealthStatusView>,
+): HealthStatusView => {
+  if (statuses.length === 0) {
+    return "missing";
+  }
+  let worst: HealthStatusView = "healthy";
+  for (const status of statuses) {
+    if (HEALTH_RANK[status] > HEALTH_RANK[worst]) {
+      worst = status;
+    }
+  }
+  return worst;
+};
+
+export const maturityLabel = (lane: "qualified" | "paper" | "experimental"): string => {
+  switch (lane) {
+    case "qualified":
+      return "Qualified";
+    case "paper":
+      return "Paper";
+    case "experimental":
+      return "Experimental";
+    default: {
+      const _exhaustive: never = lane;
+      return _exhaustive;
+    }
+  }
+};

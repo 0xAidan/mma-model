@@ -1,0 +1,71 @@
+{
+  "as_of": "2026-08-11T17:00:05Z",
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "filters": {
+    "data_quality": null,
+    "market": null,
+    "model": null,
+    "season": null,
+    "source": null
+  },
+  "points": [
+    {
+      "at": "2026-08-11T17:00:05Z",
+      "bucket": "confirmed_price",
+      "clv": null,
+      "flat_unit_roi": null,
+      "label": "evt-1:bout-cv:moneyline:fighter_a",
+      "lane": "qualified",
+      "value": null
+    },
+    {
+      "at": "2026-08-11T17:00:05Z",
+      "bucket": "predictive",
+      "clv": null,
+      "flat_unit_roi": null,
+      "label": "evt-1:bout-nb:moneyline:fighter_a",
+      "lane": "experimental",
+      "value": null
+    },
+    {
+      "at": "2026-08-11T17:00:05Z",
+      "bucket": "price_target_only",
+      "clv": null,
+      "flat_unit_roi": null,
+      "label": "evt-1:bout-pt:moneyline:fighter_a",
+      "lane": "paper",
+      "value": null
+    },
+    {
+      "at": "2026-08-11T17:00:05Z",
+      "bucket": "predictive",
+      "clv": null,
+      "flat_unit_roi": null,
+      "label": "evt-1:bout-repl:moneyline:fighter_a",
+      "lane": "paper",
+      "value": null
+    },
+    {
+      "at": "2026-08-11T17:00:05Z",
+      "bucket": "price_target_only",
+      "clv": null,
+      "flat_unit_roi": null,
+      "label": "evt-1:bout-stale:moneyline:fighter_a",
+      "lane": "paper",
+      "value": null
+    },
+    {
+      "at": "2026-08-11T17:00:05Z",
+      "bucket": "price_target_only",
+      "clv": null,
+      "flat_unit_roi": null,
+      "label": "evt-1:bout-unavail:moneyline:fighter_a",
+      "lane": "paper",
+      "value": null
+    }
+  ],
+  "schema_version": 1,
+  "series": "dwcs",
+  "ticket": "DWCS-500"
+}
