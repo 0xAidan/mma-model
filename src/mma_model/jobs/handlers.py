@@ -46,6 +46,7 @@ from mma_model.jobs.types import (
     JobType,
 )
 from mma_model.modeling.registry import retrain_fixed_spec
+from mma_model.observability.assemble import assemble_health
 from mma_model.observability.health import HealthReport, load_health_state
 from mma_model.observability.publish_guard import (
     FilesystemPublishPointer,
@@ -753,6 +754,9 @@ def handle_publish(
         health_report = raw_health
     elif context.get("health_state_path") is not None:
         health_report = load_health_state(Path(str(context["health_state_path"])))
+    else:
+        root = Path(str(publish_root)) if publish_root is not None else None
+        health_report = assemble_health(session, as_of=as_of, publish_root=root)
 
     new_release = f"release-{job.event_id}-{job.window_slot}"
     if fs_pointer is not None:
