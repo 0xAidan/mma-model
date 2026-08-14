@@ -7,9 +7,9 @@ firewall allowlists, or forbidden host correlators.
 
 ---
 
-## Pre-deploy baseline (`https://shermandavison.com/`)
+## Pre-cutover baseline (`https://shermandavison.com/`)
 
-Observed-at: `2026-08-14T03:12:07Z` (re-verified during host work).
+Observed-at: `2026-08-14T16:01:54Z` (localhost SNI on root-site host).
 
 | Fact | Value |
 |------|-------|
@@ -17,12 +17,10 @@ Observed-at: `2026-08-14T03:12:07Z` (re-verified during host work).
 | Body sha256 | `f02a0caa5f2f2f77139c5cff24dca1d44d661968bc6ae3447042b900384387d0` |
 | ETag | `"tjighu98o"` |
 | Server | `Caddy` |
-| Body size | `11976` bytes |
 
-Caddyfile backup created on host as dated `Caddyfile.bak-dwcs503-*` (contents not
-stored in git). Host rollback helper rehearsed before any DNS/Caddy merge attempt.
-
-Post-host-work root recheck: status/sha256/etag **unchanged**.
+Hairpin curl from the VPS to its own public hostname times out; baselines use
+loopback SNI (`--resolve …:127.0.0.1`). Cursor-environment public curls may also
+time out and are not treated as site-down proof.
 
 ---
 
@@ -32,91 +30,73 @@ Post-host-work root recheck: status/sha256/etag **unchanged**.
 |-------|-------|
 | Image | `ghcr.io/0xaidan/mma-model@sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6` |
 | Release run | https://github.com/0xAidan/mma-model/actions/runs/31765682285 |
-| `previous=` | empty (first production pin; do not invent a fake previous) |
-| Pull on host | succeeded (temporary read auth; token file removed after pull) |
+| `previous=` | empty (first production pin) |
 
 ---
 
-## Host work completed (without public DNS/Caddy cutover)
+## Cutover attempt (`2026-08-14T16:06:40Z`)
 
-| Step | Status |
+| Step | Result |
 |------|--------|
-| Re-verify OS/Caddy 2.6.2 / paths | done |
-| Caddyfile dated backup + rollback script | done |
-| Root-site baseline fingerprint | done; unchanged after host work |
-| Install Docker Engine + Compose plugin | done |
-| Create `/srv/mma/{data,public}` + `/etc/mma-model` | done |
-| `/etc/mma-model/mma.env` mode `0600` | done (`MMA_DATABASE_URL=sqlite:////data/mma.db`) |
-| Basic-auth password/hash generated on host | done (plaintext only at `/etc/mma-model/dashboard.basicauth.password`) |
-| Pull pinned digest + sync web assets | done |
-| Seed `live/` + second release for rollback demo | done |
-| `live/` / `current` rollback without DB rollback | **proved** on host |
-| Compose rendered with no ports/expose/host-network | **proved** |
-| Merge live Caddyfile | **not applied** (see blockers) |
-| Public DNS A record | **not created** (see blockers) |
+| DNS: one A for `mma`; A equals root A; AAAA=0 | observed |
+| `sudo ./deploy/install.sh --apply-caddy` | Caddyfile merged, `caddy validate` OK, graceful reload OK |
+| HTTP `mma` → HTTPS | **308** to `https://mma.shermandavison.com/` (loopback) |
+| ACME / certificate | **FAILED** (see blocker) |
+| Caddy rollback | **applied** — live Caddyfile restored; `mma` mentions = 0 |
+| Root site after rollback | unchanged (`200` / same sha256 / same etag) |
+
+### Exact ACME errors (IPs redacted)
+
+1. Let’s Encrypt `http-01`:  
+   `challenge failed` / `urn:ietf:params:acme:error:connection` —  
+   `Fetching http://mma.shermandavison.com/.well-known/acme-challenge/…: Timeout during connect (likely firewall problem)`
+2. Let’s Encrypt `tls-alpn-01`: same connection timeout.
+3. Fallback ZeroSSL issuer:  
+   `failed getting EAB credentials: HTTP 422: caddy_legacy_user_removed (code 2977)`
+
+### Private diagnosis (not publishing addresses)
+
+- `mma` A equals `shermandavison.com` A (count 1 each; AAAA 0).
+- That A address is **not** this host’s `eth0` global IPv4 and **not** this
+  host’s egress IPv4 (`eth0` does equal egress).
+- Therefore ACME validators reach a different address than the root-site host
+  that runs Caddy / holds `/srv/mma/public`.
+
+**Operator action required:** point the `mma` (and likely root) A record at
+**this host’s actual public IPv4** (the address on `eth0` / egress), keep AAAA
+absent, ensure inbound **80/443** from the internet (incl. Let’s Encrypt) to
+that address, then re-run `sudo ./deploy/install.sh --apply-caddy`.
 
 ---
 
 ## Acceptance matrix
 
-| Check | Expected | Observed (redacted) |
-|-------|----------|---------------------|
-| `http://mma.shermandavison.com` → HTTPS | 301/308 redirect | **blocked** — no public DNS/Caddy cutover |
-| Unauthenticated HTTPS | `401` | **blocked** — same |
-| Authenticated HTTPS | `200` | **blocked** — same |
-| Cert SAN includes `mma.shermandavison.com` | valid | **blocked** — same |
-| Root site status/sha256/etag | unchanged vs baseline | **pass** |
-| MMA app/DB port externally reachable | none | **pass** (compose has no publish surface; no MMA listener) |
-| Public release rollback (`live/` / `current`) | prior release restored without DB rollback | **pass** (host demo) |
-| Caddy candidate config validates (2.6.2 + `basicauth`) | valid | **pass** (candidate file only; not merged) |
+| Check | Expected | Observed |
+|-------|----------|----------|
+| `http://mma…` → HTTPS | 301/308 | **308** during cutover; site block **rolled back** after ACME failure |
+| Unauthenticated HTTPS | 401 | **blocked** — no cert (TLS alert internal error) |
+| Authenticated HTTPS | 200 | **blocked** — same |
+| Cert SAN includes `mma.shermandavison.com` | valid | **fail** — ACME connect timeout |
+| Root site status/sha256/etag | unchanged | **pass** before, during SNI checks, and after rollback |
+| MMA app/DB port public | none | **pass** (compose no publish surface; no MMA listener) |
+| `live/` release rollback without DB | works | **pass** (prior host demo; paths intact) |
 
-Basic-auth plaintext path on host (password **not** recorded here):
+Basic-auth plaintext path (password not recorded):  
 `/etc/mma-model/dashboard.basicauth.password`.
 
 ---
 
-## Hard blockers for public exposure
+## Host assets retained after rollback
 
-1. **Porkbun DNS credentials / interactive login unavailable** in this environment
-   (captcha + no API key). Cannot create the `mma` A record without operator action.
-2. **Hetzner Cloud Firewall API unverifiable** (no `hcloud` token). Host UFW is
-   inactive; a **pre-existing unrelated** all-interfaces high-port listener remains
-   reachable. MMA itself publishes no app/DB ports. Per ticket hard prerequisite,
-   public DNS/Caddy exposure was **stopped** until an operator confirms cloud
-   firewall posture privately.
-3. GHCR package required authenticated pull (token lacked documented
-   `read:packages` scope in `gh auth status`, but login+pull succeeded). Prefer
-   making the package public or installing a dedicated read-only token at
-   `/etc/mma-model/ghcr.token` (`0600`) before the next pull.
+- `/srv/mma/public` (index + `live/` + releases) intact
+- `/etc/mma-model/mma.env` + basicauth files intact
+- Pinned image still present locally
+- Dated `Caddyfile.bak-dwcs503-*` retained for future cutover
 
 ---
 
-## Operator cutover (after blockers clear)
+## Repo follow-ups in this iteration
 
-```bash
-# 1) Create one A record for mma.shermandavison.com (no AAAA) at Porkbun
-# 2) Privately confirm cloud firewall / no unintended MMA exposure
-# 3) On host:
-cd /opt/mma-model   # or a fresh checkout
-sudo ./deploy/install.sh --apply-caddy
-# 4) Run acceptance curls from docs/runbooks/deploy.md
-```
-
-Rollback if needed:
-
-```bash
-sudo ./deploy/rollback.sh
-# remove DNS A record at registrar
-sudo ./deploy/rollback.sh --public-release <prior-release-id>
-```
-
----
-
-## Repo deliverables landed with this ticket
-
-- `deploy/Caddyfile.mma` (Caddy 2.6.2 `basicauth`, headers, cache rules)
-- `deploy/install.sh` / `deploy/rollback.sh`
-- `docs/runbooks/deploy.md`
-- Digest pin update in `deploy/compose.yaml` + `deploy/image-digest.txt`
-- Tests for snippet/header/cache/secrets/forbidden tokens
-- This redacted evidence file
+- `deploy/install.sh`: loopback-SNI baseline with timeouts; skip `docker pull` when
+  digest already local; backup touch so rollback can order by filename time
+- `deploy/rollback.sh`: list backups by filename timestamp (not `cp -a` mtime)

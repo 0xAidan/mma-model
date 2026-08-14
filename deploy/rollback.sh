@@ -23,7 +23,9 @@ require_root() {
 }
 
 list_backups() {
-  ls -1t ${BACKUP_GLOB} 2>/dev/null || true
+  # Prefer filename timestamp (cp -a preserves source mtime, so ls -t is unreliable).
+  # shellcheck disable=SC2086
+  ls -1 ${BACKUP_GLOB} 2>/dev/null | sort -r || true
 }
 
 restore_caddy() {

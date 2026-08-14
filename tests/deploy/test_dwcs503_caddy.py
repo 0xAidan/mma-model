@@ -126,9 +126,13 @@ def test_install_and_rollback_scripts_exist():
     assert "0600" in install
     assert "caddy validate" in install
     assert "pull_policy" in install or "docker pull" in install
+    assert "--resolve" in install  # loopback SNI baseline (avoid hairpin hangs)
+    assert "--max-time" in install
+    assert "already present locally" in install
     assert "Caddyfile.bak-dwcs503" in rollback
     assert "--public-release" in rollback
     assert "live/" in rollback
+    assert "sort -r" in rollback  # filename-timestamp backup ordering
     # Scripts must not propose a second reverse proxy.
     for blob in (install, rollback):
         for proxy in ("nginx", "traefik", "haproxy"):

@@ -74,7 +74,13 @@ record_root_baseline() {
   local body="${out_dir}/root-body.html"
   local headers="${out_dir}/root-headers.txt"
   local meta="${out_dir}/root-meta.txt"
-  curl -fsS -D "${headers}" -o "${body}" "${ROOT_SITE}" >/dev/null
+  # Prefer loopback SNI: some hosts cannot hairpin their own public A record.
+  if ! curl -fsS --max-time 10 \
+    --resolve "shermandavison.com:443:127.0.0.1" \
+    -D "${headers}" -o "${body}" "${ROOT_SITE}" >/dev/null 2>&1; then
+    curl -fsS --max-time 15 -D "${headers}" -o "${body}" "${ROOT_SITE}" >/dev/null \
+      || die "unable to fetch root-site baseline from ${ROOT_SITE}"
+  fi
   {
     echo "observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo -n "http_code="
@@ -195,6 +201,10 @@ maybe_docker_login_ghcr() {
 }
 
 pull_pinned_image() {
+  if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+    log "pinned image already present locally; skipping pull"
+    return
+  fi
   log "pulling pinned image ${IMAGE}"
   docker pull "${IMAGE}"
 }
@@ -272,7 +282,9 @@ apply_caddy_merge() {
   fi
   local ts
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  cp -a "${caddyfile}" "${caddyfile}.bak-dwcs503-${ts}"
+  # Do not preserve source mtime; rollback sorts by filename timestamp.
+  cp "${caddyfile}" "${caddyfile}.bak-dwcs503-${ts}"
+  touch "${caddyfile}.bak-dwcs503-${ts}"
   log "backed up Caddyfile to ${caddyfile}.bak-dwcs503-${ts}"
   {
     echo
