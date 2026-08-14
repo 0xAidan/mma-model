@@ -4,10 +4,12 @@ The host Caddy ``file_server`` root (``/srv/mma/public`` → container ``/public
 must hold:
 
 - Web dashboard assets (``index.html`` + hashed ``assets/``)
-- Current dashboard JSON at the URLs the SPA already fetches
+- Dashboard JSON under ``live/`` (atomic directory swap for LKG)
 - ``releases/<id>/`` plus the last-known-good ``current`` pointer
 
-Failed sync/promote must leave last-known-good JSON and previous assets in place.
+Failed sync/promote must leave last-known-good ``live/`` and previous assets
+in place. Versioned ``releases/`` + ``current`` may advance independently of
+``live/`` (``live/`` is the SPA-facing rollback surface).
 """
 
 from __future__ import annotations
@@ -19,11 +21,16 @@ from pathlib import Path
 
 from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
 
+LIVE_DIR_NAME: str = "live"
+LIVE_CANDIDATE_DIR_NAME: str = "live.candidate"
+
 # Top-level names that must never be deleted by web-asset sync.
 PROTECTED_TOP_LEVEL: frozenset[str] = frozenset(
     {
         "releases",
         "current",
+        LIVE_DIR_NAME,
+        LIVE_CANDIDATE_DIR_NAME,
         *DASHBOARD_RELEASE_FILES,
     }
 )
@@ -34,6 +41,8 @@ SKIP_WEB_SYNC_NAMES: frozenset[str] = frozenset(
         *DASHBOARD_RELEASE_FILES,
         "releases",
         "current",
+        LIVE_DIR_NAME,
+        LIVE_CANDIDATE_DIR_NAME,
     }
 )
 
@@ -54,6 +63,7 @@ class PromoteJsonResult:
     files: tuple[str, ...]
     release_id: str | None
     public_root: Path
+    live_dir: Path
 
 
 def _fsync_file(path: Path) -> None:
@@ -91,11 +101,7 @@ def _atomic_replace_file(src: Path, dest: Path) -> None:
 
 
 def _copy_tree_atomic(src_dir: Path, dest_dir: Path) -> None:
-    """Replace a directory tree without deleting sibling protected paths.
-
-    Stages into a sibling temp dir, then ``os.replace``s into place. If a prior
-    dest exists it is renamed aside and removed only after success.
-    """
+    """Replace a directory tree without deleting sibling protected paths."""
     parent = dest_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
     staging = parent / f".{dest_dir.name}.{os.getpid()}.stage"
@@ -124,7 +130,7 @@ def _copy_tree_atomic(src_dir: Path, dest_dir: Path) -> None:
 def sync_web_assets(web_dist: Path | str, public_root: Path | str) -> SyncAssetsResult:
     """Copy production web build into ``public_root`` without wiping LKG.
 
-    Does not delete ``releases/``, ``current``, or dashboard JSON at the root.
+    Does not delete ``releases/``, ``current``, or ``live/``.
     Skips fixture JSON that Vite embeds from ``web/public/``.
     On failure, previous assets and JSON remain.
     """
@@ -136,7 +142,6 @@ def sync_web_assets(web_dist: Path | str, public_root: Path | str) -> SyncAssets
 
     copied: list[str] = []
     skipped: list[str] = []
-    # Stage whole payload first so a mid-copy failure does not half-apply.
     stage_root = dest_root / f".web-sync.{os.getpid()}.tmp"
     if stage_root.exists():
         shutil.rmtree(stage_root)
@@ -185,12 +190,12 @@ def promote_release_json_to_public_root(
     *,
     release_id: str | None = None,
 ) -> PromoteJsonResult:
-    """Atomically place current-release dashboard JSON at the public root.
+    """Atomically place release dashboard JSON under ``public_root/live/``.
 
-    Writes each file via temp + ``os.replace``. If any step fails before all
-    replaces complete, already-replaced files may be new while remaining stay
-    old — callers should validate the release dir first. Staging is prepared
-    fully before any public-root replace so a staging failure never touches LKG.
+    Writes the full file set into ``live.candidate/``, then swaps that directory
+    into ``live/`` with a single ``os.replace``. If staging or the swap fails,
+    the previous ``live/`` directory (complete set) remains untouched — never a
+    mixed new/old root JSON tree.
     """
     root = Path(public_root)
     rel = Path(release_dir)
@@ -204,45 +209,60 @@ def promote_release_json_to_public_root(
             f"release missing required JSON for public root: {','.join(missing)}"
         )
 
-    stage = root / f".json-promote.{os.getpid()}.tmp"
-    if stage.exists():
-        shutil.rmtree(stage)
-    stage.mkdir(parents=True, exist_ok=True)
+    live_dir = root / LIVE_DIR_NAME
+    candidate = root / LIVE_CANDIDATE_DIR_NAME
+    backup = root / f".{LIVE_DIR_NAME}.{os.getpid()}.old"
+
+    if candidate.exists():
+        shutil.rmtree(candidate)
+    if backup.exists():
+        shutil.rmtree(backup)
+
+    candidate.mkdir(parents=True, exist_ok=True)
     try:
         for name in DASHBOARD_RELEASE_FILES:
             src = rel / name
-            dest = stage / name
+            dest = candidate / name
             shutil.copy2(src, dest)
             _fsync_file(dest)
-        _fsync_dir(stage)
+        _fsync_dir(candidate)
 
-        for name in DASHBOARD_RELEASE_FILES:
-            _atomic_replace_file(stage / name, root / name)
+        # Single directory swap: previous live/ stays intact until replace succeeds.
+        if live_dir.exists():
+            os.replace(live_dir, backup)
+        try:
+            os.replace(candidate, live_dir)
+        except OSError:
+            if backup.exists() and not live_dir.exists():
+                os.replace(backup, live_dir)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
         _fsync_dir(root)
     except OSError as exc:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
         raise PublicSyncError(
-            f"public root JSON promote failed; prior LKG files retained where possible: {exc}"
+            f"live/ JSON promote failed; prior live/ retained: {exc}"
         ) from exc
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
 
     return PromoteJsonResult(
         files=tuple(DASHBOARD_RELEASE_FILES),
         release_id=release_id,
         public_root=root,
+        live_dir=live_dir,
     )
 
 
 def promote_current_release_json(public_root: Path | str) -> PromoteJsonResult:
-    """Promote the ``current`` pointer's release JSON onto the public root."""
+    """Promote the ``current`` pointer's release JSON into ``live/``."""
     root = Path(public_root)
     current_path = root / "current"
     if not current_path.is_file():
-        raise PublicSyncError("no current pointer; cannot promote public root JSON")
+        raise PublicSyncError("no current pointer; cannot promote live/ JSON")
     release_id = current_path.read_text(encoding="utf-8").strip()
     if not release_id:
-        raise PublicSyncError("empty current pointer; cannot promote public root JSON")
+        raise PublicSyncError("empty current pointer; cannot promote live/ JSON")
     release_dir = root / "releases" / release_id
     return promote_release_json_to_public_root(
         root, release_dir, release_id=release_id
@@ -250,6 +270,8 @@ def promote_current_release_json(public_root: Path | str) -> PromoteJsonResult:
 
 
 __all__ = [
+    "LIVE_CANDIDATE_DIR_NAME",
+    "LIVE_DIR_NAME",
     "PROTECTED_TOP_LEVEL",
     "PromoteJsonResult",
     "PublicSyncError",

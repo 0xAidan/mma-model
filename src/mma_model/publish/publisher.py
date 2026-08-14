@@ -18,20 +18,29 @@ from mma_model.observability.publish_guard import (
 from mma_model.publish.builder import build_release_files
 from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
 from mma_model.publish.public_sync import (
+    PublicSyncError,
     promote_release_json_to_public_root,
 )
 from mma_model.publish.validator import validate_dashboard_release_dir
 
 
-def _promote_public_root_json(output_root: Path | str, release_id: str) -> None:
-    """Place release JSON at the public root for the static dashboard.
+def _promote_live_json(
+    output_root: Path | str, release_id: str
+) -> str | None:
+    """Promote release JSON into ``live/``. Return warning text on failure.
 
-    Failures leave prior root JSON in place (temp + replace). The versioned
-    ``releases/`` tree and ``current`` pointer are already committed.
+    Versioned ``releases/`` + ``current`` are already committed. A promote
+    failure leaves the previous complete ``live/`` tree intact.
     """
     root = Path(output_root)
     release_dir = root / "releases" / release_id
-    promote_release_json_to_public_root(root, release_dir, release_id=release_id)
+    try:
+        promote_release_json_to_public_root(
+            root, release_dir, release_id=release_id
+        )
+    except PublicSyncError as exc:
+        return str(exc)
+    return None
 
 
 def publish_dashboard(
@@ -68,7 +77,16 @@ def publish_dashboard(
         validator=validate_dashboard_release_dir,
     )
     if promote_public_root:
-        _promote_public_root_json(output_root, outcome.current_release_id)
+        warning = _promote_live_json(output_root, outcome.current_release_id)
+        if warning:
+            # Release + current already advanced; do not raise.
+            return PublishOutcome(
+                release_id=outcome.release_id,
+                current_release_id=outcome.current_release_id,
+                replaced=outcome.replaced,
+                path=outcome.path,
+                detail=f"{outcome.detail}; live/ promote warning: {warning}",
+            )
     return outcome
 
 
@@ -88,7 +106,15 @@ def publish_dashboard_from_bodies(
         validator=validate_dashboard_release_dir,
     )
     if promote_public_root:
-        _promote_public_root_json(output_root, outcome.current_release_id)
+        warning = _promote_live_json(output_root, outcome.current_release_id)
+        if warning:
+            return PublishOutcome(
+                release_id=outcome.release_id,
+                current_release_id=outcome.current_release_id,
+                replaced=outcome.replaced,
+                path=outcome.path,
+                detail=f"{outcome.detail}; live/ promote warning: {warning}",
+            )
     return outcome
 
 

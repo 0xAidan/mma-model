@@ -52,14 +52,31 @@ jobs:
             exit 1
           fi
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+          PIN_FILE="deploy/image-digest.txt"
+          PREVIOUS=""
+          if [ -f "${PIN_FILE}" ]; then
+            # Retain prior current as previous for rollback (even if placeholder).
+            PRIOR_CURRENT="$(grep -E '^current=' "${PIN_FILE}" | head -n1 | cut -d= -f2- || true)"
+            if [ -n "${PRIOR_CURRENT}" ] && [ "${PRIOR_CURRENT}" != "${DIGEST}" ]; then
+              PREVIOUS="${PRIOR_CURRENT}"
+            else
+              PRIOR_PREVIOUS="$(grep -E '^previous=' "${PIN_FILE}" | head -n1 | cut -d= -f2- || true)"
+              PREVIOUS="${PRIOR_PREVIOUS}"
+            fi
+          fi
+
           echo "Published ${IMAGE_NAME}@${DIGEST}"
+          echo "previous=${PREVIOUS:-<none>}"
           {
             echo "image=${IMAGE_NAME}"
+            echo "current=${DIGEST}"
+            echo "previous=${PREVIOUS}"
             echo "digest=${DIGEST}"
             echo "git_sha=${GITHUB_SHA}"
             echo "updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "note=Pin compose image: ${IMAGE_NAME}@${DIGEST}"
-            echo "rollback=Retain previous digest from deploy/image-digest.txt before updating current"
+            echo "rollback=Retarget compose to previous=${PREVIOUS:-<none>}"
           } > image-digest-artifact.txt
           cat image-digest-artifact.txt
 
@@ -77,7 +94,8 @@ jobs:
             echo ""
             echo "- Image: \`${IMAGE_NAME}@${{ steps.digest.outputs.digest }}\`"
             echo "- Git SHA: \`${GITHUB_SHA}\`"
+            echo "- Artifact records \`current\` + \`previous\` from \`deploy/image-digest.txt\`"
             echo "- Compose pin: set \`image:\` in \`deploy/compose.yaml\` to the digest above"
-            echo "- Update \`deploy/image-digest.txt\` current/previous via a follow-up PR if desired"
+            echo "- Updating \`deploy/image-digest.txt\` on main can be a follow-up PR"
             echo "- **No deploy** was performed (DWCS-502)"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -11,6 +11,7 @@ from mma_model.publish.constants import (
     DASHBOARD_TICKET,
 )
 from mma_model.publish.public_sync import (
+    LIVE_DIR_NAME,
     PublicSyncError,
     promote_current_release_json,
     promote_release_json_to_public_root,
@@ -27,6 +28,7 @@ __all__ = [
     "DASHBOARD_SCHEMA_VERSION",
     "DASHBOARD_TICKET",
     "DOCUMENT_MODELS",
+    "LIVE_DIR_NAME",
     "PublicSyncError",
     "build_release_files",
     "promote_current_release_json",

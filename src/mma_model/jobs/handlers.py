@@ -772,40 +772,37 @@ def handle_publish(
                 counts={"written": 0, "current_replaced": False, "publications": pub_count},
                 blocks_downstream=True,
             )
-        # DWCS-502: promote release JSON to public root for the static SPA.
-        # Failure keeps versioned releases/current and prior root JSON (temp+replace).
+        # DWCS-502: promote release JSON into live/ (atomic dir swap).
+        # Versioned releases/ + current already advanced. Promote failure must NOT
+        # fail the job or claim current_replaced=False — leave prior live/ intact.
         root_json_promoted = False
+        promote_warning = ""
         if not context.get("publish_invalid"):
-            try:
-                promote_release_json_to_public_root(
-                    Path(str(publish_root)),
-                    outcome.path,
-                    release_id=outcome.current_release_id,
+            if context.get("publish_live_promote_fail"):
+                promote_warning = (
+                    "live/ promote skipped by injected failure; "
+                    "prior live/ retained; releases/current advanced"
                 )
-                root_json_promoted = True
-            except PublicSyncError as exc:
-                if registry is not None:
-                    registry.publish.releases.append(outcome.current_release_id)
-                    registry.publish.current_release_id = outcome.current_release_id
-                return HandlerResult(
-                    status=JobStatus.FAILED,
-                    error_class=JobErrorClass.INTERNAL,
-                    detail=(
-                        "publish release ok but public-root JSON promote failed; "
-                        f"LKG root JSON kept: {exc}"
-                    ),
-                    current_release_id=outcome.current_release_id,
-                    counts={
-                        "written": 1,
-                        "current_replaced": True,
-                        "publications": pub_count,
-                        "public_root_json": False,
-                    },
-                    blocks_downstream=True,
-                )
+            else:
+                try:
+                    promote_release_json_to_public_root(
+                        Path(str(publish_root)),
+                        outcome.path,
+                        release_id=outcome.current_release_id,
+                    )
+                    root_json_promoted = True
+                except PublicSyncError as exc:
+                    promote_warning = (
+                        f"live/ promote failed; prior live/ retained: {exc}"
+                    )
         if registry is not None:
             registry.publish.releases.append(outcome.current_release_id)
             registry.publish.current_release_id = outcome.current_release_id
+        detail = "publish: validated dashboard JSON + atomic current pointer"
+        if root_json_promoted:
+            detail += " + live/ JSON"
+        elif promote_warning:
+            detail += f"; warning: {promote_warning}"
         return HandlerResult(
             status=JobStatus.SUCCESS,
             current_release_id=outcome.current_release_id,
@@ -814,11 +811,9 @@ def handle_publish(
                 "current_replaced": True,
                 "publications": pub_count,
                 "public_root_json": root_json_promoted,
+                "live_promote_ok": root_json_promoted,
             },
-            detail=(
-                "publish: validated dashboard JSON + atomic current pointer"
-                + (" + public-root JSON" if root_json_promoted else "")
-            ),
+            detail=detail,
         )
 
     if registry is not None:

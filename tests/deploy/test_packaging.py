@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,9 @@ DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
 DOCKERIGNORE_PATH = REPO_ROOT / ".dockerignore"
 DIGEST_PATH = REPO_ROOT / "deploy" / "image-digest.txt"
 SCANNER = REPO_ROOT / "scripts" / "check_packaging_secrets.py"
+
+# Build canary by concatenation — never store the contiguous literal in source.
+_CANARY_LINE = "THE_ODDS_API_KEY" + "=" + "real"
 
 
 def test_lockfiles_exist():
@@ -73,7 +77,6 @@ def test_compose_has_no_ports_expose_or_host_net():
 
 
 def _docker_compose_cmd() -> list[str] | None:
-    """Return a working Compose CLI argv prefix, or None if unavailable."""
     if shutil.which("docker") is not None:
         probe = subprocess.run(
             ["docker", "compose", "version"],
@@ -93,11 +96,8 @@ def test_compose_config_renders_without_publish_surface():
     if compose_cmd is None:
         pytest.skip("docker compose not available")
 
-    # Provide a throwaway env file so compose config can resolve env_file.
     env_path = Path("/tmp/mma-model-test-compose.env")
     env_path.write_text("MMA_DATA_DIR=/data\nMMA_PUBLIC_DIR=/public\n", encoding="utf-8")
-    # Compose references host path /etc/mma-model/mma.env — create a local override
-    # via a temporary compose that only changes env_file for validation.
     overlay = REPO_ROOT / "deploy" / ".compose.validate.yaml"
     try:
         overlay.write_text(
@@ -132,12 +132,9 @@ def test_compose_config_renders_without_publish_surface():
 
     if proc.returncode != 0:
         combined = (proc.stdout + proc.stderr).lower()
-        # Placeholder digest may fail pull_policy validation on some engines;
-        # still assert no publish surface appears in the error.
         assert "published" not in combined
         if "ports" in combined and "variable is not set" not in combined:
             pytest.fail(f"compose config unexpected ports mention: {proc.stderr}")
-        # Accept failure only when caused by missing host secrets path or placeholder image.
         assert (
             "env_file" in combined
             or "digest" in combined
@@ -161,7 +158,22 @@ def test_image_digest_pin_file_present():
     assert "ghcr.io/0xAidan/mma-model" in text
 
 
+def test_release_workflow_retains_previous_digest():
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "deploy/image-digest.txt" in release
+    assert "previous=" in release
+    assert "PRIOR_CURRENT" in release
+    assert "pull_request:" not in release
+
+
 def test_secret_scanner_script_passes_on_repo():
+    self_text = Path(__file__).read_text(encoding="utf-8")
+    assert _CANARY_LINE not in self_text
+    scanner_text = SCANNER.read_text(encoding="utf-8")
+    assert _CANARY_LINE not in scanner_text
+
     proc = subprocess.run(
         [sys.executable, str(SCANNER), "--root", str(REPO_ROOT)],
         cwd=REPO_ROOT,
@@ -178,7 +190,7 @@ def test_secret_scanner_fails_on_real_key(tmp_path: Path):
         encoding="utf-8",
     )
     bad = tmp_path / "leak.env"
-    bad.write_text("THE_ODDS_API_KEY=real\n", encoding="utf-8")
+    bad.write_text(_CANARY_LINE + "\n", encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, str(SCANNER), "--root", str(tmp_path)],
         cwd=REPO_ROOT,
@@ -187,12 +199,13 @@ def test_secret_scanner_fails_on_real_key(tmp_path: Path):
         check=False,
     )
     assert proc.returncode != 0
-    assert "THE_ODDS_API_KEY=real" in (proc.stderr + proc.stdout)
+    assert "forbidden canary API key assignment" in (proc.stderr + proc.stdout)
 
 
-def test_public_sync_preserves_releases_and_lkg_json(tmp_path: Path):
+def test_public_sync_preserves_releases_and_lkg_live(tmp_path: Path):
     from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
     from mma_model.publish.public_sync import (
+        LIVE_DIR_NAME,
         PublicSyncError,
         promote_release_json_to_public_root,
         sync_web_assets,
@@ -201,12 +214,15 @@ def test_public_sync_preserves_releases_and_lkg_json(tmp_path: Path):
     public = tmp_path / "public"
     public.mkdir()
     (public / "releases" / "release-lkg").mkdir(parents=True)
-    (public / "releases" / "release-lkg" / "current-event.json").write_text(
-        '{"lkg":true}', encoding="utf-8"
-    )
-    (public / "current").write_text("release-lkg\n", encoding="utf-8")
+    live = public / LIVE_DIR_NAME
+    live.mkdir()
+    lkg_bytes: dict[str, bytes] = {}
     for name in DASHBOARD_RELEASE_FILES:
-        (public / name).write_text(f'{{"file":"{name}","lkg":true}}', encoding="utf-8")
+        body = f'{{"file":"{name}","lkg":true}}'.encode()
+        lkg_bytes[name] = body
+        (live / name).write_bytes(body)
+        (public / "releases" / "release-lkg" / name).write_bytes(body)
+    (public / "current").write_text("release-lkg\n", encoding="utf-8")
     (public / "index.html").write_text("<html>old</html>", encoding="utf-8")
 
     web = tmp_path / "web-dist"
@@ -214,7 +230,6 @@ def test_public_sync_preserves_releases_and_lkg_json(tmp_path: Path):
     (web / "index.html").write_text("<html>new</html>", encoding="utf-8")
     (web / "assets").mkdir()
     (web / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
-    # Fixture JSON that must NOT overwrite LKG
     (web / "current-event.json").write_text('{"fixture":true}', encoding="utf-8")
 
     result = sync_web_assets(web, public)
@@ -225,9 +240,9 @@ def test_public_sync_preserves_releases_and_lkg_json(tmp_path: Path):
     assert (public / "assets" / "app.js").is_file()
     assert (public / "releases" / "release-lkg").is_dir()
     assert (public / "current").read_text(encoding="utf-8").strip() == "release-lkg"
-    assert '"lkg":true' in (public / "current-event.json").read_text(encoding="utf-8")
+    for name, body in lkg_bytes.items():
+        assert (live / name).read_bytes() == body
 
-    # Promote from a new release; then a failed promote must keep LKG.
     new_rel = public / "releases" / "release-new"
     new_rel.mkdir()
     for name in DASHBOARD_RELEASE_FILES:
@@ -236,44 +251,138 @@ def test_public_sync_preserves_releases_and_lkg_json(tmp_path: Path):
         public, new_rel, release_id="release-new"
     )
     assert promoted.release_id == "release-new"
-    assert '"fresh":true' in (public / "current-event.json").read_text(encoding="utf-8")
+    assert '"fresh":true' in (live / "current-event.json").read_text(encoding="utf-8")
 
-    # Restore LKG text then simulate failed promote (missing file).
-    for name in DASHBOARD_RELEASE_FILES:
-        (public / name).write_text(f'{{"file":"{name}","lkg":true}}', encoding="utf-8")
+    for name, body in lkg_bytes.items():
+        (live / name).write_bytes(body)
     bad_rel = public / "releases" / "release-bad"
     bad_rel.mkdir()
     (bad_rel / "current-event.json").write_text('{"partial":true}', encoding="utf-8")
     with pytest.raises(PublicSyncError):
         promote_release_json_to_public_root(public, bad_rel, release_id="release-bad")
-    assert '"lkg":true' in (public / "current-event.json").read_text(encoding="utf-8")
+    for name, body in lkg_bytes.items():
+        assert (live / name).read_bytes() == body
     assert (public / "releases" / "release-lkg").is_dir()
     assert (public / "index.html").read_text(encoding="utf-8") == "<html>new</html>"
 
 
 def test_public_sync_failure_leaves_prior_assets(tmp_path: Path):
-    from mma_model.publish.public_sync import PublicSyncError, sync_web_assets
+    from mma_model.publish.public_sync import LIVE_DIR_NAME, PublicSyncError, sync_web_assets
 
     public = tmp_path / "public"
     public.mkdir()
     (public / "releases").mkdir()
     (public / "current").write_text("release-lkg\n", encoding="utf-8")
     (public / "index.html").write_text("<html>lkg-assets</html>", encoding="utf-8")
-    (public / "current-event.json").write_text('{"lkg":true}', encoding="utf-8")
+    live = public / LIVE_DIR_NAME
+    live.mkdir()
+    (live / "current-event.json").write_text('{"lkg":true}', encoding="utf-8")
 
     missing = tmp_path / "missing-web"
     with pytest.raises(PublicSyncError):
         sync_web_assets(missing, public)
     assert (public / "index.html").read_text(encoding="utf-8") == "<html>lkg-assets</html>"
-    assert '"lkg":true' in (public / "current-event.json").read_text(encoding="utf-8")
+    assert '"lkg":true' in (live / "current-event.json").read_text(encoding="utf-8")
     assert (public / "releases").is_dir()
+
+
+def test_handle_publish_promote_fail_is_success_with_warning(tmp_path: Path):
+    """After current moves, promote inject fails → SUCCESS + prior live intact."""
+    from mma_model.domain.markets import RecommendationState
+    from mma_model.jobs.handlers import handle_publish
+    from mma_model.jobs.types import DueJob, EventContext, JobStatus, JobType
+    from mma_model.observability.publish_guard import FilesystemPublishPointer
+    from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
+    from mma_model.publish.public_sync import (
+        LIVE_DIR_NAME,
+        PublicSyncError,
+        promote_release_json_to_public_root,
+    )
+    from tests.publish.helpers import open_publish_session, seed_publication
+
+    as_of = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    session, engine = open_publish_session(tmp_path)
+    try:
+        seed_publication(
+            session,
+            bout_id="bout-promo",
+            state=RecommendationState.PRICE_TARGET,
+        )
+        public = tmp_path / "public"
+        events = (
+            EventContext(
+                event_id="evt-1",
+                event_start=as_of,
+                bout_ids=("bout-promo",),
+                series="dwcs",
+            ),
+        )
+        first = handle_publish(
+            session,
+            job=DueJob(
+                job_type=JobType.PUBLISH,
+                idempotency_key="publish:evt-1:t60:0",
+                dependencies=(),
+                event_id="evt-1",
+                window_slot="t60",
+            ),
+            as_of=as_of,
+            events=events,
+            context={"publish_root": str(public)},
+        )
+        assert first.status is JobStatus.SUCCESS
+        assert first.counts.get("live_promote_ok") is True
+        live = public / LIVE_DIR_NAME
+        assert live.is_dir()
+        lkg_bytes = {
+            name: (live / name).read_bytes() for name in DASHBOARD_RELEASE_FILES
+        }
+        prior_id = first.current_release_id
+
+        result = handle_publish(
+            session,
+            job=DueJob(
+                job_type=JobType.PUBLISH,
+                idempotency_key="publish:evt-1:manual:1",
+                dependencies=(),
+                event_id="evt-1",
+                window_slot="manual",
+            ),
+            as_of=as_of,
+            events=events,
+            context={
+                "publish_root": str(public),
+                "publish_live_promote_fail": True,
+            },
+        )
+        assert result.status is JobStatus.SUCCESS
+        assert result.counts.get("current_replaced") is True
+        assert result.counts.get("live_promote_ok") is False
+        assert result.current_release_id != prior_id
+        assert (public / "releases" / str(result.current_release_id)).is_dir()
+        pointer = FilesystemPublishPointer(public)
+        assert pointer.current_release_id == result.current_release_id
+        for name, body in lkg_bytes.items():
+            assert (live / name).read_bytes() == body
+        assert "warning" in result.detail.lower() or "promote" in result.detail.lower()
+
+        with pytest.raises(PublicSyncError):
+            promote_release_json_to_public_root(
+                public,
+                public / "releases" / "does-not-exist",
+                release_id="does-not-exist",
+            )
+        for name, body in lkg_bytes.items():
+            assert (live / name).read_bytes() == body
+    finally:
+        session.close()
+        engine.dispose()
 
 
 @pytest.mark.slow
 def test_docker_build_smoke():
     if shutil.which("docker") is None:
         pytest.skip("docker not available for image build smoke")
-    # Skip if daemon is unreachable (local laptops without Docker Desktop running).
     try:
         ping = subprocess.run(
             ["docker", "info"],
@@ -300,7 +409,6 @@ def test_docker_build_smoke():
     except subprocess.TimeoutExpired:
         pytest.fail("docker build timed out after 600s")
     assert proc.returncode == 0, proc.stderr[-4000:]
-    # Best-effort cleanup; ignore failures.
     subprocess.run(
         ["docker", "rmi", "-f", tag],
         capture_output=True,
@@ -319,12 +427,8 @@ def test_ci_and_release_workflows():
     assert "docker build" in ci
     assert "check_packaging_secrets" in ci
     assert "codegen --check" in ci or "test_codegen" in ci or "tests/publish" in ci
-    assert "pull_request" not in release.split("on:")[1].split("jobs:")[0] or (
-        "pull_request:" not in release
-    )
+    assert "pull_request:" not in release
     assert "packages: write" in release
     assert "ghcr.io/0xAidan/mma-model" in release
-    assert "deploy" not in release.lower() or "No deploy" in release
-    # PR CI must not push images.
+    assert "No deploy" in release
     assert "docker push" not in ci
-    assert "release.yml" not in ci or "workflow" in ci

@@ -2814,18 +2814,16 @@ def main(argv: list[str] | None = None) -> int:
                 except PublishValidationError as exc:
                     print(f"publish validation failed; current unchanged: {exc}")
                     return EXIT_INTERNAL
-                except PublicSyncError as exc:
-                    print(
-                        "publish release ok but public-root JSON promote failed; "
-                        f"LKG root JSON kept: {exc}"
-                    )
-                    return EXIT_INTERNAL
                 except Exception as exc:  # noqa: BLE001
                     print(f"publish failed: {exc}")
                     return EXIT_INTERNAL
+            live_note = "live_promoted"
+            if "live/ promote warning" in (outcome.detail or ""):
+                live_note = "live_promote_warning"
+                print(f"publish warning: {outcome.detail}")
             print(
                 f"publish ok release_id={outcome.current_release_id} "
-                f"root={output} public_root_json=promoted"
+                f"root={output} {live_note}"
             )
             return EXIT_OK
         finally:

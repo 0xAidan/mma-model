@@ -4,6 +4,9 @@
 Checks .dockerignore exclusions and scans **git-tracked** files for secrets and
 forbidden research/database artifacts. Untracked local dumps are ignored so
 developer working trees do not false-fail CI packaging gates.
+
+Canary detection builds the forbidden assignment from parts so this script never
+contains the contiguous literal in its own source.
 """
 
 from __future__ import annotations
@@ -15,6 +18,14 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Built from parts so the contiguous canary string is not present in this file.
+_CANARY_KEY = "THE_ODDS_API_KEY"
+_CANARY_VALUE = "real"
+_CANARY_FINDING = "forbidden canary API key assignment"
+_CANARY_REGEX = re.compile(
+    r"(?i)" + re.escape(_CANARY_KEY) + r"\s*=\s*" + re.escape(_CANARY_VALUE) + r"\b"
+)
 
 FORBIDDEN_BASENAMES = frozenset(
     {
@@ -41,6 +52,13 @@ SKIP_SCAN_PREFIXES = (
     "tests/",
     "docs/",
     ".github/",
+)
+
+# Scanner / packaging helpers may mention API key *names*; never treat those as leaks.
+SELF_SCAN_ALLOWLIST = frozenset(
+    {
+        "scripts/check_packaging_secrets.py",
+    }
 )
 
 
@@ -93,20 +111,23 @@ def check_dockerignore(root: Path) -> list[str]:
 
 def _scan_text_for_secrets(rel: str, text: str) -> list[str]:
     findings: list[str] = []
-    if re.search(r"(?i)THE_ODDS_API_KEY\s*=\s*real\b", text):
-        findings.append(f"{rel}: THE_ODDS_API_KEY=real")
+    if rel in SELF_SCAN_ALLOWLIST:
+        return findings
+    if _CANARY_REGEX.search(text):
+        findings.append(f"{rel}: {_CANARY_FINDING}")
     for idx, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if "PLACEHOLDER" in stripped.upper():
             continue
-        if re.search(r"(?i)THE_ODDS_API_KEY\s*=\s*real\b", line):
-            findings.append(f"{rel}:{idx}: THE_ODDS_API_KEY=real")
+        if _CANARY_REGEX.search(line):
+            findings.append(f"{rel}:{idx}: {_CANARY_FINDING}")
             continue
         # Live-looking key assignments that are not placeholders / empty.
         match = re.search(
-            r"(?i)\b(THE_ODDS_API_KEY|ODDS_API_KEY|BALLDONTLIE_API_KEY|SPORTSDATAIO_API_KEY)\s*=\s*([^\s#]+)",
+            r"(?i)\b(THE_ODDS_API_KEY|ODDS_API_KEY|BALLDONTLIE_API_KEY|SPORTSDATAIO_API_KEY)"
+            r"\s*=\s*([^\s#]+)",
             line,
         )
         if not match:
@@ -119,7 +140,9 @@ def _scan_text_for_secrets(rel: str, text: str) -> list[str]:
         if value.lower().startswith("your_"):
             continue
         if len(value) >= 12:
-            findings.append(f"{rel}:{idx}: possible live API key assignment ({match.group(1)})")
+            findings.append(
+                f"{rel}:{idx}: possible live API key assignment ({match.group(1)})"
+            )
     return findings
 
 
@@ -140,19 +163,18 @@ def scan_tracked(root: Path) -> list[str]:
 
         reason = _is_forbidden_artifact(path)
         if reason is not None:
-            # Allow fixture DBs under tests/ only if we ever add them — still forbidden.
             findings.append(f"{rel}: {reason}")
             continue
 
         if any(rel.startswith(prefix) for prefix in SKIP_SCAN_PREFIXES):
-            # Still catch THE_ODDS_API_KEY=real canary even in tests/docs.
+            # Still catch the canary assignment in tests/docs when present as text.
             if path.suffix.lower() in {".py", ".md", ".yml", ".yaml", ".txt", ".env"}:
                 try:
                     text = path.read_text(encoding="utf-8")
                 except (UnicodeDecodeError, OSError):
                     continue
-                if re.search(r"(?i)THE_ODDS_API_KEY\s*=\s*real\b", text):
-                    findings.append(f"{rel}: THE_ODDS_API_KEY=real")
+                if _CANARY_REGEX.search(text):
+                    findings.append(f"{rel}: {_CANARY_FINDING}")
             continue
 
         if path.suffix.lower() not in {

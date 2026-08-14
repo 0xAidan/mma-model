@@ -18,14 +18,17 @@ later deploy tickets. It does **not** install or mutate the live VPS.
 ## Public root coexistence
 
 `/srv/mma/public` (container `/public`) holds web assets + `releases/` + `current` +
-root dashboard JSON. Use:
+an atomic `live/` directory with the SPA-facing dashboard JSON. Use:
 
 ```bash
 mma-model public sync-assets --from /opt/mma/web --to /public
 ```
 
-Successful `mma-model publish --output /public ...` also promotes release JSON to the
-public root atomically (temp + replace) without wiping assets or LKG on failure.
+Successful `mma-model publish --output /public ...` promotes release JSON into
+`live/` via `live.candidate/` → `live/` directory swap. If promote fails, prior
+`live/` stays complete; `releases/` + `current` may already point at the new
+validated release (rollback source). The dashboard loads `./live/*.json` first,
+then falls back to `./` for local Vite fixtures.
 
 ## Out of scope here
 
