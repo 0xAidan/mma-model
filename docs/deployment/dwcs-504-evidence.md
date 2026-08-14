@@ -30,16 +30,16 @@ password hashes, plaintext passwords, or forbidden host correlators.
 
 | Step | Result |
 |------|--------|
-| `sudo ./deploy/install.sh --apply-scheduler` | _pending host run_ |
-| `systemd-analyze verify` on four units | _pending_ |
-| Timers enabled | _pending_ |
-| Concurrent flock rejection (exit 75) | _pending_ |
-| `--force-fail` heartbeat path | _pending_ |
-| Secret-redacted logs | _pending_ |
-| `Persistent=true` missed-run proof | _pending_ |
-| Root-site fingerprint (if reboot) | _pending_ |
-| Healthchecks real ping | _pending / blocker if no account_ |
-| External HTTPS uptime monitor | _pending / blocker if no account_ |
+| `sudo ./deploy/install.sh --apply-scheduler` | ok; both timers enabled and active |
+| `systemd-analyze verify` on four units | ok (exit 0; no parse errors) |
+| Timers enabled | `mma-scheduler.timer` and `mma-backup.timer` enabled/active |
+| Concurrent flock rejection (exit 75) | ok — second `run-job.sh tick` exited 75 |
+| `--force-fail` heartbeat path | ok — exit 1; heartbeat logged `skipped` (placeholders) |
+| Secret-redacted logs | ok — no Healthchecks UUID in `/var/log/mma-model/scheduler.log` |
+| `Persistent=true` missed-run proof | ok — timer stopped across a `*:0/5` boundary; restart fired catch-up |
+| Root-site fingerprint (if reboot) | no reboot; localhost SNI still 200 / same sha256+etag as DWCS-503 |
+| Healthchecks real ping | blocker — placeholders remain; heartbeats log `skipped` |
+| External HTTPS uptime monitor | blocker — `monitor-check.sh` loopback probe is 401 (expected) |
 
 ---
 

@@ -224,17 +224,11 @@ def test_compose_still_unpublished():
 
 def test_run_job_redaction_filters_secrets():
     """Exercise the sed redactor embedded in run-job.sh via bash -c extract."""
-    script = r"""
-set -euo pipefail
-source /dev/null
-redact() {
-  sed -E \
-    -e 's#(hc-ping\.com/)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
-    -e 's#([Aa][Pp][Ii][_-]?[Kk][Ee][Yy][[:space:]]*[=:][[:space:]]*)[^[:space:]]+#\1[REDACTED]#g' \
-    -e 's#([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][[:space:]]*[=:][[:space:]]*)[^[:space:]]+#\1[REDACTED]#g'
-}
-printf '%s\n' 'url=https://hc-ping.com/abc-secret-uuid API_KEY=supersecret password=hunter2' | redact
-"""
+    hc = r"s#(hc-ping\.com/)[A-Za-z0-9_-]+#\1[REDACTED]#g"
+    key = r"s#([Aa][Pp][Ii][_-]?[Kk][Ee][Yy][=:])[^[:space:]]+#\1[REDACTED]#g"
+    pw = r"s#([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][=:])[^[:space:]]+#\1[REDACTED]#g"
+    sample = "url=https://hc-ping.com/abc-secret-uuid API_KEY=supersecret password=hunter2"
+    script = f"printf '%s\\n' '{sample}' | sed -E -e '{hc}' -e '{key}' -e '{pw}'"
     proc = subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
