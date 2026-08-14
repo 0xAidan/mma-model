@@ -13,7 +13,8 @@ later deploy tickets. It does **not** install or mutate the live VPS.
 ## Image
 
 - Built from the repo-root `Dockerfile` (Node web build → Python 3.11 worker).
-- Published to `ghcr.io/0xAidan/mma-model` **by digest only after merge** (see `.github/workflows/release.yml`).
+- Published to `ghcr.io/0xaidan/mma-model` **by digest only after merge** (see `.github/workflows/release.yml`).
+  OCI requires a lowercase repository name.
 - PRs build the image but **never push** and **never deploy**.
 
 ## Public root coexistence
