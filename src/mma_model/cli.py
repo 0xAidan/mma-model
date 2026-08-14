@@ -69,6 +69,7 @@ from mma_model.odds.schedule import (
     compute_due_work_for_events,
 )
 from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
+from mma_model.jobs.db_guard import is_refused_jobs_tick_database_url
 from mma_model.jobs.due import load_orchestrator_cadence
 from mma_model.jobs.locking import FileFlockLock
 from mma_model.jobs.orchestrator import TickOverlapError, run_jobs_tick
@@ -1944,7 +1945,6 @@ def main(argv: list[str] | None = None) -> int:
 
             dry_run = bool(getattr(args, "dry_run", False))
             database_url = getattr(args, "database_url", None)
-            default_url = get_settings().mma_database_url
 
             if dry_run:
                 # Dry-run may omit DB; still refuse accidental live URL if passed.
@@ -1953,12 +1953,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not db_url:
                         print("refusing empty --database-url")
                         return 2
-                    if (
-                        db_url in LIVE_DB_URLS
-                        or db_url == default_url
-                        or db_url.endswith("/data/mma.db")
-                        or db_url.endswith("data/mma.db")
-                    ):
+                    if is_refused_jobs_tick_database_url(db_url):
                         print(
                             "refusing live data/mma.db "
                             "--database-url for jobs tick"
@@ -1982,12 +1977,7 @@ def main(argv: list[str] | None = None) -> int:
             if not db_url:
                 print("refusing empty --database-url")
                 return 2
-            if (
-                db_url in LIVE_DB_URLS
-                or db_url == default_url
-                or db_url.endswith("/data/mma.db")
-                or db_url.endswith("data/mma.db")
-            ):
+            if is_refused_jobs_tick_database_url(db_url):
                 print("refusing live data/mma.db --database-url for jobs tick")
                 return 2
 
