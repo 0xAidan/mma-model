@@ -23,6 +23,7 @@ from mma_model.publish.constants import (
     DASHBOARD_CONTRACT_VERSION,
     DASHBOARD_SCHEMA_VERSION,
     DASHBOARD_TICKET,
+    REQUIRED_DASHBOARD_HEALTH,
 )
 
 
@@ -123,6 +124,7 @@ class ObservedPriceView(StrictModel):
     american_odds: float
     sportsbook: Annotated[str, Field(min_length=1)]
     source_type: QuoteSourceTypeView
+    source_label: Annotated[str, Field(min_length=1)]
     timestamp: Annotated[str, Field(min_length=1)]
 
 
@@ -132,10 +134,13 @@ class MatchupPrices(StrictModel):
     model_fair_probability: Annotated[float, Field(gt=0.0, lt=1.0)] | None = None
     fair_decimal: Annotated[float, Field(gt=1.0)] | None = None
     fair_american: float | None = None
+    fair_or_better: str | None = None
     actionable_decimal: Annotated[float, Field(gt=1.0)] | None = None
     actionable_american: float | None = None
+    actionable_or_better: str | None = None
     strong_value_decimal: Annotated[float, Field(gt=1.0)] | None = None
     strong_value_american: float | None = None
+    strong_value_or_better: str | None = None
     observed: ObservedPriceView | None = None
     exact_ev: float | None = None
     line_movement: float | None = None
@@ -167,24 +172,50 @@ class MatchupCardChangeWarning(StrictModel):
     observed_at: Annotated[str, Field(min_length=1)]
 
 
+class MatchupMarket(StrictModel):
+    """One market projection under a bout (primary or additional prediction)."""
+
+    market_family: str | None = None
+    outcome_key: str | None = None
+    line_point: float | None = None
+    selection_id: str | None = None
+    prices: MatchupPrices
+    maturity: PerformanceLaneView
+    is_primary: bool = False
+    reasons: tuple[ReasonBlocker, ...] = ()
+    reason_plain: str = ""
+
+
 class MatchupRow(StrictModel):
     bout_id: Annotated[str, Field(min_length=1)]
     event_id: Annotated[str, Field(min_length=1)]
     publication_id: str | None = None
     primary_state: RecommendationStateView
     performance_lane: PerformanceLaneView
+    maturity: PerformanceLaneView
     market_family: str | None = None
     outcome_key: str | None = None
     line_point: float | None = None
     selection_id: str | None = None
     fighters: tuple[FighterSummary, ...] = ()
     prices: MatchupPrices
+    markets: tuple[MatchupMarket, ...] = ()
     primary_reason: str | None = None
+    reason_plain: str = ""
     reasons: tuple[ReasonBlocker, ...] = ()
     blockers: tuple[ReasonBlocker, ...] = ()
     card_change_warnings: tuple[MatchupCardChangeWarning, ...] = ()
     hashes: ArtifactHashes = Field(default_factory=ArtifactHashes)
     detail: str = ""
+
+    @model_validator(mode="after")
+    def _primary_market_present(self) -> MatchupRow:
+        if not self.markets:
+            raise ValueError("matchup markets must include at least the primary market")
+        primaries = [m for m in self.markets if m.is_primary]
+        if len(primaries) != 1:
+            raise ValueError("matchup markets must mark exactly one primary market")
+        return self
 
 
 class CountdownFields(StrictModel):
@@ -266,10 +297,15 @@ class DashboardHealthDocument(ContractEnvelope):
     components: tuple[DashboardHealthComponent, ...]
 
     @model_validator(mode="after")
-    def _unique_component_names(self) -> DashboardHealthDocument:
+    def _required_named_components(self) -> DashboardHealthDocument:
         names = [c.name for c in self.components]
         if len(names) != len(set(names)):
             raise ValueError("dashboard health components must be unique by name")
+        missing = sorted(REQUIRED_DASHBOARD_HEALTH - set(names))
+        if missing:
+            raise ValueError(
+                f"dashboard health missing required components: {','.join(missing)}"
+            )
         return self
 
 
@@ -420,6 +456,7 @@ __all__ = [
     "LineFreshness",
     "ManifestDocument",
     "MatchupCardChangeWarning",
+    "MatchupMarket",
     "MatchupPrices",
     "MatchupRow",
     "MatchupsDocument",

@@ -15,7 +15,7 @@
         "calibration_intercept": null,
         "calibration_slope": null,
         "log_loss": null,
-        "sample_count": 1
+        "sample_count": 0
       },
       "price_target_only": {
         "pick_count": 0,
@@ -36,7 +36,7 @@
         "calibration_intercept": null,
         "calibration_slope": null,
         "log_loss": null,
-        "sample_count": 4
+        "sample_count": 0
       },
       "price_target_only": {
         "pick_count": 3,
@@ -57,7 +57,7 @@
         "calibration_intercept": null,
         "calibration_slope": null,
         "log_loss": null,
-        "sample_count": 1
+        "sample_count": 0
       },
       "price_target_only": {
         "pick_count": 0,
@@ -86,7 +86,7 @@
     "calibration_intercept": null,
     "calibration_slope": null,
     "log_loss": null,
-    "sample_count": 6
+    "sample_count": 0
   },
   "price_target_only": {
     "pick_count": 3,

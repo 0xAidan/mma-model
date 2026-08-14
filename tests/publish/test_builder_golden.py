@@ -5,8 +5,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from mma_model.domain.markets import RecommendationState
-from mma_model.publish.builder import build_matchups_document, build_release_files
+from mma_model.grade.service import StateEventType, append_state_event
+from mma_model.observability.publish_guard import PublishValidationError
+from mma_model.publish.builder import (
+    _line_movement_and_warnings,
+    _movement_from_payload,
+    build_matchups_document,
+    build_release_files,
+)
 from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
 from mma_model.publish.schema import (
     PriceAvailability,
@@ -80,13 +89,21 @@ def test_golden_states_and_lanes(tmp_path: Path) -> None:
         assert cv.primary_state is RecommendationStateView.CONFIRMED_VALUE
         assert cv.prices.observed is not None
         assert cv.prices.exact_ev is not None
-        assert cv.performance_lane.value == "qualified"
+        assert cv.prices.price_availability is PriceAvailability.AVAILABLE
+        assert cv.maturity.value == "qualified"
+        assert cv.reason_plain
+        assert cv.prices.fair_or_better
+        assert cv.prices.actionable_or_better
+        assert cv.prices.strong_value_or_better
+        assert len(cv.markets) >= 1
+        assert sum(1 for m in cv.markets if m.is_primary) == 1
         assert "bout-cv" in matchups.confirmed_value_ranked
 
         pt = by_id["bout-pt"]
         assert pt.primary_state is RecommendationStateView.PRICE_TARGET
         assert pt.prices.exact_ev is None
         assert pt.prices.observed is None
+        assert pt.prices.price_availability is PriceAvailability.UNAVAILABLE
         assert "bout-pt" in matchups.price_target_watchlist
 
         nb = by_id["bout-nb"]
@@ -99,15 +116,16 @@ def test_golden_states_and_lanes(tmp_path: Path) -> None:
 
         repl = by_id["bout-repl"]
         assert repl.card_change_warnings
-        assert repl.card_change_warnings[0].event_type == "replacement"
+        assert "replacement" in repl.card_change_warnings[0].event_type
 
         unavail = by_id["bout-unavail"]
-        assert unavail.prices.price_availability in {
-            PriceAvailability.AVAILABLE,
-            PriceAvailability.UNAVAILABLE,
-        }
-        # No observed price → no exact EV.
+        assert unavail.prices.price_availability is PriceAvailability.UNAVAILABLE
         assert unavail.prices.exact_ev is None
+
+        # Watchlist is deterministic by bout_id / selection_id.
+        assert matchups.price_target_watchlist == tuple(
+            sorted(matchups.price_target_watchlist)
+        )
 
         files = build_release_files(
             session,
@@ -124,14 +142,13 @@ def test_golden_states_and_lanes(tmp_path: Path) -> None:
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-            # v1 fixture still validates (backward-compat check).
             validate_document(name, json.loads((FIXTURES / name).read_text(encoding="utf-8")))
     finally:
         session.close()
         engine.dispose()
 
 
-def test_confirmed_value_demoted_without_observed(tmp_path: Path) -> None:
+def test_confirmed_value_without_observed_fails_closed(tmp_path: Path) -> None:
     session, engine = open_publish_session(tmp_path)
     try:
         seed_publication(
@@ -140,11 +157,85 @@ def test_confirmed_value_demoted_without_observed(tmp_path: Path) -> None:
             state=RecommendationState.CONFIRMED_VALUE,
             with_observed=False,
         )
-        matchups = build_matchups_document(session, event_id="evt-1")
+        with pytest.raises(PublishValidationError, match="observed price"):
+            build_matchups_document(session, event_id="evt-1", as_of=FIXED_PUBLISHED)
+        with pytest.raises(PublishValidationError, match="observed price"):
+            build_release_files(
+                session,
+                release_id="should-fail",
+                event_id="evt-1",
+                as_of=FIXED_PUBLISHED,
+            )
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_replacement_invalidated_warning(tmp_path: Path) -> None:
+    session, engine = open_publish_session(tmp_path)
+    try:
+        pub = seed_publication(
+            session,
+            bout_id="bout-repl-invalidated",
+            state=RecommendationState.NO_BET,
+            with_observed=False,
+        )
+        append_state_event(
+            session,
+            official_publication_id=pub.id,
+            event_type=StateEventType.REPLACEMENT_INVALIDATED,
+            observed_at=FIXED_PUBLISHED,
+            reason_code="replacement_invalidated",
+            detail="bout replaced before T-60",
+            payload={"bout_id": "bout-repl-invalidated"},
+            idempotency_key=f"state:{pub.id}:replacement_invalidated",
+        )
+        session.commit()
+        matchups = build_matchups_document(
+            session, event_id="evt-1", as_of=FIXED_PUBLISHED
+        )
         row = matchups.matchups[0]
-        assert row.primary_state is RecommendationStateView.PRICE_TARGET
-        assert row.prices.exact_ev is None
-        assert matchups.confirmed_value_ranked == ()
+        assert row.card_change_warnings
+        assert row.card_change_warnings[0].event_type == "replacement_invalidated"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_line_movement_is_delta_not_absolute() -> None:
+    assert _movement_from_payload({"delta": 0.15}) == pytest.approx(0.15)
+    assert _movement_from_payload({"new_decimal": 2.6, "old_decimal": 2.4}) == pytest.approx(
+        0.2
+    )
+    assert _movement_from_payload({"new_decimal": 2.6}) is None
+    assert _movement_from_payload({"decimal_odds": 2.6}) is None
+
+
+def test_line_movement_from_state_events(tmp_path: Path) -> None:
+    session, engine = open_publish_session(tmp_path)
+    try:
+        pub = seed_publication(
+            session,
+            bout_id="bout-move",
+            state=RecommendationState.PRICE_TARGET,
+        )
+        append_state_event(
+            session,
+            official_publication_id=pub.id,
+            event_type="line_change",
+            observed_at=FIXED_PUBLISHED,
+            reason_code="line_moved",
+            detail="post T-60 drift",
+            payload={"new_decimal": 2.6, "old_decimal": 2.4},
+            idempotency_key=f"state:{pub.id}:line_change",
+        )
+        session.commit()
+        movement, _freshness, _warnings = _line_movement_and_warnings(session, pub.id)
+        assert movement == pytest.approx(0.2)
+        matchups = build_matchups_document(
+            session, event_id="evt-1", as_of=FIXED_PUBLISHED
+        )
+        assert matchups.matchups[0].prices.line_movement == pytest.approx(0.2)
     finally:
         session.close()
         engine.dispose()

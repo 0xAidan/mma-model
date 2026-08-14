@@ -48,6 +48,7 @@ def test_exact_ev_with_observed_price_ok() -> None:
             american_odds=140.0,
             sportsbook="fixture_book",
             source_type=QuoteSourceTypeView.AUTOMATIC,
+            source_label="fixture_book (automatic)",
             timestamp="2026-08-11T17:00:05Z",
         ),
         exact_ev=0.32,

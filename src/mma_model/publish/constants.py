@@ -53,6 +53,19 @@ DASHBOARD_HEALTH_NAMES: Final[tuple[str, ...]] = (
     "freshness",
 )
 
+# Named set required by the plan; quota/freshness may remain as extras.
+REQUIRED_DASHBOARD_HEALTH: Final[frozenset[str]] = frozenset(
+    {
+        "pipeline",
+        "data",
+        "identity",
+        "odds",
+        "model",
+        "grading",
+        "backup",
+    }
+)
+
 SECRET_SCAN_PATTERNS: Final[tuple[str, ...]] = (
     "api_key",
     "apikey",
@@ -83,5 +96,6 @@ __all__ = [
     "MATCHUPS_JSON",
     "PERFORMANCE_JSON",
     "RELEASE_JSON",
+    "REQUIRED_DASHBOARD_HEALTH",
     "SECRET_SCAN_PATTERNS",
 ]

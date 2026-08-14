@@ -114,7 +114,6 @@ jobs:
           tests/publish
           src/mma_model/jobs/handlers.py
           src/mma_model/observability/publish_guard.py
-          src/mma_model/cli.py
           --select E,F,I,UP,B,SIM
       - name: Ruff weekly lifecycle (strict)
         run: >

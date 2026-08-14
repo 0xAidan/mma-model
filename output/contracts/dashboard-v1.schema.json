@@ -644,6 +644,90 @@
       "title": "MatchupCardChangeWarning",
       "type": "object"
     },
+    "MatchupMarket": {
+      "additionalProperties": false,
+      "description": "One market projection under a bout (primary or additional prediction).",
+      "properties": {
+        "is_primary": {
+          "default": false,
+          "title": "Is Primary",
+          "type": "boolean"
+        },
+        "line_point": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line Point"
+        },
+        "market_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Market Family"
+        },
+        "maturity": {
+          "$ref": "#/$defs/PerformanceLaneView"
+        },
+        "outcome_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outcome Key"
+        },
+        "prices": {
+          "$ref": "#/$defs/MatchupPrices"
+        },
+        "reason_plain": {
+          "default": "",
+          "title": "Reason Plain",
+          "type": "string"
+        },
+        "reasons": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReasonBlocker"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "selection_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selection Id"
+        }
+      },
+      "required": [
+        "prices",
+        "maturity"
+      ],
+      "title": "MatchupMarket",
+      "type": "object"
+    },
     "MatchupPrices": {
       "additionalProperties": false,
       "description": "Sportsbook-agnostic thresholds plus optional observed enrichment.",
@@ -672,6 +756,18 @@
           ],
           "default": null,
           "title": "Actionable Decimal"
+        },
+        "actionable_or_better": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actionable Or Better"
         },
         "exact_ev": {
           "anyOf": [
@@ -709,6 +805,18 @@
           ],
           "default": null,
           "title": "Fair Decimal"
+        },
+        "fair_or_better": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fair Or Better"
         },
         "line_freshness": {
           "$ref": "#/$defs/LineFreshness",
@@ -779,6 +887,18 @@
           ],
           "default": null,
           "title": "Strong Value Decimal"
+        },
+        "strong_value_or_better": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strong Value Or Better"
         }
       },
       "title": "MatchupPrices",
@@ -853,6 +973,17 @@
           "default": null,
           "title": "Market Family"
         },
+        "markets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MatchupMarket"
+          },
+          "title": "Markets",
+          "type": "array"
+        },
+        "maturity": {
+          "$ref": "#/$defs/PerformanceLaneView"
+        },
         "outcome_key": {
           "anyOf": [
             {
@@ -898,6 +1029,11 @@
           "default": null,
           "title": "Publication Id"
         },
+        "reason_plain": {
+          "default": "",
+          "title": "Reason Plain",
+          "type": "string"
+        },
         "reasons": {
           "default": [],
           "items": {
@@ -924,6 +1060,7 @@
         "event_id",
         "primary_state",
         "performance_lane",
+        "maturity",
         "prices"
       ],
       "title": "MatchupRow",
@@ -1021,6 +1158,11 @@
           "title": "Decimal Odds",
           "type": "number"
         },
+        "source_label": {
+          "minLength": 1,
+          "title": "Source Label",
+          "type": "string"
+        },
         "source_type": {
           "$ref": "#/$defs/QuoteSourceTypeView"
         },
@@ -1040,6 +1182,7 @@
         "american_odds",
         "sportsbook",
         "source_type",
+        "source_label",
         "timestamp"
       ],
       "title": "ObservedPriceView",

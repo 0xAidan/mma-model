@@ -120,14 +120,29 @@ export type MatchupCardChangeWarning = {
   readonly observed_at: string;
 };
 
+export type MatchupMarket = {
+  readonly market_family?: string | null;
+  readonly outcome_key?: string | null;
+  readonly line_point?: number | null;
+  readonly selection_id?: string | null;
+  readonly prices: MatchupPrices;
+  readonly maturity: PerformanceLaneView;
+  readonly is_primary?: boolean;
+  readonly reasons?: ReadonlyArray<ReasonBlocker>;
+  readonly reason_plain?: string;
+};
+
 export type MatchupPrices = {
   readonly model_fair_probability?: number | null;
   readonly fair_decimal?: number | null;
   readonly fair_american?: number | null;
+  readonly fair_or_better?: string | null;
   readonly actionable_decimal?: number | null;
   readonly actionable_american?: number | null;
+  readonly actionable_or_better?: string | null;
   readonly strong_value_decimal?: number | null;
   readonly strong_value_american?: number | null;
+  readonly strong_value_or_better?: string | null;
   readonly observed?: ObservedPriceView | null;
   readonly exact_ev?: number | null;
   readonly line_movement?: number | null;
@@ -141,13 +156,16 @@ export type MatchupRow = {
   readonly publication_id?: string | null;
   readonly primary_state: RecommendationStateView;
   readonly performance_lane: PerformanceLaneView;
+  readonly maturity: PerformanceLaneView;
   readonly market_family?: string | null;
   readonly outcome_key?: string | null;
   readonly line_point?: number | null;
   readonly selection_id?: string | null;
   readonly fighters?: ReadonlyArray<FighterSummary>;
   readonly prices: MatchupPrices;
+  readonly markets?: ReadonlyArray<MatchupMarket>;
   readonly primary_reason?: string | null;
+  readonly reason_plain?: string;
   readonly reasons?: ReadonlyArray<ReasonBlocker>;
   readonly blockers?: ReadonlyArray<ReasonBlocker>;
   readonly card_change_warnings?: ReadonlyArray<MatchupCardChangeWarning>;
@@ -174,6 +192,7 @@ export type ObservedPriceView = {
   readonly american_odds: number;
   readonly sportsbook: string;
   readonly source_type: QuoteSourceTypeView;
+  readonly source_label: string;
   readonly timestamp: string;
 };
 

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from mma_model.db.session import _attach_sqlite_listeners, create_all_for_tests
 from mma_model.domain.markets import MarketFamily, OutcomeKey, RecommendationState
 from mma_model.grade.service import (
+    StateEventType,
     append_state_event,
     publish_model_run,
     publish_official_t60,
@@ -152,7 +153,7 @@ def seed_publication(
         append_state_event(
             session,
             official_publication_id=pub.id,
-            event_type="replacement",
+            event_type=StateEventType.REPLACEMENT_INVALIDATED,
             observed_at=FIXED_PUBLISHED,
             reason_code="fighter_replaced",
             detail="replacement on card",

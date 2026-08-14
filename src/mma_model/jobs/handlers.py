@@ -36,6 +36,7 @@ from mma_model.jobs.types import (
     JobType,
 )
 from mma_model.modeling.registry import retrain_fixed_spec
+from mma_model.observability.health import HealthReport, load_health_state
 from mma_model.observability.publish_guard import (
     FilesystemPublishPointer,
     PublishValidationError,
@@ -666,7 +667,6 @@ def handle_publish(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
-    _ = as_of
     registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
     publish_root = context.get("publish_root")
     fs_pointer: FilesystemPublishPointer | None = None
@@ -710,6 +710,15 @@ def handle_publish(
             blocks_downstream=True,
         )
 
+    health_report: HealthReport | None = None
+    raw_health = context.get("health")
+    if raw_health is None:
+        raw_health = context.get("health_report")
+    if isinstance(raw_health, HealthReport):
+        health_report = raw_health
+    elif context.get("health_state_path") is not None:
+        health_report = load_health_state(Path(str(context["health_state_path"])))
+
     new_release = f"release-{job.event_id}-{job.window_slot}"
     if fs_pointer is not None:
         if context.get("publish_invalid"):
@@ -717,13 +726,30 @@ def handle_publish(
             required = ("release.json", "manifest.json")
             validator = None
         else:
-            files = build_release_files(
-                session,
-                release_id=new_release,
-                event_id=job.event_id,
-                window_slot=job.window_slot,
-                publications=pub_count,
-            )
+            try:
+                files = build_release_files(
+                    session,
+                    release_id=new_release,
+                    event_id=job.event_id,
+                    window_slot=job.window_slot,
+                    publications=pub_count,
+                    as_of=as_of,
+                    health=health_report,
+                    last_successful_update_at=as_of,
+                )
+            except PublishValidationError as exc:
+                return HandlerResult(
+                    status=JobStatus.FAILED,
+                    error_class=JobErrorClass.SCHEMA,
+                    detail=f"publish validation failed; LKG kept: {exc}",
+                    current_release_id=prior,
+                    counts={
+                        "written": 0,
+                        "current_replaced": False,
+                        "publications": pub_count,
+                    },
+                    blocks_downstream=True,
+                )
             required = DASHBOARD_RELEASE_FILES
             validator = validate_dashboard_release_dir
         try:

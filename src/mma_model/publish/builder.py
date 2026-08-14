@@ -27,6 +27,7 @@ from mma_model.observability.health import (
     HealthReport,
     default_missing_report,
 )
+from mma_model.observability.publish_guard import PublishValidationError
 from mma_model.publish.constants import (
     CURRENT_EVENT_JSON,
     DASHBOARD_HEALTH_NAMES,
@@ -55,6 +56,7 @@ from mma_model.publish.schema import (
     LineFreshness,
     ManifestDocument,
     MatchupCardChangeWarning,
+    MatchupMarket,
     MatchupPrices,
     MatchupRow,
     MatchupsDocument,
@@ -72,6 +74,7 @@ from mma_model.publish.schema import (
     ReleaseDocument,
     ReleaseFileEntry,
 )
+from mma_model.recommend.policy import format_american_or_better
 from mma_model.value.ev import expected_value
 
 
@@ -131,26 +134,56 @@ def _lane_view(raw: str | None) -> PerformanceLaneView:
         return PerformanceLaneView.PAPER
 
 
-def _map_primary_state(
-    ledger_state: str,
-    *,
-    has_observed: bool,
-    has_exact_ev: bool,
-) -> RecommendationStateView:
-    """Project ledger state; demote confirmed_value without observed price + EV."""
+def _official_primary_state(ledger_state: str) -> RecommendationStateView:
+    """Official T-60 state is the source of truth — never demote or invent."""
     try:
         state = RecommendationState(ledger_state)
-    except ValueError:
-        return RecommendationStateView.NO_BET
+    except ValueError as exc:
+        raise PublishValidationError(
+            f"unknown official publication state: {ledger_state!r}"
+        ) from exc
     if state is RecommendationState.CONFIRMED_VALUE:
-        if has_observed and has_exact_ev:
-            return RecommendationStateView.CONFIRMED_VALUE
-        return RecommendationStateView.PRICE_TARGET
+        return RecommendationStateView.CONFIRMED_VALUE
     if state is RecommendationState.PRICE_TARGET:
         return RecommendationStateView.PRICE_TARGET
     if state is RecommendationState.NO_BET:
         return RecommendationStateView.NO_BET
     assert_never(state)
+
+
+def _assert_confirmed_value_priced(
+    *,
+    bout_id: str,
+    publication_id: str,
+    observed: ObservedPrice | None,
+    exact_ev: float | None,
+) -> None:
+    if observed is None or exact_ev is None:
+        raise PublishValidationError(
+            "confirmed_value publication requires a timestamped observed price "
+            f"and exact EV (bout_id={bout_id}, publication_id={publication_id})"
+        )
+
+
+def _or_better(american: float | None) -> str | None:
+    if american is None:
+        return None
+    return format_american_or_better(float(american))
+
+
+def _reason_plain(
+    *,
+    primary_reason: str | None,
+    detail: str,
+    reasons: tuple[ReasonBlocker, ...],
+) -> str:
+    if detail.strip():
+        return detail.strip()
+    if primary_reason and primary_reason.strip():
+        return primary_reason.strip()
+    if reasons:
+        return "; ".join(r.message for r in reasons)
+    return ""
 
 
 def _fighter_summary(
@@ -196,10 +229,45 @@ def _price_target(session: Session, price_target_id: str | None) -> PriceTarget 
     return session.get(PriceTarget, price_target_id)
 
 
+def _price_target_for_prediction(
+    session: Session, prediction_id: str | None
+) -> PriceTarget | None:
+    if not prediction_id:
+        return None
+    return session.scalar(
+        select(PriceTarget)
+        .where(PriceTarget.prediction_id == prediction_id)
+        .order_by(PriceTarget.published_at.desc(), PriceTarget.created_at.desc())
+        .limit(1)
+    )
+
+
 def _prediction(session: Session, prediction_id: str | None) -> Prediction | None:
     if not prediction_id:
         return None
     return session.get(Prediction, prediction_id)
+
+
+def _movement_from_payload(payload: Mapping[str, Any]) -> float | None:
+    """Return a delta only — never an absolute quote as line_movement."""
+    if "delta" in payload:
+        try:
+            return float(payload["delta"])
+        except (TypeError, ValueError):
+            return None
+    new_raw = payload.get("new_decimal", payload.get("decimal_odds"))
+    old_raw = payload.get("old_decimal", payload.get("prior_decimal"))
+    if new_raw is None or old_raw is None:
+        return None
+    try:
+        return float(new_raw) - float(old_raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_card_change_event(event_type: str) -> bool:
+    lowered = event_type.lower()
+    return "replacement" in lowered or "card_change" in lowered
 
 
 def _line_movement_and_warnings(
@@ -220,7 +288,7 @@ def _line_movement_and_warnings(
     warnings: list[MatchupCardChangeWarning] = []
     for event in events:
         etype = str(event.event_type or "")
-        if etype in {"replacement", "card_change", "fighter_replacement"}:
+        if _is_card_change_event(etype):
             warnings.append(
                 MatchupCardChangeWarning(
                     code=str(event.reason_code or etype),
@@ -229,23 +297,20 @@ def _line_movement_and_warnings(
                     observed_at=_iso(event.observed_at) or "",
                 )
             )
-        if etype in {"line_change", "LINE_CHANGE", "stale_line"}:
-            freshness = (
-                LineFreshness.STALE if "stale" in etype.lower() else LineFreshness.FRESH
-            )
+        if etype.lower() in {"line_change", "stale_line"} or "line_change" in etype.lower():
+            if "stale" in etype.lower():
+                freshness = LineFreshness.STALE
+            elif freshness is LineFreshness.UNKNOWN:
+                freshness = LineFreshness.FRESH
             try:
                 payload = json.loads(event.payload_json or "{}")
             except json.JSONDecodeError:
                 payload = {}
-            if isinstance(payload, dict):
-                for key in ("new_decimal", "decimal_odds", "delta"):
-                    if key in payload:
-                        try:
-                            movement = float(payload[key])
-                            break
-                        except (TypeError, ValueError):
-                            continue
-        if etype == "stale_line":
+            if isinstance(payload, Mapping):
+                computed = _movement_from_payload(payload)
+                if computed is not None:
+                    movement = computed
+        if etype.lower() == "stale_line" or etype.lower().endswith("stale_line"):
             freshness = LineFreshness.STALE
     return movement, freshness, tuple(warnings)
 
@@ -258,24 +323,27 @@ def _build_prices(
     line_movement: float | None,
     line_freshness: LineFreshness,
 ) -> MatchupPrices:
+    """Build prices. price_availability describes the observed book line only."""
     fair_p = float(prediction.p50) if prediction is not None else None
+    fair_american = float(target.fair_american) if target else None
+    actionable_american = float(target.actionable_american) if target else None
+    strong_american = float(target.strong_value_american) if target else None
+
     if observed is None:
-        availability = (
-            PriceAvailability.UNAVAILABLE
-            if target is None
-            else PriceAvailability.AVAILABLE
-        )
-        # Stale without a usable observed quote still surfaces as stale/unavailable.
+        availability = PriceAvailability.UNAVAILABLE
         if line_freshness is LineFreshness.STALE:
             availability = PriceAvailability.STALE
         return MatchupPrices(
             model_fair_probability=fair_p,
             fair_decimal=float(target.fair_decimal) if target else None,
-            fair_american=float(target.fair_american) if target else None,
+            fair_american=fair_american,
+            fair_or_better=_or_better(fair_american),
             actionable_decimal=float(target.actionable_decimal) if target else None,
-            actionable_american=float(target.actionable_american) if target else None,
+            actionable_american=actionable_american,
+            actionable_or_better=_or_better(actionable_american),
             strong_value_decimal=float(target.strong_value_decimal) if target else None,
-            strong_value_american=float(target.strong_value_american) if target else None,
+            strong_value_american=strong_american,
+            strong_value_or_better=_or_better(strong_american),
             observed=None,
             exact_ev=None,
             line_movement=line_movement,
@@ -283,36 +351,42 @@ def _build_prices(
             line_freshness=line_freshness,
         )
 
+    source_type = QuoteSourceTypeView(observed.source_type)
     observed_view = ObservedPriceView(
         decimal_odds=float(observed.decimal_odds),
         american_odds=float(observed.american_odds),
         sportsbook=str(observed.sportsbook),
-        source_type=QuoteSourceTypeView(observed.source_type),
+        source_type=source_type,
+        source_label=f"{observed.sportsbook} ({source_type.value})",
         timestamp=_iso(observed.source_timestamp) or "",
     )
     exact: float | None = None
     if fair_p is not None:
         exact = float(expected_value(fair_p, float(observed.decimal_odds)))
     availability = PriceAvailability.AVAILABLE
-    if line_freshness is LineFreshness.STALE:
+    freshness = (
+        line_freshness
+        if line_freshness is not LineFreshness.UNKNOWN
+        else LineFreshness.FRESH
+    )
+    if freshness is LineFreshness.STALE:
         availability = PriceAvailability.STALE
     return MatchupPrices(
         model_fair_probability=fair_p,
         fair_decimal=float(target.fair_decimal) if target else None,
-        fair_american=float(target.fair_american) if target else None,
+        fair_american=fair_american,
+        fair_or_better=_or_better(fair_american),
         actionable_decimal=float(target.actionable_decimal) if target else None,
-        actionable_american=float(target.actionable_american) if target else None,
+        actionable_american=actionable_american,
+        actionable_or_better=_or_better(actionable_american),
         strong_value_decimal=float(target.strong_value_decimal) if target else None,
-        strong_value_american=float(target.strong_value_american) if target else None,
+        strong_value_american=strong_american,
+        strong_value_or_better=_or_better(strong_american),
         observed=observed_view,
         exact_ev=exact,
         line_movement=line_movement,
         price_availability=availability,
-        line_freshness=(
-            line_freshness
-            if line_freshness is not LineFreshness.UNKNOWN
-            else LineFreshness.FRESH
-        ),
+        line_freshness=freshness,
     )
 
 
@@ -334,7 +408,33 @@ def _select_publications(
         prev = by_bout.get(row.bout_id)
         if prev is None or row.published_at >= prev.published_at:
             by_bout[row.bout_id] = row
-    return list(by_bout.values())
+    return sorted(by_bout.values(), key=lambda row: (row.bout_id, row.selection_id))
+
+
+def _additional_bout_predictions(
+    session: Session,
+    *,
+    bout_id: str,
+    event_id: str,
+    primary_prediction_id: str | None,
+) -> list[Prediction]:
+    stmt = (
+        select(Prediction)
+        .where(Prediction.bout_id == bout_id, Prediction.event_id == event_id)
+        .order_by(Prediction.published_at.asc(), Prediction.created_at.asc())
+    )
+    rows = list(session.scalars(stmt).all())
+    out: list[Prediction] = []
+    seen: set[str] = set()
+    for pred in rows:
+        if primary_prediction_id and pred.id == primary_prediction_id:
+            continue
+        key = f"{pred.market_family}:{pred.outcome_key}:{pred.line_point}:{pred.selection_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(pred)
+    return out
 
 
 def build_matchups_document(
@@ -347,7 +447,7 @@ def build_matchups_document(
     pubs = _select_publications(session, event_id=event_id)
     matchups: list[MatchupRow] = []
     confirmed: list[tuple[float, str]] = []
-    watchlist: list[str] = []
+    watchlist: list[tuple[str, str]] = []
     no_bets: list[str] = []
 
     for pub in pubs:
@@ -362,11 +462,15 @@ def build_matchups_document(
             line_movement=movement,
             line_freshness=freshness,
         )
-        primary = _map_primary_state(
-            pub.state,
-            has_observed=observed is not None,
-            has_exact_ev=prices.exact_ev is not None,
-        )
+        primary = _official_primary_state(pub.state)
+        if primary is RecommendationStateView.CONFIRMED_VALUE:
+            _assert_confirmed_value_priced(
+                bout_id=pub.bout_id,
+                publication_id=pub.id,
+                observed=observed,
+                exact_ev=prices.exact_ev,
+            )
+
         bout = session.get(CanonicalBout, pub.bout_id)
         fighters: list[FighterSummary] = []
         if bout is not None:
@@ -384,6 +488,53 @@ def build_matchups_document(
         blockers: tuple[ReasonBlocker, ...] = ()
         if primary is RecommendationStateView.NO_BET:
             blockers = reasons
+        lane = _lane_view(pub.performance_lane)
+        plain = _reason_plain(
+            primary_reason=pub.primary_reason,
+            detail=str(pub.detail or ""),
+            reasons=reasons,
+        )
+
+        markets: list[MatchupMarket] = [
+            MatchupMarket(
+                market_family=pub.market_family,
+                outcome_key=pub.outcome_key,
+                line_point=pub.line_point,
+                selection_id=pub.selection_id,
+                prices=prices,
+                maturity=lane,
+                is_primary=True,
+                reasons=reasons,
+                reason_plain=plain,
+            )
+        ]
+        for extra in _additional_bout_predictions(
+            session,
+            bout_id=pub.bout_id,
+            event_id=pub.event_id,
+            primary_prediction_id=pub.prediction_id,
+        ):
+            extra_target = _price_target_for_prediction(session, extra.id)
+            extra_prices = _build_prices(
+                target=extra_target,
+                prediction=extra,
+                observed=None,
+                line_movement=None,
+                line_freshness=LineFreshness.UNKNOWN,
+            )
+            markets.append(
+                MatchupMarket(
+                    market_family=extra.market_family,
+                    outcome_key=extra.outcome_key,
+                    line_point=extra.line_point,
+                    selection_id=extra.selection_id,
+                    prices=extra_prices,
+                    maturity=lane,
+                    is_primary=False,
+                    reasons=(),
+                    reason_plain="",
+                )
+            )
 
         hashes = ArtifactHashes(
             model_hash=prediction.model_hash if prediction else None,
@@ -399,14 +550,17 @@ def build_matchups_document(
             event_id=pub.event_id,
             publication_id=pub.id,
             primary_state=primary,
-            performance_lane=_lane_view(pub.performance_lane),
+            performance_lane=lane,
+            maturity=lane,
             market_family=pub.market_family,
             outcome_key=pub.outcome_key,
             line_point=pub.line_point,
             selection_id=pub.selection_id,
             fighters=tuple(fighters),
             prices=prices,
+            markets=tuple(markets),
             primary_reason=pub.primary_reason,
+            reason_plain=plain,
             reasons=reasons,
             blockers=blockers,
             card_change_warnings=warnings,
@@ -418,13 +572,15 @@ def build_matchups_document(
             ev = float(prices.exact_ev or 0.0)
             confirmed.append((ev, pub.bout_id))
         elif primary is RecommendationStateView.PRICE_TARGET:
-            watchlist.append(pub.bout_id)
+            watchlist.append((pub.bout_id, pub.selection_id or ""))
         elif primary is RecommendationStateView.NO_BET:
             no_bets.append(pub.bout_id)
         else:
             assert_never(primary)
 
-    confirmed.sort(key=lambda item: item[0], reverse=True)
+    confirmed.sort(key=lambda item: (-item[0], item[1]))
+    watchlist.sort(key=lambda item: (item[0], item[1]))
+    no_bets.sort()
     event_field = (
         _optional_str(event_id)
         if event_id
@@ -439,7 +595,7 @@ def build_matchups_document(
         event_id=event_field,
         matchups=tuple(matchups),
         confirmed_value_ranked=tuple(bout_id for _, bout_id in confirmed),
-        price_target_watchlist=tuple(watchlist),
+        price_target_watchlist=tuple(bout_id for bout_id, _ in watchlist),
         no_bet_ids=tuple(no_bets),
     )
 
@@ -589,8 +745,7 @@ def build_performance_document(
     grade_count = 0
     for pub in pubs:
         lane = _lane_view(pub.performance_lane)
-        lane_acc[lane]["predictive"] += 1
-        predictive = PredictiveMetrics(sample_count=predictive.sample_count + 1)
+        scored = False
         if pub.prediction_id:
             grade = session.scalar(
                 select(PredictionGrade)
@@ -599,20 +754,12 @@ def build_performance_document(
                 .limit(1)
             )
             if grade is not None:
+                scored = True
                 grade_count += 1
+                lane_acc[lane]["predictive"] += 1
 
         observed = _latest_observed(session, pub.id)
-        prediction = _prediction(session, pub.prediction_id)
-        has_ev = (
-            observed is not None
-            and prediction is not None
-            and prediction.p50 is not None
-        )
-        primary = _map_primary_state(
-            pub.state,
-            has_observed=observed is not None,
-            has_exact_ev=has_ev,
-        )
+        primary = _official_primary_state(pub.state)
         if primary is RecommendationStateView.CONFIRMED_VALUE and observed is not None:
             settlement = session.scalar(
                 select(RecommendationSettlement)
@@ -629,15 +776,10 @@ def build_performance_document(
                 lane_acc[lane]["confirmed_hits"] += 1
         elif primary is RecommendationStateView.PRICE_TARGET:
             lane_acc[lane]["pt_count"] += 1
-            if pub.prediction_id:
-                grade = session.scalar(
-                    select(PredictionGrade)
-                    .where(PredictionGrade.prediction_id == pub.prediction_id)
-                    .limit(1)
-                )
-                if grade is not None:
-                    lane_acc[lane]["pt_grades"] += 1
+            if scored:
+                lane_acc[lane]["pt_grades"] += 1
 
+    predictive = PredictiveMetrics(sample_count=grade_count)
     total_confirmed = sum(int(v["confirmed_count"]) for v in lane_acc.values())
     total_hits = sum(int(v["confirmed_hits"]) for v in lane_acc.values())
     all_roi = [x for v in lane_acc.values() for x in v["confirmed_roi"]]
@@ -653,8 +795,6 @@ def build_performance_document(
         pick_count=sum(int(v["pt_count"]) for v in lane_acc.values()),
         sporting_grade_count=sum(int(v["pt_grades"]) for v in lane_acc.values()),
     )
-    # Attach grade count into predictive sample metadata via calibration placeholders.
-    _ = grade_count
     by_lane: list[LaneMetricsBucket] = []
     for lane, acc in lane_acc.items():
         c_count = int(acc["confirmed_count"])
@@ -699,17 +839,7 @@ def build_history_document(
     points: list[HistoryPoint] = []
     for pub in pubs:
         observed = _latest_observed(session, pub.id)
-        prediction = _prediction(session, pub.prediction_id)
-        has_ev = (
-            observed is not None
-            and prediction is not None
-            and prediction.p50 is not None
-        )
-        primary = _map_primary_state(
-            pub.state,
-            has_observed=observed is not None,
-            has_exact_ev=has_ev,
-        )
+        primary = _official_primary_state(pub.state)
         lane = _lane_view(pub.performance_lane)
         at = _iso(pub.published_at) or (_iso(now) or "")
         if primary is RecommendationStateView.CONFIRMED_VALUE and observed is not None:

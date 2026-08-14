@@ -10,15 +10,15 @@
     },
     {
       "name": "matchups.json",
-      "sha256": "1596283c9f519ea5678e39933ed56127f585ca820a9d9f1613e0d163d35422d6"
+      "sha256": "a095f2b8ce4d21c64abdf82de22dc6e875c38551d5ebe584f07d84928f90b965"
     },
     {
       "name": "performance.json",
-      "sha256": "aef6c11286e0e477a401b18380c332f0313352c2db1a1df4a0926e658d4e01c5"
+      "sha256": "ff785b9321a6ff17259eb5ea069f6bbf88a340c66a4fca31277a49bfe98a477d"
     },
     {
       "name": "history.json",
-      "sha256": "1699114d096e3e177f9568aaef0521587658f0a17b2c93db860b723700ac5f4e"
+      "sha256": "984d74dbff9075167d2665dfcecd8ad93801531dc81bed00b83adae2b9ca5d05"
     },
     {
       "name": "health.json",
