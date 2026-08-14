@@ -26,6 +26,7 @@ from mma_model.jobs.horizons import PREVIEW_EVENT_HORIZON, TICK_EVENT_HORIZON
 from mma_model.jobs.types import DueJob, EventContext, HandlerResult, JobErrorClass, JobStatus
 from mma_model.modeling.registry import load_model_registry
 from mma_model.odds.events_for_schedule import load_upcoming_dwcs_events_from_db
+from mma_model.observability.assemble import assemble_health
 from mma_model.observability.health import HealthReport
 from mma_model.publish.publisher import publish_dashboard
 from mma_model.sources.http.block_signals import SourceBlockedError
@@ -162,11 +163,9 @@ def run_discover(
                 if written.event_ids
                 else next_preview_event_id(session, as_of=as_of)
             ),
-            health=(
-                context.get("health")
-                if isinstance(context.get("health"), HealthReport)
-                else None
-            ),
+            # Always assemble after persist so the first paper card is not
+            # scored with a start-of-tick empty-database report.
+            health=None,
         )
         preview_counts = dict(preview.counts)
         preview_release = preview.current_release_id
@@ -208,6 +207,9 @@ def publish_preview_card(
     health: HealthReport | None = None,
 ) -> HandlerResult:
     """Replace demo live/ JSON with a paper card or an honest empty state."""
+    report = health
+    if report is None:
+        report = assemble_health(session, as_of=as_of, publish_root=publish_root)
     release_id = f"release-preview-{event_id or 'empty'}-{as_of.date().isoformat()}"
     try:
         outcome = publish_dashboard(
@@ -218,7 +220,7 @@ def publish_preview_card(
             window_slot="preview",
             publications=0,
             as_of=as_of,
-            health=health,
+            health=report,
         )
     except Exception as exc:
         return HandlerResult(

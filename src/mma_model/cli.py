@@ -170,6 +170,7 @@ from mma_model.quality.readonly import (
 )
 from mma_model.quality.report import dumps_report, human_report, write_coverage_evidence
 from mma_model.quality.schema import CoverageSchemaError
+from mma_model.observability.assemble import assemble_health
 from mma_model.observability.health import (
     default_missing_report,
     dumps_health,
@@ -1022,6 +1023,12 @@ def main(argv: list[str] | None = None) -> int:
         "--series",
         default="dwcs",
         choices=["dwcs"],
+    )
+    p_health.add_argument(
+        "--publish-root",
+        type=Path,
+        default=None,
+        help="Public root to inspect live/ JSON (container: /public)",
     )
 
     p_publish = sub.add_parser(
@@ -2062,6 +2069,11 @@ def main(argv: list[str] | None = None) -> int:
                         publish_root = getattr(args, "publish_root", None)
                         if publish_root is not None:
                             tick_context["publish_root"] = str(publish_root)
+                        tick_context["health"] = assemble_health(
+                            session,
+                            as_of=now_dt,
+                            publish_root=publish_root,
+                        )
                         result = run_jobs_tick(
                             session,
                             as_of=now_dt,
@@ -2781,10 +2793,26 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.state is not None:
                 report = load_health_state(Path(args.state))
+            elif db_url is not None:
+                engine = create_engine(str(db_url).strip(), future=True)
+                _attach_sqlite_listeners(engine)
+                SessionLocal = sessionmaker(bind=engine, future=True)
+                try:
+                    with SessionLocal() as session:
+                        report = assemble_health(
+                            session,
+                            publish_root=getattr(args, "publish_root", None),
+                            series=str(args.series),
+                        )
+                finally:
+                    engine.dispose()
             else:
                 report = default_missing_report(series=str(args.series))
             validate_health_payload(report.to_dict())
         except (OSError, ValueError, json.JSONDecodeError, HealthSchemaError) as exc:
+            print(f"health configuration error: {exc}")
+            return EXIT_INTERNAL
+        except Exception as exc:  # noqa: BLE001 — fail closed; never invent healthy
             print(f"health configuration error: {exc}")
             return EXIT_INTERNAL
         if args.json:
@@ -2828,12 +2856,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with Session() as session:
                 try:
+                    report = assemble_health(session, publish_root=output)
                     outcome = publish_dashboard(
                         session,
                         output_root=output,
                         release_id=str(release_id),
                         event_id=args.event_id,
                         window_slot=str(args.window_slot),
+                        health=report,
                     )
                 except PublishValidationError as exc:
                     print(f"publish validation failed; current unchanged: {exc}")

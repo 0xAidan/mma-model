@@ -7,6 +7,7 @@ from mma_model.observability.errors import (
     is_non_retryable,
     is_retryable,
 )
+from mma_model.observability.assemble import assemble_health
 from mma_model.observability.health import (
     HEALTH_COMPONENT_NAMES,
     HealthComponent,
@@ -40,6 +41,7 @@ __all__ = [
     "HealthStatus",
     "PublishOutcome",
     "PublishValidationError",
+    "assemble_health",
     "build_health_report",
     "build_log_record",
     "dumps_health",
