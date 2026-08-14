@@ -6,8 +6,8 @@
 #
 # previous= stays empty on the first real production pin (do not invent a digest).
 
-current=sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6
-previous=
+current=sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7
+previous=sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6
 image_repo=ghcr.io/0xaidan/mma-model
-updated_at=2026-08-14T03:12:00Z
-note=Pinned for DWCS-503 from release run 31765682285. Never auto-deploy from PRs.
+updated_at=2026-08-14T18:25:38Z
+note=Pinned after #47/#48 (live weekly engine + assemble_health) from release run 31828508540.

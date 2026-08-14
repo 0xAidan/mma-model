@@ -24,7 +24,7 @@ mutate a live host only when an operator runs them deliberately (see
   OCI requires a lowercase repository name.
 - PRs build the image but **never push** and **never deploy**.
 - Current production pin:
-  `ghcr.io/0xaidan/mma-model@sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6`
+  `ghcr.io/0xaidan/mma-model@sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7`
 - `pull_policy: never` → `docker pull` that digest on the host before compose run.
 
 ## Public root coexistence
