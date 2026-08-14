@@ -37,7 +37,6 @@ from mma_model.jobs.live_engine import (
     run_ingest_history,
     run_score,
 )
-from mma_model.odds.espn_snapshot import run_espn_odds_snapshot
 from mma_model.jobs.types import (
     DueJob,
     EventContext,
@@ -53,6 +52,7 @@ from mma_model.observability.publish_guard import (
     FilesystemPublishPointer,
     PublishValidationError,
 )
+from mma_model.odds.espn_snapshot import run_espn_odds_snapshot
 from mma_model.publish.builder import build_release_files
 from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
 from mma_model.publish.public_sync import (
