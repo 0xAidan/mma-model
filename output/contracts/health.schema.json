@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mma-model.local/contracts/health.schema.json",
+  "title": "DWCS-403 operational health",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_id",
+    "contract_version",
+    "ticket",
+    "series",
+    "as_of",
+    "rollup",
+    "ok",
+    "exit_code",
+    "blocker_codes",
+    "components"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "contract_id": { "type": "string", "const": "dwcs_health" },
+    "contract_version": { "type": "string", "minLength": 1 },
+    "ticket": { "type": "string", "const": "DWCS-403" },
+    "series": { "type": "string", "enum": ["dwcs"] },
+    "as_of": { "type": "string", "minLength": 1 },
+    "rollup": { "type": "string", "enum": ["green", "yellow", "red"] },
+    "ok": { "type": "boolean" },
+    "exit_code": { "type": "integer", "enum": [0, 2] },
+    "blocker_codes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/component" }
+    }
+  },
+  "$defs": {
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "severity", "as_of", "detail"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "sources",
+            "identity",
+            "odds",
+            "model",
+            "publish",
+            "grade",
+            "backup",
+            "quota",
+            "staleness"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["healthy", "missing", "stale", "blocked", "failed"]
+        },
+        "severity": { "type": "string", "enum": ["green", "yellow", "red"] },
+        "as_of": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "counts": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "hashes": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

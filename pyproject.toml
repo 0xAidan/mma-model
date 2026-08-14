@@ -98,3 +98,6 @@ select = ["E4", "E7", "E9", "F"]
 #   ruff check src/mma_model/db/tables/recommendations.py \
 #              src/mma_model/grade src/mma_model/db/grade_guards.py tests/grade \
 #              --select E,F,I,UP,B,SIM
+# Focused stricter lint for DWCS-403 observability:
+#   ruff check src/mma_model/observability tests/observability \
+#              --select E,F,I,UP,B,SIM

@@ -7,6 +7,7 @@ success without returning a ``HandlerResult`` the orchestrator records.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -34,6 +35,10 @@ from mma_model.jobs.types import (
     JobType,
 )
 from mma_model.modeling.registry import retrain_fixed_spec
+from mma_model.observability.publish_guard import (
+    FilesystemPublishPointer,
+    PublishValidationError,
+)
 from mma_model.recommend.policy import RenderedThresholds
 
 Handler = Callable[..., HandlerResult]
@@ -419,10 +424,15 @@ def handle_publish(
 ) -> HandlerResult:
     _ = as_of
     registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
+    publish_root = context.get("publish_root")
+    fs_pointer: FilesystemPublishPointer | None = None
+    if publish_root is not None:
+        fs_pointer = FilesystemPublishPointer(Path(str(publish_root)))
+
     prior = (
-        registry.publish.current_release_id
-        if registry is not None
-        else "release-lkg-0"
+        (fs_pointer.current_release_id if fs_pointer is not None else None)
+        or (registry.publish.current_release_id if registry is not None else None)
+        or "release-lkg-0"
     )
     if registry is not None and (registry.publish_should_fail or registry.publish_partial):
         return HandlerResult(
@@ -457,6 +467,51 @@ def handle_publish(
         )
 
     new_release = f"release-{job.event_id}-{job.window_slot}"
+    if fs_pointer is not None:
+        payload = {
+            "event_id": job.event_id,
+            "publications": pub_count,
+            "release_id": new_release,
+            "window_slot": job.window_slot,
+        }
+        files = {
+            "release.json": json.dumps(payload, sort_keys=True),
+            "manifest.json": json.dumps(
+                {"release_id": new_release, "files": ["release.json"]},
+                sort_keys=True,
+            ),
+        }
+        if context.get("publish_invalid"):
+            files = {"release.json": "{not-json}"}
+        try:
+            outcome = fs_pointer.publish_release(
+                new_release,
+                files,
+                required_files=("release.json", "manifest.json"),
+            )
+        except PublishValidationError as exc:
+            return HandlerResult(
+                status=JobStatus.FAILED,
+                error_class=JobErrorClass.SCHEMA,
+                detail=f"publish validation failed; LKG kept: {exc}",
+                current_release_id=prior,
+                counts={"written": 0, "current_replaced": False, "publications": pub_count},
+                blocks_downstream=True,
+            )
+        if registry is not None:
+            registry.publish.releases.append(outcome.current_release_id)
+            registry.publish.current_release_id = outcome.current_release_id
+        return HandlerResult(
+            status=JobStatus.SUCCESS,
+            current_release_id=outcome.current_release_id,
+            counts={
+                "written": 1,
+                "current_replaced": True,
+                "publications": pub_count,
+            },
+            detail="publish seam: filesystem LKG release + atomic current pointer",
+        )
+
     if registry is not None:
         registry.publish.releases.append(new_release)
         registry.publish.current_release_id = new_release
