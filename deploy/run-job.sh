@@ -16,9 +16,8 @@
 #
 # Pinned-image note (DWCS-503 digest): the console script resolves alembic /
 # contracts relative to site-packages. The worker therefore runs the CLI from
-# /app via PYTHONPATH=src until a later digest fixes packaging. The CLI also
-# refuses URLs ending in data/mma.db; production jobs use MMA_JOBS_DATABASE_URL
-# (default sqlite:////data/dwcs.db).
+# the host-synced tree (or /app) via PYTHONPATH=src. Production jobs use the
+# explicit absolute URL sqlite:////data/mma.db (canonical /data/mma.db).
 
 set -euo pipefail
 
@@ -53,11 +52,20 @@ MONITORING_ENV="${MMA_MONITORING_ENV:-/etc/mma-model/monitoring.env}"
 LOG_DIR="${MMA_LOG_DIR:-/var/log/mma-model}"
 BACKUP_HOOK="${MMA_BACKUP_HOOK:-${REPO_ROOT}/deploy/backup-hook.sh}"
 RUNTIME_BOUND_SEC="${MMA_JOB_TIMEOUT_SEC:-1500}"
-# Absolute container DB path that the CLI will accept (not *data/mma.db).
-JOBS_DATABASE_URL="${MMA_JOBS_DATABASE_URL:-sqlite:////data/dwcs.db}"
+# Canonical absolute container DB (four slashes). Relative sqlite:///data/mma.db
+# remains refused by the CLI guard.
+CANONICAL_JOBS_DB_URL="sqlite:////data/mma.db"
 
 mkdir -p "${LOG_DIR}"
 chmod 755 "${LOG_DIR}" 2>/dev/null || true
+
+# shellcheck disable=SC1090
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ENV_FILE}"
+  set +a
+fi
 
 # shellcheck disable=SC1090
 if [[ -f "${MONITORING_ENV}" ]]; then
@@ -65,6 +73,14 @@ if [[ -f "${MONITORING_ENV}" ]]; then
   # shellcheck disable=SC1091
   source "${MONITORING_ENV}"
   set +a
+fi
+
+# Prefer explicit override, then mma.env MMA_DATABASE_URL, then canonical absolute.
+JOBS_DATABASE_URL="${MMA_JOBS_DATABASE_URL:-${MMA_DATABASE_URL:-${CANONICAL_JOBS_DB_URL}}}"
+# Never silently fall back to a relative live URL from a mis-set env.
+if [[ "${JOBS_DATABASE_URL}" == "sqlite:///data/mma.db" \
+   || "${JOBS_DATABASE_URL}" == "sqlite:///./data/mma.db" ]]; then
+  JOBS_DATABASE_URL="${CANONICAL_JOBS_DB_URL}"
 fi
 
 redact() {
@@ -133,14 +149,23 @@ require_compose() {
 run_compose_tick() {
   local now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # Run CLI from /app so alembic migrations + contracts resolve inside the
-  # current digest-pinned image (site-packages console script path is wrong).
+  # Prefer host-synced tree so DWCS-504 DB guard lands before the next image
+  # digest. Fall back to the image /app checkout.
+  local tick_root="/app"
+  local -a volume_args=()
+  if [[ -f "${REPO_ROOT}/src/mma_model/jobs/db_guard.py" \
+     && -f "${REPO_ROOT}/alembic.ini" \
+     && -d "${REPO_ROOT}/migrations" ]]; then
+    volume_args=(-v "${REPO_ROOT}:/opt/mma-model-src:ro")
+    tick_root="/opt/mma-model-src"
+  fi
   local -a cmd=(
     docker compose -f "${COMPOSE_FILE}" run --rm --no-deps
+    "${volume_args[@]}"
     --entrypoint /bin/sh
     worker
     -c
-    "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick --now '${now}' --database-url '${JOBS_DATABASE_URL}'"
+    "cd '${tick_root}' && PYTHONPATH=src python -m mma_model.cli jobs tick --now '${now}' --database-url '${JOBS_DATABASE_URL}'"
   )
   if command -v timeout >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=30s "${RUNTIME_BOUND_SEC}" "${cmd[@]}"
@@ -169,7 +194,7 @@ execute_job() {
 
 main() {
   require_compose
-  log "starting job=${JOB} force_fail=${FORCE_FAIL} lock=${LOCK_FILE}"
+  log "starting job=${JOB} force_fail=${FORCE_FAIL} lock=${LOCK_FILE} db=${JOBS_DATABASE_URL}"
 
   # Non-blocking exclusive lock: concurrent writers are rejected.
   exec 9>"${LOCK_FILE}"

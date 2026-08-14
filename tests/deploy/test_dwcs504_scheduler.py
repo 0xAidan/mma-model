@@ -121,6 +121,8 @@ def test_run_job_script_invariants():
     assert "[REDACTED]" in text
     assert "--force-fail" in text
     assert "exit 75" in text
+    assert "sqlite:////data/mma.db" in text
+    assert "dwcs.db" not in text
     assert "ports" not in text.lower() or "no ports" in text.lower()
 
 

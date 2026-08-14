@@ -60,10 +60,21 @@ Observed-at: `2026-08-14T17:26:38Z` install; reboot verify `2026-08-14T17:37:15Z
 ## Leftover risks
 
 - Pinned DWCS-503 image console script still resolves alembic poorly; `run-job.sh`
-  uses `/app` + `PYTHONPATH=src` workaround until a later digest.
-- CLI refuses `*data/mma.db` URLs; jobs use `sqlite:////data/dwcs.db` by default.
+  bind-mounts the host-synced `/opt/mma-model` tree (src + migrations) until a
+  later digest includes the DWCS-504 DB guard.
+- Canonical jobs DB is `/data/mma.db` via explicit `sqlite:////data/mma.db`.
+  Relative `sqlite:///data/mma.db` remains refused; `--database-url` is required.
 - Backup hook is a stamp-only stub until DWCS-505.
 - Published `live/health.json` is still bootstrap fixture (`missing` components) →
   monitor stays `yellow` until pipeline health is published.
 - Host UFW remains inactive (unchanged from DWCS-503); cloud firewall + no compose
   publish surface remain the exposure controls.
+
+## Canonical DB alignment (follow-up)
+
+| Fact | Value |
+|------|-------|
+| Host file | `/srv/mma/data/mma.db` (renamed from the temporary `dwcs.db` jobs ledger) |
+| Env | `/etc/mma-model/mma.env` → `MMA_DATABASE_URL=sqlite:////data/mma.db` |
+| Runner | `run-job.sh` passes `--database-url sqlite:////data/mma.db` |
+| Guard | `is_refused_jobs_tick_database_url` allows four-slash absolute only |

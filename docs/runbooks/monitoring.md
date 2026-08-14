@@ -162,17 +162,22 @@ the service ran (journal + `systemctl status`) because `Persistent=true`.
 
 `run-job.sh tick` calls the digest-pinned Compose worker under flock. The current
 DWCS-503 image console script resolves alembic paths incorrectly, so the runner
-executes:
+preferentially bind-mounts the host-synced `/opt/mma-model` tree (src +
+migrations + `alembic.ini`) and executes:
 
 ```text
 docker compose -f /opt/mma-model/deploy/compose.yaml run --rm --no-deps \
+  -v /opt/mma-model:/opt/mma-model-src:ro \
   --entrypoint /bin/sh worker -c \
-  "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick --now <utc> \
-   --database-url sqlite:////data/dwcs.db"
+  "cd /opt/mma-model-src && PYTHONPATH=src python -m mma_model.cli jobs tick \
+   --now <utc> --database-url sqlite:////data/mma.db"
 ```
 
-Jobs DB defaults to `sqlite:////data/dwcs.db` because the CLI refuses URLs ending
-in `data/mma.db`. Override with `MMA_JOBS_DATABASE_URL` in `monitoring.env` if needed.
+`--database-url` is required. Relative live URLs (`sqlite:///data/mma.db`,
+`sqlite:///./data/mma.db`) remain refused. The explicit absolute container URL
+`sqlite:////data/mma.db` (four slashes → `/data/mma.db`) is allowed and is the
+canonical production path. `run-job.sh` reads `MMA_DATABASE_URL` from
+`/etc/mma-model/mma.env` (fallback `sqlite:////data/mma.db`).
 
 Compose remains unpublished (no ports / expose / host-network).
 
