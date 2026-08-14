@@ -1,10 +1,10 @@
-# Production systemd unit (DWCS-504).
-# Nightly backup oneshot. Calls the documented backup hook stub that DWCS-505
-# replaces with SQLite online backup + restic. Shares the global writer flock.
+# Production systemd unit (DWCS-504 / DWCS-505).
+# Nightly backup oneshot. Calls deploy/backup-hook.sh → backup.sh
+# (SQLite online backup + encrypted restic). Shares the global writer flock.
 
 [Unit]
-Description=MMA model nightly backup hook (DWCS-504 stub; DWCS-505 replaces)
-Documentation=file:///opt/mma-model/docs/runbooks/monitoring.md
+Description=MMA model nightly backup (DWCS-505 SQLite online + restic)
+Documentation=file:///opt/mma-model/docs/runbooks/backup-restore.md
 After=network-online.target docker.service
 Wants=network-online.target
 

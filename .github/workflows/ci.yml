@@ -22,6 +22,8 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "0.6.14"
+      - name: Install restic (DWCS-505 backup tests)
+        run: sudo apt-get update && sudo apt-get install -y restic
       - name: Install Python deps (locked)
         run: |
           uv pip install --system -r requirements-dev.txt
@@ -127,6 +129,12 @@ jobs:
           src/mma_model/publish/public_sync.py
           scripts/check_packaging_secrets.py
           tests/deploy
+          --select E,F,I,UP,B,SIM
+      - name: Ruff backup (strict)
+        run: >
+          ruff check
+          src/mma_model/backup
+          tests/backup
           --select E,F,I,UP,B,SIM
       - name: Ruff weekly lifecycle (strict)
         run: >

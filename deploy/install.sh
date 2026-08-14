@@ -421,6 +421,8 @@ sync_opt_tree() {
   fi
   chmod +x "${OPT_ROOT}/deploy/run-job.sh" \
     "${OPT_ROOT}/deploy/backup-hook.sh" \
+    "${OPT_ROOT}/deploy/backup.sh" \
+    "${OPT_ROOT}/deploy/restore.sh" \
     "${OPT_ROOT}/deploy/monitor-check.sh" \
     "${OPT_ROOT}/deploy/install.sh" \
     "${OPT_ROOT}/deploy/rollback.sh" 2>/dev/null || true
