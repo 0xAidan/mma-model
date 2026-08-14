@@ -15,6 +15,7 @@ from mma_model.history.sync import load_upcoming_dwcs_fighters, sync_regional_hi
 from mma_model.identity.resolver import IdentityResolver
 from mma_model.ingest.raw_store import ContentAddressedRawStore
 from mma_model.ingest.repository import IngestRepository
+from mma_model.jobs.discover_espn import persist_from_espn_events, upcoming_from_espn_context
 from mma_model.jobs.discover_live import (
     DiscoverEventPage,
     DiscoverResult,
@@ -29,10 +30,13 @@ from mma_model.odds.events_for_schedule import load_upcoming_dwcs_events_from_db
 from mma_model.observability.assemble import assemble_health
 from mma_model.observability.health import HealthReport
 from mma_model.publish.publisher import publish_dashboard
+from mma_model.sources.espn_public.errors import EspnSchemaError
+from mma_model.sources.espn_public.parser import ESPN_IDENTITY_SOURCE
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.policy import SourceId
 
 UFCSTATS_SOURCE = SourceId.UFCSTATS_PUBLIC.value
+LIVE_IDENTITY_SOURCES = (ESPN_IDENTITY_SOURCE, UFCSTATS_SOURCE)
 SEAM_ARTIFACT = "incumbent-artifact-v1"
 
 
@@ -124,31 +128,76 @@ def run_discover(
     else:
         listing = context.get("discover_listing")
         pages = _pages_from_context(context)
+        ufc_blocked: SourceBlockedError | None = None
+        espn_blocked: SourceBlockedError | None = None
+        written: DiscoverResult | None = None
+        cache_dir = Path(
+            str(context.get("cache_dir") or tempfile.mkdtemp(prefix="dwcs-discover-"))
+        )
         if listing is None and context_is_live(context):
-            cache_dir = Path(
-                str(context.get("cache_dir") or tempfile.mkdtemp(prefix="dwcs-discover-"))
-            )
             try:
                 listing, pages = fetch_live_listing_and_pages(cache_dir=cache_dir)
             except SourceBlockedError as exc:
+                ufc_blocked = exc
+                listing = None
+                pages = {}
+        if listing is not None:
+            written = persist_from_listing(
+                session,
+                listing=list(listing),
+                pages=pages,
+            )
+        want_espn = context_is_live(context) or bool(
+            context.get("espn_scoreboard") or context.get("espn_events")
+        )
+        if (written is None or not written.event_ids) and want_espn:
+            try:
+                espn_events = upcoming_from_espn_context(
+                    context, cache_dir=cache_dir, as_of=as_of
+                )
+                written = persist_from_espn_events(session, events=espn_events)
+            except SourceBlockedError as exc:
+                espn_blocked = exc
+            except EspnSchemaError as exc:
+                return HandlerResult(
+                    status=JobStatus.FAILED,
+                    error_class=JobErrorClass.SCHEMA,
+                    detail=f"discover ESPN scoreboard schema failed: {exc}",
+                    blocks_downstream=True,
+                )
+        if written is None:
+            if ufc_blocked is not None and espn_blocked is not None:
                 return HandlerResult(
                     status=JobStatus.FAILED,
                     error_class=JobErrorClass.ENTITLEMENT,
-                    detail=f"discover blocked by UFCStats robots/source policy: {exc}",
+                    detail=(
+                        "discover blocked by UFCStats and ESPN: "
+                        f"{ufc_blocked}; {espn_blocked}"
+                    ),
                     blocks_downstream=True,
                 )
-        if listing is None:
+            if listing is None and not context_is_live(context):
+                return HandlerResult(
+                    status=JobStatus.FAILED,
+                    error_class=JobErrorClass.SCHEMA,
+                    detail="discover requires listing fixtures or --live",
+                    blocks_downstream=True,
+                )
+            written = DiscoverResult(detail="no upcoming DWCS cards in listing")
+        if (
+            not written.event_ids
+            and ufc_blocked is not None
+            and espn_blocked is not None
+        ):
             return HandlerResult(
                 status=JobStatus.FAILED,
-                error_class=JobErrorClass.SCHEMA,
-                detail="discover requires listing fixtures or --live",
+                error_class=JobErrorClass.ENTITLEMENT,
+                detail=(
+                    "discover blocked by UFCStats and ESPN: "
+                    f"{ufc_blocked}; {espn_blocked}"
+                ),
                 blocks_downstream=True,
             )
-        written = persist_from_listing(
-            session,
-            listing=list(listing),
-            pages=pages,
-        )
 
     preview_counts: dict[str, Any] = {}
     preview_release: str | None = None
@@ -321,11 +370,14 @@ def run_ingest_history(
         )
     except SourceBlockedError as exc:
         return HandlerResult(
-            status=JobStatus.FAILED,
-            error_class=JobErrorClass.ENTITLEMENT,
-            detail=f"ingest-history blocked: {exc}",
+            status=JobStatus.SUCCESS,
+            error_class=None,
+            detail=(
+                "ingest-history blocked; card still valid without regional history: "
+                f"{exc}"
+            ),
             counts={"profiles": len(fighters), "histories": 0},
-            blocks_downstream=True,
+            blocks_downstream=False,
         )
     finally:
         if created_clients:
@@ -371,7 +423,7 @@ def run_identity(
         status=JobStatus.SUCCESS,
         blocked_bout_ids=tuple(unresolved),
         counts={"resolved": resolved, "unresolved": len(unresolved)},
-        detail="identity: resolved UFCStats fighters; blocked unresolved bouts",
+        detail="identity: resolved ESPN or UFCStats fighters; blocked unresolved bouts",
     )
 
 
@@ -388,16 +440,22 @@ def _resolve_bout_fighters(
         fighter = session.get(CanonicalFighter, fighter_id)
         if fighter is None or not (fighter.display_name or "").strip():
             return False
-        source_row = session.scalar(
-            select(FighterSourceId).where(
-                FighterSourceId.fighter_id == fighter_id,
-                FighterSourceId.source == UFCSTATS_SOURCE,
+        source_row = None
+        source_name = UFCSTATS_SOURCE
+        for candidate in LIVE_IDENTITY_SOURCES:
+            source_row = session.scalar(
+                select(FighterSourceId).where(
+                    FighterSourceId.fighter_id == fighter_id,
+                    FighterSourceId.source == candidate,
+                )
             )
-        )
+            if source_row is not None and source_row.external_id:
+                source_name = candidate
+                break
         if source_row is None or not source_row.external_id:
             return False
         result = resolver.resolve_fighter(
-            source=UFCSTATS_SOURCE,
+            source=source_name,
             external_id=source_row.external_id,
             display_name=fighter.display_name,
             bout_id=bout_id,

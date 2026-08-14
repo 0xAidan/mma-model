@@ -114,6 +114,7 @@ PHASE1_BOUT_SOURCES: tuple[str, ...] = (
 SOURCE_CLASS_BY_ID: dict[str, SourceClass] = {
     SourceId.DWCS_MANIFEST.value: "internal_manifest",
     SourceId.UFCSTATS_PUBLIC.value: "public_extraction",
+    SourceId.ESPN_PUBLIC.value: "public_dataset",
     SourceId.TAPOLOGY_PUBLIC.value: "public_extraction",
     SourceId.SHERDOG_PUBLIC.value: "public_extraction",
     SourceId.MMA_AI_BOOTSTRAP.value: "public_dataset",
@@ -133,6 +134,7 @@ VALIDATION_ONLY_SOURCES = frozenset(
 SOURCE_FAMILY_BY_ID: dict[str, str] = {
     SourceId.DWCS_MANIFEST.value: "dwcs_manifest",
     SourceId.UFCSTATS_PUBLIC.value: "ufcstats",
+    SourceId.ESPN_PUBLIC.value: "espn",
     SourceId.MMA_AI_BOOTSTRAP.value: "ufcstats",
     SourceId.TAPOLOGY_PUBLIC.value: "tapology",
     SourceId.SHERDOG_PUBLIC.value: "sherdog",

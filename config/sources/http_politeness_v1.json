@@ -49,6 +49,24 @@
       "backoff_cap_sec": 30.0,
       "stop_status_codes": [403, 429, 503],
       "allowed_path_prefixes": ["/"]
+    },
+    "site.api.espn.com": {
+      "min_delay_sec": 0.75,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/apis/site/v2/sports/mma/ufc/scoreboard"]
+    },
+    "sports.core.api.espn.com": {
+      "min_delay_sec": 0.75,
+      "max_concurrency": 1,
+      "max_retries": 3,
+      "backoff_base_sec": 1.0,
+      "backoff_cap_sec": 30.0,
+      "stop_status_codes": [403, 429, 503],
+      "allowed_path_prefixes": ["/v2/sports/mma/"]
     }
   }
 }
