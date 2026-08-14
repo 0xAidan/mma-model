@@ -437,6 +437,79 @@ def _additional_bout_predictions(
     return out
 
 
+_INACTIVE_BOUT_STATUS = frozenset(
+    {"cancelled", "canceled", "replaced", "scratched", "completed"}
+)
+
+
+def _unpublished_scheduled_bouts(
+    session: Session,
+    *,
+    event_id: str | None,
+    published_ids: set[str],
+) -> list[CanonicalBout]:
+    """Scheduled canonical bouts that do not yet have an official publication."""
+    if not event_id:
+        return []
+    rows = session.scalars(
+        select(CanonicalBout)
+        .where(CanonicalBout.event_id == event_id)
+        .order_by(CanonicalBout.id.asc())
+    ).all()
+    out: list[CanonicalBout] = []
+    for bout in rows:
+        status = (bout.status or "scheduled").strip().casefold()
+        if status in _INACTIVE_BOUT_STATUS:
+            continue
+        if bout.id in published_ids:
+            continue
+        out.append(bout)
+    return out
+
+
+def _paper_unpublished_matchup(session: Session, bout: CanonicalBout) -> MatchupRow:
+    """Paper No-bet row for a discovered bout with no official T-60 publication."""
+    reason = ReasonBlocker(
+        code="preview_unpublished",
+        message="No official T-60 publication yet; paper preview only.",
+    )
+    prices = MatchupPrices()
+    market = MatchupMarket(
+        market_family="moneyline",
+        outcome_key=None,
+        line_point=None,
+        selection_id=None,
+        prices=prices,
+        maturity=PerformanceLaneView.PAPER,
+        is_primary=True,
+        reasons=(reason,),
+        reason_plain=reason.message,
+    )
+    return MatchupRow(
+        bout_id=bout.id,
+        event_id=bout.event_id,
+        publication_id=None,
+        primary_state=RecommendationStateView.NO_BET,
+        performance_lane=PerformanceLaneView.PAPER,
+        maturity=PerformanceLaneView.PAPER,
+        market_family="moneyline",
+        outcome_key=None,
+        line_point=None,
+        selection_id=None,
+        fighters=(
+            _fighter_summary(session, fighter_id=bout.fighter_a_id, corner="a"),
+            _fighter_summary(session, fighter_id=bout.fighter_b_id, corner="b"),
+        ),
+        prices=prices,
+        markets=(market,),
+        primary_reason="preview_unpublished",
+        reason_plain=reason.message,
+        reasons=(reason,),
+        blockers=(reason,),
+        detail="paper preview; not official Confirmed value",
+    )
+
+
 def build_matchups_document(
     session: Session,
     *,
@@ -577,6 +650,14 @@ def build_matchups_document(
             no_bets.append(pub.bout_id)
         else:
             assert_never(primary)
+
+    published_ids = {row.bout_id for row in matchups}
+    for bout in _unpublished_scheduled_bouts(
+        session, event_id=event_id, published_ids=published_ids
+    ):
+        row = _paper_unpublished_matchup(session, bout)
+        matchups.append(row)
+        no_bets.append(row.bout_id)
 
     confirmed.sort(key=lambda item: (-item[0], item[1]))
     watchlist.sort(key=lambda item: (item[0], item[1]))

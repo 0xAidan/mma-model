@@ -28,3 +28,33 @@ def canonical_fighter_id(espn_athlete_id: str) -> str:
             DWCS_UUID_NAMESPACE, f"dwcs:fighter:espn:{espn_athlete_id.strip()}"
         )
     )
+
+
+def upcoming_event_id(ufcstats_event_id: str) -> str:
+    """Stable upcoming-card event id from a UFCStats event-details id."""
+    return str(
+        uuid.uuid5(
+            DWCS_UUID_NAMESPACE,
+            f"dwcs:event:ufcstats_public:{ufcstats_event_id.strip()}",
+        )
+    )
+
+
+def upcoming_bout_id(ufcstats_fight_id: str) -> str:
+    """Stable upcoming-card bout id from a UFCStats fight-details id."""
+    return str(
+        uuid.uuid5(
+            DWCS_UUID_NAMESPACE,
+            f"dwcs:bout:ufcstats_public:{ufcstats_fight_id.strip()}",
+        )
+    )
+
+
+def upcoming_fighter_id(ufcstats_fighter_id: str) -> str:
+    """Stable upcoming-card fighter id from a UFCStats fighter-details id."""
+    return str(
+        uuid.uuid5(
+            DWCS_UUID_NAMESPACE,
+            f"dwcs:fighter:ufcstats_public:{ufcstats_fighter_id.strip()}",
+        )
+    )

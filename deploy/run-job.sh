@@ -140,7 +140,7 @@ run_compose_tick() {
     --entrypoint /bin/sh
     worker
     -c
-    "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick --now '${now}' --database-url '${JOBS_DATABASE_URL}'"
+    "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick --now '${now}' --database-url '${JOBS_DATABASE_URL}' --live --publish-root /public"
   )
   if command -v timeout >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=30s "${RUNTIME_BOUND_SEC}" "${cmd[@]}"

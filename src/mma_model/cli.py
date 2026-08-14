@@ -70,6 +70,7 @@ from mma_model.odds.schedule import (
 )
 from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
 from mma_model.jobs.due import load_orchestrator_cadence
+from mma_model.jobs.live_engine import TICK_EVENT_HORIZON
 from mma_model.jobs.locking import FileFlockLock
 from mma_model.jobs.orchestrator import TickOverlapError, run_jobs_tick
 from mma_model.jobs.types import EventContext
@@ -551,6 +552,17 @@ def main(argv: list[str] | None = None) -> int:
         "--event-start",
         default=None,
         help="Optional ISO UTC event start paired with --event-id",
+    )
+    p_jobs_tick.add_argument(
+        "--live",
+        action="store_true",
+        help="Run real upcoming-card discover/ingest/identity/score (no CI network)",
+    )
+    p_jobs_tick.add_argument(
+        "--publish-root",
+        type=Path,
+        default=None,
+        help="Public root for preview/official dashboard JSON (container: /public)",
     )
 
     p_train = sub.add_parser("train", help="Train logistic model on DB fights")
@@ -2005,7 +2017,10 @@ def main(argv: list[str] | None = None) -> int:
                     # When no explicit event is passed, load upcoming from DB.
                     if not events:
                         raw_events = load_upcoming_dwcs_events_from_db(
-                            session, as_of=now_dt, series=args.series
+                            session,
+                            as_of=now_dt,
+                            series=args.series,
+                            horizon=TICK_EVENT_HORIZON,
                         )
                         for item in raw_events:
                             start_val = item.get("event_start") or item.get("start_time")
@@ -2039,6 +2054,14 @@ def main(argv: list[str] | None = None) -> int:
                         else FileFlockLock(Path("/tmp/mma-jobs-tick.lock"))
                     )
                     try:
+                        tick_context: dict[str, object] = {
+                            "live": bool(getattr(args, "live", False)),
+                            "require_champion": bool(getattr(args, "live", False)),
+                            "allow_live_http": bool(getattr(args, "live", False)),
+                        }
+                        publish_root = getattr(args, "publish_root", None)
+                        if publish_root is not None:
+                            tick_context["publish_root"] = str(publish_root)
                         result = run_jobs_tick(
                             session,
                             as_of=now_dt,
@@ -2046,6 +2069,7 @@ def main(argv: list[str] | None = None) -> int:
                             dry_run=False,
                             lock=lock,
                             cadence=load_orchestrator_cadence(),
+                            context=tick_context,
                         )
                     except TickOverlapError as exc:
                         print(f"jobs tick overlap: {exc}")

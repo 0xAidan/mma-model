@@ -38,6 +38,10 @@ class UfcstatsPublicClient:
     def close(self) -> None:
         self._http.close()
 
+    def fetch_upcoming_events_list(self) -> tuple[str, str]:
+        """Upcoming events listing (allowlisted ``/statistics/`` prefix)."""
+        return self._http.get_text(f"{BASE_URL}/statistics/events/upcoming")
+
     def fetch_event_details(self, event_external_id: str) -> tuple[str, str]:
         url = f"{BASE_URL}/event-details/{event_external_id}"
         return self._http.get_text(url)

@@ -14,6 +14,9 @@ __all__ = [
     "canonical_bout_id",
     "canonical_event_id",
     "canonical_fighter_id",
+    "upcoming_bout_id",
+    "upcoming_event_id",
+    "upcoming_fighter_id",
     "classify_bout",
     "classify_event_cancellation",
     "derive_elapsed_seconds",
@@ -44,6 +47,9 @@ def __getattr__(name: str):
         "canonical_bout_id",
         "canonical_event_id",
         "canonical_fighter_id",
+        "upcoming_bout_id",
+        "upcoming_event_id",
+        "upcoming_fighter_id",
     }:
         from mma_model.dwcs import ids as mod
 
