@@ -47,7 +47,7 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-  "slow: packaging / install smoke tests (still run in default CI)",
+  "slow: packaging / docker build smoke (run via dedicated CI docker step)",
 ]
 
 [tool.ruff]

@@ -1,0 +1,12 @@
+# CI / local validation overlay for deploy/compose.yaml (DWCS-502).
+# Replaces production env_file so `docker compose config` works without
+# /etc/mma-model/mma.env on the runner. Production compose.yaml keeps the
+# real host path for deploys.
+#
+# Usage:
+#   docker compose -f deploy/compose.yaml -f deploy/compose.ci.yaml config
+
+services:
+  worker:
+    env_file: !override
+      - ./ci-mma.env

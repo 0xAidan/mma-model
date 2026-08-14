@@ -10,6 +10,13 @@ from mma_model.publish.constants import (
     DASHBOARD_SCHEMA_VERSION,
     DASHBOARD_TICKET,
 )
+from mma_model.publish.public_sync import (
+    LIVE_DIR_NAME,
+    PublicSyncError,
+    promote_current_release_json,
+    promote_release_json_to_public_root,
+    sync_web_assets,
+)
 from mma_model.publish.publisher import publish_dashboard, publish_dashboard_from_bodies
 from mma_model.publish.schema import DOCUMENT_MODELS, validate_document
 from mma_model.publish.validator import validate_dashboard_release_dir
@@ -21,9 +28,14 @@ __all__ = [
     "DASHBOARD_SCHEMA_VERSION",
     "DASHBOARD_TICKET",
     "DOCUMENT_MODELS",
+    "LIVE_DIR_NAME",
+    "PublicSyncError",
     "build_release_files",
+    "promote_current_release_json",
+    "promote_release_json_to_public_root",
     "publish_dashboard",
     "publish_dashboard_from_bodies",
+    "sync_web_assets",
     "validate_dashboard_release_dir",
     "validate_document",
 ]

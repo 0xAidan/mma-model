@@ -1,0 +1,101 @@
+name: Release
+
+# Merge-only immutable worker image publish (DWCS-502).
+# Triggers on push to main or manual dispatch — NOT on pull_request.
+# Builds and pushes to GHCR by digest. Does not deploy, SSH, reload Caddy, or touch the VPS.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/0xAidan/mma-model
+
+jobs:
+  publish-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (digest identity)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:main
+          provenance: false
+
+      - name: Record immutable digest
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST="${{ steps.build.outputs.digest }}"
+          if [ -z "${DIGEST}" ]; then
+            echo "Build did not return an image digest" >&2
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+          PIN_FILE="deploy/image-digest.txt"
+          PREVIOUS=""
+          if [ -f "${PIN_FILE}" ]; then
+            # Retain prior current as previous for rollback (even if placeholder).
+            PRIOR_CURRENT="$(grep -E '^current=' "${PIN_FILE}" | head -n1 | cut -d= -f2- || true)"
+            if [ -n "${PRIOR_CURRENT}" ] && [ "${PRIOR_CURRENT}" != "${DIGEST}" ]; then
+              PREVIOUS="${PRIOR_CURRENT}"
+            else
+              PRIOR_PREVIOUS="$(grep -E '^previous=' "${PIN_FILE}" | head -n1 | cut -d= -f2- || true)"
+              PREVIOUS="${PRIOR_PREVIOUS}"
+            fi
+          fi
+
+          echo "Published ${IMAGE_NAME}@${DIGEST}"
+          echo "previous=${PREVIOUS:-<none>}"
+          {
+            echo "image=${IMAGE_NAME}"
+            echo "current=${DIGEST}"
+            echo "previous=${PREVIOUS}"
+            echo "digest=${DIGEST}"
+            echo "git_sha=${GITHUB_SHA}"
+            echo "updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "note=Pin compose image: ${IMAGE_NAME}@${DIGEST}"
+            echo "rollback=Retarget compose to previous=${PREVIOUS:-<none>}"
+          } > image-digest-artifact.txt
+          cat image-digest-artifact.txt
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digest
+          path: image-digest-artifact.txt
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          {
+            echo "## Worker image published"
+            echo ""
+            echo "- Image: \`${IMAGE_NAME}@${{ steps.digest.outputs.digest }}\`"
+            echo "- Git SHA: \`${GITHUB_SHA}\`"
+            echo "- Artifact records \`current\` + \`previous\` from \`deploy/image-digest.txt\`"
+            echo "- Compose pin: set \`image:\` in \`deploy/compose.yaml\` to the digest above"
+            echo "- Updating \`deploy/image-digest.txt\` on main can be a follow-up PR"
+            echo "- **No deploy** was performed (DWCS-502)"
+          } >> "$GITHUB_STEP_SUMMARY"
