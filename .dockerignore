@@ -1,0 +1,52 @@
+# Exclude secrets, local data, research dumps, and build junk from the image context.
+.git
+.github
+.venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.local-probe-cache
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# Local databases and mutable data mounts (never bake into the image).
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Model artifacts / licensed raw payloads / probe caches.
+output/
+build/
+dist/
+*.egg-info/
+**/__pycache__/
+**/*.pyc
+
+# Research dumps (must never ship in the worker image).
+.firecrawl/
+*feasibility.json
+*pages.json
+policies-and-apis.json
+*-search.json
+*-search-summary.txt
+*-summary.txt
+
+# Web tooling — Stage A copies web/ and runs npm ci itself.
+web/node_modules/
+web/dist/
+
+# Tests and local docs not needed at runtime.
+tests/
+docs/
+deploy/examples/
+*.md
+!README.md
+
+# Editor / agent noise
+.cursor/
+.claude/
+agent-transcripts/

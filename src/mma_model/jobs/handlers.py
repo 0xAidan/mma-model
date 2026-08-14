@@ -43,6 +43,10 @@ from mma_model.observability.publish_guard import (
 )
 from mma_model.publish.builder import build_release_files
 from mma_model.publish.constants import DASHBOARD_RELEASE_FILES
+from mma_model.publish.public_sync import (
+    PublicSyncError,
+    promote_release_json_to_public_root,
+)
 from mma_model.publish.validator import validate_dashboard_release_dir
 from mma_model.recommend.policy import (
     PRODUCTION_BOOTSTRAP_REFITS,
@@ -768,6 +772,37 @@ def handle_publish(
                 counts={"written": 0, "current_replaced": False, "publications": pub_count},
                 blocks_downstream=True,
             )
+        # DWCS-502: promote release JSON to public root for the static SPA.
+        # Failure keeps versioned releases/current and prior root JSON (temp+replace).
+        root_json_promoted = False
+        if not context.get("publish_invalid"):
+            try:
+                promote_release_json_to_public_root(
+                    Path(str(publish_root)),
+                    outcome.path,
+                    release_id=outcome.current_release_id,
+                )
+                root_json_promoted = True
+            except PublicSyncError as exc:
+                if registry is not None:
+                    registry.publish.releases.append(outcome.current_release_id)
+                    registry.publish.current_release_id = outcome.current_release_id
+                return HandlerResult(
+                    status=JobStatus.FAILED,
+                    error_class=JobErrorClass.INTERNAL,
+                    detail=(
+                        "publish release ok but public-root JSON promote failed; "
+                        f"LKG root JSON kept: {exc}"
+                    ),
+                    current_release_id=outcome.current_release_id,
+                    counts={
+                        "written": 1,
+                        "current_replaced": True,
+                        "publications": pub_count,
+                        "public_root_json": False,
+                    },
+                    blocks_downstream=True,
+                )
         if registry is not None:
             registry.publish.releases.append(outcome.current_release_id)
             registry.publish.current_release_id = outcome.current_release_id
@@ -778,8 +813,12 @@ def handle_publish(
                 "written": 1,
                 "current_replaced": True,
                 "publications": pub_count,
+                "public_root_json": root_json_promoted,
             },
-            detail="publish: validated dashboard JSON + atomic current pointer",
+            detail=(
+                "publish: validated dashboard JSON + atomic current pointer"
+                + (" + public-root JSON" if root_json_promoted else "")
+            ),
         )
 
     if registry is not None:

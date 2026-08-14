@@ -176,6 +176,7 @@ from mma_model.observability.health import (
 )
 from mma_model.observability.publish_guard import PublishValidationError
 from mma_model.observability.schema import HealthSchemaError, validate_health_payload
+from mma_model.publish.public_sync import PublicSyncError, sync_web_assets
 from mma_model.publish.publisher import publish_dashboard
 from mma_model.sources.policy import load_source_policy
 from mma_model.predict.backtest import walk_forward_backtest
@@ -1040,6 +1041,33 @@ def main(argv: list[str] | None = None) -> int:
         "--window-slot",
         default="manual",
         help="Window slot label recorded in release.json",
+    )
+
+    p_public = sub.add_parser(
+        "public",
+        help="Public static root asset/JSON coexistence tools (DWCS-502)",
+    )
+    public_sub = p_public.add_subparsers(dest="public_cmd", required=True)
+    p_public_sync = public_sub.add_parser(
+        "sync-assets",
+        help=(
+            "Copy web build into the public mount without deleting releases/, "
+            "current, or last-known-good dashboard JSON"
+        ),
+    )
+    p_public_sync.add_argument(
+        "--from",
+        dest="web_dist",
+        type=Path,
+        required=True,
+        help="Web dist directory (e.g. /opt/mma/web)",
+    )
+    p_public_sync.add_argument(
+        "--to",
+        dest="public_root",
+        type=Path,
+        required=True,
+        help="Public static root (e.g. /public)",
     )
 
     p_feat = sub.add_parser("features", help="Cutoff-aware PIT feature tools")
@@ -2786,16 +2814,38 @@ def main(argv: list[str] | None = None) -> int:
                 except PublishValidationError as exc:
                     print(f"publish validation failed; current unchanged: {exc}")
                     return EXIT_INTERNAL
+                except PublicSyncError as exc:
+                    print(
+                        "publish release ok but public-root JSON promote failed; "
+                        f"LKG root JSON kept: {exc}"
+                    )
+                    return EXIT_INTERNAL
                 except Exception as exc:  # noqa: BLE001
                     print(f"publish failed: {exc}")
                     return EXIT_INTERNAL
             print(
                 f"publish ok release_id={outcome.current_release_id} "
-                f"root={output}"
+                f"root={output} public_root_json=promoted"
             )
             return EXIT_OK
         finally:
             engine.dispose()
+
+    if args.cmd == "public":
+        if args.public_cmd != "sync-assets":
+            print(f"public configuration error: unknown command {args.public_cmd!r}")
+            return EXIT_INTERNAL
+        try:
+            result = sync_web_assets(args.web_dist, args.public_root)
+        except PublicSyncError as exc:
+            print(f"public sync-assets failed; LKG left intact: {exc}")
+            return EXIT_INTERNAL
+        print(
+            f"public sync-assets ok root={result.public_root} "
+            f"copied={','.join(result.copied) or 'none'} "
+            f"skipped={','.join(result.skipped) or 'none'}"
+        )
+        return EXIT_OK
 
     if args.cmd == "features":
         if args.features_cmd != "audit":

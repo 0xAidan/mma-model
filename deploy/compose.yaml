@@ -1,0 +1,52 @@
+# Production-shaped Compose for DWCS-502+ (in-repo; not auto-installed on VPS).
+# Pin the worker image by immutable digest (see deploy/image-digest.txt).
+# Existing host Caddy remains the only reverse proxy on :80/:443.
+#
+# Invariants:
+# - NO ports / expose / host-network attachment
+# - Secrets via /etc/mma-model/mma.env (0600) at runtime only
+# - Host mounts: /srv/mma/data -> /data, /srv/mma/public -> /public
+# - Non-root user; read-only root filesystem + tmpfs /tmp
+#
+# Typical one-shot job (later tickets / systemd):
+#   docker compose -f deploy/compose.yaml run --rm worker mma-model jobs tick
+# Health (no public port):
+#   docker compose -f deploy/compose.yaml run --rm worker mma-model health --json
+# Sync baked web assets into the public mount (preserves releases/ + current):
+#   docker compose -f deploy/compose.yaml run --rm worker \
+#     mma-model public sync-assets --from /opt/mma/web --to /public
+
+services:
+  worker:
+    # Replace DIGEST_PLACEHOLDER after a main-branch release workflow publishes to GHCR.
+    # Keep the previous digest in deploy/image-digest.txt for rollback.
+    image: ghcr.io/0xAidan/mma-model@sha256:DIGEST_PLACEHOLDER_REPLACE_AFTER_CI_PUBLISH
+    pull_policy: never
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    env_file:
+      - /etc/mma-model/mma.env
+    environment:
+      MMA_DATA_DIR: /data
+      MMA_PUBLIC_DIR: /public
+      MMA_WEB_ASSETS: /opt/mma/web
+    volumes:
+      - /srv/mma/data:/data
+      - /srv/mma/public:/public
+    working_dir: /app
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Default command is health; schedulers override with jobs tick / publish / etc.
+    command: ["mma-model", "health", "--json"]
+    healthcheck:
+      test: ["CMD", "mma-model", "health", "--json"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    # Intentional invariant: no ports, no expose, no host-network mode.
