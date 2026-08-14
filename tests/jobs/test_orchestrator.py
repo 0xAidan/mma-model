@@ -434,8 +434,10 @@ def test_stale_line_cannot_be_confirmed_value(tmp_path: Path) -> None:
     session.commit()
     pub = session.scalar(select(OfficialPublication))
     assert pub is not None
-    assert pub.state == RecommendationState.PRICE_TARGET.value
+    # Frozen 307 policy: stale observed lines are no_bet, never confirmed_value.
+    assert pub.state == RecommendationState.NO_BET.value
     assert pub.primary_reason == "stale_line"
+    assert pub.state != RecommendationState.CONFIRMED_VALUE.value
     engine.dispose()
 
 

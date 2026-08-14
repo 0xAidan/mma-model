@@ -102,5 +102,13 @@ jobs:
           src/mma_model/observability
           tests/observability
           --select E,F,I,UP,B,SIM
+      - name: Ruff weekly lifecycle (strict)
+        run: >
+          ruff check
+          tests/integration
+          tests/fixtures/week_lifecycle
+          scripts/run_weekly_smoke.py
+          src/mma_model/jobs/handlers.py
+          --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q

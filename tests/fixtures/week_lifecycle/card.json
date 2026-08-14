@@ -1,0 +1,107 @@
+{
+  "ticket": "DWCS-404",
+  "event_id": "dwcs-lifecycle-fixture-1",
+  "event_start": "2024-08-13T02:00:00Z",
+  "series": "dwcs",
+  "description": "Deterministic five-bout card covering replacement, stale, unpriced, confirmed_value, no_bet, NC, void, and line-cross.",
+  "bouts": {
+    "bout-cv": {
+      "role": "confirmed_value",
+      "notes": "Fresh eligible quote clears frozen policy at T-60; later draw voids priced settlement; line crosses actionable before cutoff."
+    },
+    "bout-unpriced": {
+      "role": "price_target",
+      "notes": "Model/data gates pass with no observed quote; sporting grade only; never ROI/CLV."
+    },
+    "bout-nobet": {
+      "role": "no_bet",
+      "notes": "Failed data_quality / model gate; explicit reason code."
+    },
+    "bout-stale": {
+      "role": "stale_line",
+      "notes": "Observed quote exists but stale=true → policy no_bet (not confirmed_value)."
+    },
+    "bout-old": {
+      "role": "replaced_out",
+      "notes": "Invalidated via replacement_invalidated state event; never deleted."
+    },
+    "bout-new": {
+      "role": "replacement_in",
+      "notes": "Replaces bout-old before official T-60; settles no_contest."
+    }
+  },
+  "active_card_at_t60": [
+    "bout-cv",
+    "bout-unpriced",
+    "bout-nobet",
+    "bout-stale",
+    "bout-new"
+  ],
+  "quote_timeline": [
+    {
+      "bout_id": "bout-cv",
+      "at": "2024-08-12T12:00:00Z",
+      "offered_decimal": 2.30,
+      "note": "below actionable (p50=0.50/p25=0.40 → actionable 2.50)"
+    },
+    {
+      "bout_id": "bout-cv",
+      "at": "2024-08-13T00:30:00Z",
+      "offered_decimal": 2.60,
+      "note": "crosses actionable before T-60 cutoff"
+    },
+    {
+      "bout_id": "bout-stale",
+      "at": "2024-08-12T18:00:00Z",
+      "offered_decimal": 3.10,
+      "stale": true
+    },
+    {
+      "bout_id": "bout-cv",
+      "at": "2024-08-13T01:30:00Z",
+      "offered_decimal": 2.45,
+      "post_official": true,
+      "note": "after official T-60 → append-only state event only"
+    }
+  ],
+  "results": {
+    "bout-cv": {"result_class": "draw", "scheduled_rounds": 3, "ending_round": 3},
+    "bout-unpriced": {
+      "result_class": "decisive",
+      "winner_side": "a",
+      "method": "decision",
+      "scheduled_rounds": 3,
+      "ending_round": 3
+    },
+    "bout-nobet": {
+      "result_class": "decisive",
+      "winner_side": "b",
+      "method": "ko_tko",
+      "scheduled_rounds": 3,
+      "ending_round": 1,
+      "elapsed_seconds_in_round": 40
+    },
+    "bout-stale": {
+      "result_class": "decisive",
+      "winner_side": "a",
+      "method": "submission",
+      "scheduled_rounds": 3,
+      "ending_round": 2,
+      "elapsed_seconds_in_round": 90
+    },
+    "bout-new": {"result_class": "no_contest", "scheduled_rounds": 3}
+  },
+  "ticks": [
+    {"label": "t_minus_72h", "as_of": "2024-08-10T02:00:00Z"},
+    {"label": "mid_odds_fresh", "as_of": "2024-08-12T12:00:00Z"},
+    {"label": "mid_odds_auth_fail", "as_of": "2024-08-12T15:00:00Z", "inject": "auth"},
+    {"label": "mid_odds_schema_fail", "as_of": "2024-08-12T16:00:00Z", "inject": "schema"},
+    {"label": "line_cross_and_replace", "as_of": "2024-08-13T00:30:00Z"},
+    {"label": "t_minus_61m_score", "as_of": "2024-08-13T00:59:00Z"},
+    {"label": "t_minus_60m_publish_fail", "as_of": "2024-08-13T01:00:00Z", "inject": "publish_fail"},
+    {"label": "t_minus_30m_publish_ok", "as_of": "2024-08-13T01:30:00Z"},
+    {"label": "event_start_partial", "as_of": "2024-08-13T02:00:00Z", "results_final": false},
+    {"label": "event_night_final", "as_of": "2024-08-13T02:20:00Z", "results_final": true},
+    {"label": "plus_24h_retrain_fail", "as_of": "2024-08-14T02:00:00Z", "inject": "retrain_fail"}
+  ]
+}
