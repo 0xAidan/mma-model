@@ -1,0 +1,29 @@
+# Production systemd unit (DWCS-504).
+# Nightly backup oneshot. Calls the documented backup hook stub that DWCS-505
+# replaces with SQLite online backup + restic. Shares the global writer flock.
+
+[Unit]
+Description=MMA model nightly backup hook (DWCS-504 stub; DWCS-505 replaces)
+Documentation=file:///opt/mma-model/docs/runbooks/monitoring.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=1800
+ExecStart=/opt/mma-model/deploy/run-job.sh backup
+Environment=MMA_REPO_ROOT=/opt/mma-model
+Environment=MMA_COMPOSE_FILE=/opt/mma-model/deploy/compose.yaml
+Environment=MMA_ENV_FILE=/etc/mma-model/mma.env
+Environment=MMA_MONITORING_ENV=/etc/mma-model/monitoring.env
+Environment=MMA_WRITER_LOCK=/run/mma-writer.lock
+Environment=MMA_LOG_DIR=/var/log/mma-model
+Environment=MMA_BACKUP_HOOK=/opt/mma-model/deploy/backup-hook.sh
+EnvironmentFile=-/etc/mma-model/monitoring.env
+SyslogIdentifier=mma-backup
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

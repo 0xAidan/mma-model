@@ -185,7 +185,18 @@ Host copy of rollback notes may also live at `/root/mma-dwcs503-rollback.sh`
 
 ## Out of scope
 
-- systemd timers / flock scheduler → DWCS-504
 - restic / backup restore internals → DWCS-505
 - Changing the root site
 - Auto-deploy from PRs
+
+## Scheduler / monitoring (DWCS-504)
+
+Production units: [`../../deploy/systemd/`](../../deploy/systemd/).  
+Runbook: [`monitoring.md`](monitoring.md).  
+Evidence: [`../deployment/dwcs-504-evidence.md`](../deployment/dwcs-504-evidence.md).
+
+```bash
+sudo ./deploy/install.sh --apply-scheduler
+```
+
+Examples under `deploy/examples/systemd/` stay **EXAMPLE ONLY — NOT INSTALLED**.

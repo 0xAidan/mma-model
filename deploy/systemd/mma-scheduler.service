@@ -1,0 +1,36 @@
+# Production systemd unit (DWCS-504).
+# Install via: sudo ./deploy/install.sh --apply-scheduler
+# Invokes the pinned Compose worker under one global flock via deploy/run-job.sh.
+
+[Unit]
+Description=MMA model scheduler tick (DWCS-504)
+Documentation=file:///opt/mma-model/docs/runbooks/monitoring.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+# Bound oneshot runtime (seconds). run-job.sh also applies GNU timeout.
+TimeoutStartSec=1500
+# Do not start a second instance while one is still running.
+# Overlap is also rejected by flock inside run-job.sh (exit 75).
+ExecStart=/opt/mma-model/deploy/run-job.sh tick
+ExecStartPost=-/opt/mma-model/deploy/monitor-check.sh
+Environment=MMA_REPO_ROOT=/opt/mma-model
+Environment=MMA_COMPOSE_FILE=/opt/mma-model/deploy/compose.yaml
+Environment=MMA_ENV_FILE=/etc/mma-model/mma.env
+Environment=MMA_MONITORING_ENV=/etc/mma-model/monitoring.env
+Environment=MMA_WRITER_LOCK=/run/mma-writer.lock
+Environment=MMA_LOG_DIR=/var/log/mma-model
+# Secrets come from EnvironmentFile (optional) + compose env_file (0600).
+EnvironmentFile=-/etc/mma-model/monitoring.env
+# Overlap (exit 75) remains a unit failure so operators see contention.
+# Healthchecks /fail is also pinged by run-job.sh on overlap and job failure.
+SyslogIdentifier=mma-scheduler
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

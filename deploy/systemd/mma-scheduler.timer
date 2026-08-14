@@ -1,0 +1,17 @@
+# Production systemd timer (DWCS-504).
+# Five-minute cadence with Persistent=true so missed runs catch up after downtime.
+
+[Unit]
+Description=MMA model scheduler timer (every 5 minutes, DWCS-504)
+Documentation=file:///opt/mma-model/docs/runbooks/monitoring.md
+
+[Timer]
+OnCalendar=*:0/5
+# Catch up after downtime / reboot.
+Persistent=true
+# Slight randomized delay to avoid thundering with sibling host timers.
+RandomizedDelaySec=20
+Unit=mma-scheduler.service
+
+[Install]
+WantedBy=timers.target
