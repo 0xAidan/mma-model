@@ -14,7 +14,6 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from mma_model.backup.service import BackupError, BackupPaths, create_backup_bundle
 from mma_model.config import get_settings
 from mma_model.db.session import (
     _attach_sqlite_listeners,
@@ -2972,6 +2971,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.backup_cmd != "create":
             print(f"backup configuration error: unknown command {args.backup_cmd!r}")
             return EXIT_INTERNAL
+        # Deployment-compat: host cli.py is overlaid onto a pinned image that
+        # may predate mma_model.backup. Import only in the backup create
+        # handler so `jobs tick` does not fail at module import time.
+        # Prefer also overlaying host backup/ in deploy/run-job.sh.
+        from mma_model.backup.service import (  # noqa: PLC0415
+            BackupError,
+            BackupPaths,
+            create_backup_bundle,
+        )
+
         try:
             result = create_backup_bundle(
                 BackupPaths(

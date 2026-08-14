@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shutil
@@ -134,10 +135,13 @@ def test_run_job_uses_image_app_not_whole_repo_mount():
     assert "/opt/mma-model-src" not in text
     assert 'tick_root="/opt/mma-model-src"' not in text
     assert 'tick_root=/opt/mma-model-src' not in text
-    # Narrow overlay only (guard + cli), not the entire host tree.
+    # Narrow overlay only (guard + cli + backup/), not the entire host tree.
     assert "/app/src/mma_model/jobs/db_guard.py:ro" in text
     assert "/app/src/mma_model/cli.py:ro" in text
+    assert "/app/src/mma_model/backup:ro" in text
     assert "host_guard" in text and "host_cli" in text
+    assert "host_backup" in text
+    assert '[[ -d "${host_backup}" ]]' in text
     # Must not mount REPO_ROOT as a directory tick_root.
     assert not re.search(
         r'-v\s+"\$\{REPO_ROOT\}:/opt/mma-model-src',
@@ -147,6 +151,42 @@ def test_run_job_uses_image_app_not_whole_repo_mount():
         r'-v\s+"\$\{REPO_ROOT\}:[^"\s]+:ro"',
         text,
     )
+
+
+def test_run_job_overlays_backup_package_when_present():
+    """DWCS-505: overlaid host cli.py needs backup/ on pinned pre-backup images."""
+    text = _read(RUN_JOB)
+    assert 'host_backup="${REPO_ROOT}/src/mma_model/backup"' in text
+    assert '-v "${host_backup}:/app/src/mma_model/backup:ro"' in text
+    assert "backup/" in text
+    # Still never whole-repo mount.
+    assert not re.search(
+        r'-v\s+"\$\{REPO_ROOT\}:/opt/mma-model-src',
+        text,
+    )
+
+
+def test_cli_does_not_import_backup_at_module_level():
+    """Overlaid host cli.py must not import mma_model.backup at import time."""
+    cli_path = REPO_ROOT / "src" / "mma_model" / "cli.py"
+    source = cli_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(cli_path))
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert not node.module.startswith("mma_model.backup"), (
+                f"top-level import from {node.module} breaks pinned-image ticks"
+            )
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not alias.name.startswith("mma_model.backup"), (
+                    f"top-level import {alias.name} breaks pinned-image ticks"
+                )
+    # Line-start check: only unindented import lines (handler imports OK).
+    for line in source.splitlines():
+        assert not re.match(
+            r"^(from\s+mma_model\.backup\b|import\s+mma_model\.backup\b)",
+            line,
+        ), f"module-level backup import found: {line}"
 
 
 def test_backup_hook_delegates_to_real_backup():

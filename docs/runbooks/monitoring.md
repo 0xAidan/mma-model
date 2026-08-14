@@ -171,14 +171,17 @@ docker compose -f /opt/mma-model/deploy/compose.yaml run --rm --no-deps \
    --now <utc> --database-url sqlite:////data/mma.db"
 ```
 
-Until the next digest includes the DWCS-504 DB guard, `run-job.sh` may
-bind-mount **only** these host files onto the image tree:
+Until the next digest includes the DWCS-504 DB guard and DWCS-505 backup
+package, `run-job.sh` may bind-mount **only** these host paths onto the image
+tree:
 
 - `/opt/mma-model/src/mma_model/jobs/db_guard.py` → `/app/src/mma_model/jobs/db_guard.py`
 - `/opt/mma-model/src/mma_model/cli.py` → `/app/src/mma_model/cli.py`
+- `/opt/mma-model/src/mma_model/backup/` → `/app/src/mma_model/backup/` (directory)
 
 Do **not** mount the whole host repo as `tick_root` (that caused circular
-import failures).
+import failures). Host `cli.py` must not import `mma_model.backup` at module
+import time so `jobs tick` still starts if the backup overlay is missing.
 
 `--database-url` is required. Relative live URLs (`sqlite:///data/mma.db`,
 `sqlite:///./data/mma.db`) remain refused. The explicit absolute container URL

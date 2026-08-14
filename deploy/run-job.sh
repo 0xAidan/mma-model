@@ -16,10 +16,12 @@
 #
 # Pinned-image note (DWCS-503 digest): the console script resolves alembic /
 # contracts relative to site-packages. The worker therefore runs the CLI from
-# /app via PYTHONPATH=src. Until a later digest includes the DWCS-504 DB guard,
-# run-job may overlay only jobs/db_guard.py + cli.py onto /app/src/mma_model.
-# Never bind-mount the whole host repo as tick_root (circular import failure).
-# Production jobs use explicit sqlite:////data/mma.db (canonical /data/mma.db).
+# /app via PYTHONPATH=src. Until a later digest includes the DWCS-504 DB guard
+# and DWCS-505 backup package, run-job may overlay jobs/db_guard.py + cli.py
+# and (when present) the host src/mma_model/backup/ directory onto
+# /app/src/mma_model. Never bind-mount the whole host repo as tick_root
+# (circular import failure). Production jobs use explicit sqlite:////data/mma.db
+# (canonical /data/mma.db).
 
 set -euo pipefail
 
@@ -155,18 +157,28 @@ run_compose_tick() {
   # Do NOT bind-mount the whole host git tree as tick_root — that causes
   # circular module load failures (compute_code_hash / modeling.artifacts).
   #
-  # Until the next digest includes the DWCS-504 DB guard, overlay only:
-  #   jobs/db_guard.py  and  cli.py  (the guard call site)
-  # onto /app/src/mma_model/... when those host files exist.
+  # Until the next digest includes the DWCS-504 DB guard and DWCS-505 backup
+  # package, overlay only:
+  #   jobs/db_guard.py, cli.py, and (when present) backup/
+  # onto /app/src/mma_model/... when those host paths exist.
+  # Never mount the whole REPO_ROOT as tick_root.
   local -a volume_args=()
   local host_cli="${REPO_ROOT}/src/mma_model/cli.py"
   local host_guard="${REPO_ROOT}/src/mma_model/jobs/db_guard.py"
+  local host_backup="${REPO_ROOT}/src/mma_model/backup"
   if [[ -f "${host_guard}" && -f "${host_cli}" ]]; then
     volume_args=(
       -v "${host_guard}:/app/src/mma_model/jobs/db_guard.py:ro"
       -v "${host_cli}:/app/src/mma_model/cli.py:ro"
     )
-    log "overlay: db_guard.py + cli.py onto /app/src/mma_model"
+    local overlay_note="db_guard.py + cli.py"
+    if [[ -d "${host_backup}" ]]; then
+      volume_args+=(
+        -v "${host_backup}:/app/src/mma_model/backup:ro"
+      )
+      overlay_note="${overlay_note} + backup/"
+    fi
+    log "overlay: ${overlay_note} onto /app/src/mma_model"
   else
     log "overlay: skipped (host guard/cli missing; using image sources)"
   fi
