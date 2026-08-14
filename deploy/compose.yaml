@@ -18,9 +18,9 @@
 
 services:
   worker:
-    # Immutable digest from release run 31765682285 (DWCS-503 pin).
+    # Immutable digest from release run 31828508540 (live engine + health).
     # Keep the previous digest in deploy/image-digest.txt for rollback when set.
-    image: ghcr.io/0xaidan/mma-model@sha256:5f209cfdea78fd29907656aae4618c896443464ff7d71c52a1fe756b4d51d7d6
+    image: ghcr.io/0xaidan/mma-model@sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7
     pull_policy: never
     user: "10001:10001"
     read_only: true
