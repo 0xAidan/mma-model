@@ -14,7 +14,6 @@ from mma_model.db.tables.core import CanonicalBout, FighterSourceId
 from mma_model.db.tables.identity import IdentityScoringBlock
 from mma_model.db.tables.odds import OddsQuotaObservation
 from mma_model.db.tables.recommendations import OfficialPublication, PredictionGrade
-from mma_model.modeling.registry import load_model_registry
 from mma_model.observability.health import (
     HEALTH_COMPONENT_NAMES,
     HealthComponent,
@@ -214,6 +213,10 @@ def _odds_and_quota(
 
 
 def _model_component(*, as_of: datetime) -> HealthComponent:
+    # Deferred: modeling.registry -> artifacts -> backtest is circular if this
+    # module is imported while artifacts is still loading.
+    from mma_model.modeling.registry import load_model_registry
+
     try:
         state = load_model_registry(enforce_pinned_digest=False)
     except Exception as exc:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from mma_model.observability.assemble import assemble_health
 from mma_model.observability.errors import (
     BoundedRetryPolicy,
     is_non_retryable,
@@ -41,7 +40,6 @@ __all__ = [
     "HealthStatus",
     "PublishOutcome",
     "PublishValidationError",
-    "assemble_health",
     "build_health_report",
     "build_log_record",
     "dumps_health",
