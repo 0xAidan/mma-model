@@ -25,7 +25,7 @@ EVIDENCE = REPO_ROOT / "docs" / "deployment" / "dwcs-504-evidence.md"
 DEPLOY_RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "deploy.md"
 
 PINNED_DIGEST = (
-    "sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7"
+    "sha256:99d0aeb4c3af1ad4d733a793ac4e0407fed0fcf84d3a8c1f3a4f0fc6b943a5ae"
 )
 
 FORBIDDEN_DOC_TOKENS = (
