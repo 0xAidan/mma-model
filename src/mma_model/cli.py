@@ -174,7 +174,9 @@ from mma_model.observability.health import (
     dumps_health,
     load_health_state,
 )
+from mma_model.observability.publish_guard import PublishValidationError
 from mma_model.observability.schema import HealthSchemaError, validate_health_payload
+from mma_model.publish.publisher import publish_dashboard
 from mma_model.sources.policy import load_source_policy
 from mma_model.predict.backtest import walk_forward_backtest
 from mma_model.predict.train import (
@@ -1007,6 +1009,37 @@ def main(argv: list[str] | None = None) -> int:
         "--series",
         default="dwcs",
         choices=["dwcs"],
+    )
+
+    p_publish = sub.add_parser(
+        "publish",
+        help="Build and atomically publish versioned dashboard JSON (DWCS-500)",
+    )
+    p_publish.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output root for releases/ + current pointer",
+    )
+    p_publish.add_argument(
+        "--database-url",
+        default=None,
+        help="Disposable SQLite URL (never live data/mma.db)",
+    )
+    p_publish.add_argument(
+        "--event-id",
+        default=None,
+        help="Optional event id to project; defaults to all latest publications",
+    )
+    p_publish.add_argument(
+        "--release-id",
+        default=None,
+        help="Optional release id (default: release-<timestamp>)",
+    )
+    p_publish.add_argument(
+        "--window-slot",
+        default="manual",
+        help="Window slot label recorded in release.json",
     )
 
     p_feat = sub.add_parser("features", help="Cutoff-aware PIT feature tools")
@@ -2717,6 +2750,52 @@ def main(argv: list[str] | None = None) -> int:
         if args.strict:
             return int(report.exit_code)
         return EXIT_OK
+
+    if args.cmd == "publish":
+        output = Path(args.output)
+        db_url = getattr(args, "database_url", None)
+        if db_url is None:
+            db_url = get_settings().mma_database_url
+        raw_url = str(db_url).strip()
+        if not raw_url:
+            print("publish configuration error: empty --database-url")
+            return EXIT_INTERNAL
+        default_url = get_settings().mma_database_url
+        if (
+            is_prohibited_live_url(raw_url, default_url=default_url)
+            or raw_url in LIVE_DB_URLS
+            or raw_url.endswith("/data/mma.db")
+            or raw_url.endswith("data/mma.db")
+        ):
+            print("publish configuration error: refusing live data/mma.db")
+            return EXIT_INTERNAL
+        release_id = args.release_id or f"release-{datetime.now().strftime('%Y%m%dT%H%M%SZ')}"
+        engine = create_engine(raw_url, future=True)
+        _attach_sqlite_listeners(engine)
+        Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        try:
+            with Session() as session:
+                try:
+                    outcome = publish_dashboard(
+                        session,
+                        output_root=output,
+                        release_id=str(release_id),
+                        event_id=args.event_id,
+                        window_slot=str(args.window_slot),
+                    )
+                except PublishValidationError as exc:
+                    print(f"publish validation failed; current unchanged: {exc}")
+                    return EXIT_INTERNAL
+                except Exception as exc:  # noqa: BLE001
+                    print(f"publish failed: {exc}")
+                    return EXIT_INTERNAL
+            print(
+                f"publish ok release_id={outcome.current_release_id} "
+                f"root={output}"
+            )
+            return EXIT_OK
+        finally:
+            engine.dispose()
 
     if args.cmd == "features":
         if args.features_cmd != "audit":

@@ -1,0 +1,699 @@
+{
+  "as_of": "2026-08-11T17:00:05Z",
+  "confirmed_value_ranked": [
+    "bout-cv"
+  ],
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "event_id": {
+    "presence": "known",
+    "value": "evt-1"
+  },
+  "matchups": [
+    {
+      "blockers": [],
+      "bout_id": "bout-cv",
+      "card_change_warnings": [],
+      "detail": "fixture confirmed_value",
+      "event_id": "evt-1",
+      "fighters": [
+        {
+          "corner": "a",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        },
+        {
+          "corner": "b",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        }
+      ],
+      "hashes": {
+        "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "thresholds_hash": "7977ce2cb253601c6b1e210a2fc303f4771f77fb78f67b2f68e7be1619de643b"
+      },
+      "line_point": null,
+      "market_family": "moneyline",
+      "markets": [
+        {
+          "is_primary": true,
+          "line_point": null,
+          "market_family": "moneyline",
+          "maturity": "qualified",
+          "outcome_key": "fighter_a",
+          "prices": {
+            "actionable_american": 110.0,
+            "actionable_decimal": 2.1,
+            "actionable_or_better": "+110 or better",
+            "exact_ev": 0.32000000000000006,
+            "fair_american": 100.0,
+            "fair_decimal": 2.0,
+            "fair_or_better": "+100 or better",
+            "line_freshness": "fresh",
+            "line_movement": null,
+            "model_fair_probability": 0.55,
+            "observed": {
+              "american_odds": 140.0,
+              "decimal_odds": 2.4,
+              "source_label": "fixture_book (automatic)",
+              "source_type": "automatic",
+              "sportsbook": "fixture_book",
+              "timestamp": "2026-08-11T17:00:05Z"
+            },
+            "price_availability": "available",
+            "strong_value_american": 120.0,
+            "strong_value_decimal": 2.2,
+            "strong_value_or_better": "+120 or better"
+          },
+          "reason_plain": "fixture confirmed_value",
+          "reasons": [
+            {
+              "code": "confirmed_value",
+              "message": "confirmed_value"
+            }
+          ],
+          "selection_id": "evt-1:bout-cv:moneyline:fighter_a"
+        }
+      ],
+      "maturity": "qualified",
+      "outcome_key": "fighter_a",
+      "performance_lane": "qualified",
+      "prices": {
+        "actionable_american": 110.0,
+        "actionable_decimal": 2.1,
+        "actionable_or_better": "+110 or better",
+        "exact_ev": 0.32000000000000006,
+        "fair_american": 100.0,
+        "fair_decimal": 2.0,
+        "fair_or_better": "+100 or better",
+        "line_freshness": "fresh",
+        "line_movement": null,
+        "model_fair_probability": 0.55,
+        "observed": {
+          "american_odds": 140.0,
+          "decimal_odds": 2.4,
+          "source_label": "fixture_book (automatic)",
+          "source_type": "automatic",
+          "sportsbook": "fixture_book",
+          "timestamp": "2026-08-11T17:00:05Z"
+        },
+        "price_availability": "available",
+        "strong_value_american": 120.0,
+        "strong_value_decimal": 2.2,
+        "strong_value_or_better": "+120 or better"
+      },
+      "primary_reason": "confirmed_value",
+      "primary_state": "confirmed_value",
+      "publication_id": "1dc15293-a934-4e38-9313-9fd62c0078e8",
+      "reason_plain": "fixture confirmed_value",
+      "reasons": [
+        {
+          "code": "confirmed_value",
+          "message": "confirmed_value"
+        }
+      ],
+      "selection_id": "evt-1:bout-cv:moneyline:fighter_a"
+    },
+    {
+      "blockers": [
+        {
+          "code": "no_bet",
+          "message": "no_bet"
+        }
+      ],
+      "bout_id": "bout-nb",
+      "card_change_warnings": [],
+      "detail": "fixture no_bet",
+      "event_id": "evt-1",
+      "fighters": [
+        {
+          "corner": "a",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        },
+        {
+          "corner": "b",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        }
+      ],
+      "hashes": {
+        "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "thresholds_hash": null
+      },
+      "line_point": null,
+      "market_family": "moneyline",
+      "markets": [
+        {
+          "is_primary": true,
+          "line_point": null,
+          "market_family": "moneyline",
+          "maturity": "experimental",
+          "outcome_key": "fighter_a",
+          "prices": {
+            "actionable_american": null,
+            "actionable_decimal": null,
+            "actionable_or_better": null,
+            "exact_ev": null,
+            "fair_american": null,
+            "fair_decimal": null,
+            "fair_or_better": null,
+            "line_freshness": "unknown",
+            "line_movement": null,
+            "model_fair_probability": 0.55,
+            "observed": null,
+            "price_availability": "unavailable",
+            "strong_value_american": null,
+            "strong_value_decimal": null,
+            "strong_value_or_better": null
+          },
+          "reason_plain": "fixture no_bet",
+          "reasons": [
+            {
+              "code": "no_bet",
+              "message": "no_bet"
+            }
+          ],
+          "selection_id": "evt-1:bout-nb:moneyline:fighter_a"
+        }
+      ],
+      "maturity": "experimental",
+      "outcome_key": "fighter_a",
+      "performance_lane": "experimental",
+      "prices": {
+        "actionable_american": null,
+        "actionable_decimal": null,
+        "actionable_or_better": null,
+        "exact_ev": null,
+        "fair_american": null,
+        "fair_decimal": null,
+        "fair_or_better": null,
+        "line_freshness": "unknown",
+        "line_movement": null,
+        "model_fair_probability": 0.55,
+        "observed": null,
+        "price_availability": "unavailable",
+        "strong_value_american": null,
+        "strong_value_decimal": null,
+        "strong_value_or_better": null
+      },
+      "primary_reason": "no_bet",
+      "primary_state": "no_bet",
+      "publication_id": "ea3f235c-e132-4e93-852f-d52d52387e4e",
+      "reason_plain": "fixture no_bet",
+      "reasons": [
+        {
+          "code": "no_bet",
+          "message": "no_bet"
+        }
+      ],
+      "selection_id": "evt-1:bout-nb:moneyline:fighter_a"
+    },
+    {
+      "blockers": [],
+      "bout_id": "bout-pt",
+      "card_change_warnings": [],
+      "detail": "fixture price_target",
+      "event_id": "evt-1",
+      "fighters": [
+        {
+          "corner": "a",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        },
+        {
+          "corner": "b",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        }
+      ],
+      "hashes": {
+        "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "thresholds_hash": "7977ce2cb253601c6b1e210a2fc303f4771f77fb78f67b2f68e7be1619de643b"
+      },
+      "line_point": null,
+      "market_family": "moneyline",
+      "markets": [
+        {
+          "is_primary": true,
+          "line_point": null,
+          "market_family": "moneyline",
+          "maturity": "paper",
+          "outcome_key": "fighter_a",
+          "prices": {
+            "actionable_american": 110.0,
+            "actionable_decimal": 2.1,
+            "actionable_or_better": "+110 or better",
+            "exact_ev": null,
+            "fair_american": 100.0,
+            "fair_decimal": 2.0,
+            "fair_or_better": "+100 or better",
+            "line_freshness": "unknown",
+            "line_movement": null,
+            "model_fair_probability": 0.55,
+            "observed": null,
+            "price_availability": "unavailable",
+            "strong_value_american": 120.0,
+            "strong_value_decimal": 2.2,
+            "strong_value_or_better": "+120 or better"
+          },
+          "reason_plain": "fixture price_target",
+          "reasons": [
+            {
+              "code": "price_target",
+              "message": "price_target"
+            }
+          ],
+          "selection_id": "evt-1:bout-pt:moneyline:fighter_a"
+        }
+      ],
+      "maturity": "paper",
+      "outcome_key": "fighter_a",
+      "performance_lane": "paper",
+      "prices": {
+        "actionable_american": 110.0,
+        "actionable_decimal": 2.1,
+        "actionable_or_better": "+110 or better",
+        "exact_ev": null,
+        "fair_american": 100.0,
+        "fair_decimal": 2.0,
+        "fair_or_better": "+100 or better",
+        "line_freshness": "unknown",
+        "line_movement": null,
+        "model_fair_probability": 0.55,
+        "observed": null,
+        "price_availability": "unavailable",
+        "strong_value_american": 120.0,
+        "strong_value_decimal": 2.2,
+        "strong_value_or_better": "+120 or better"
+      },
+      "primary_reason": "price_target",
+      "primary_state": "price_target",
+      "publication_id": "8492fd62-af87-4cc4-ae46-98809e47ae29",
+      "reason_plain": "fixture price_target",
+      "reasons": [
+        {
+          "code": "price_target",
+          "message": "price_target"
+        }
+      ],
+      "selection_id": "evt-1:bout-pt:moneyline:fighter_a"
+    },
+    {
+      "blockers": [
+        {
+          "code": "no_bet",
+          "message": "no_bet"
+        }
+      ],
+      "bout_id": "bout-repl",
+      "card_change_warnings": [
+        {
+          "code": "fighter_replaced",
+          "event_type": "replacement_invalidated",
+          "message": "replacement on card",
+          "observed_at": "2026-08-11T17:00:05Z"
+        }
+      ],
+      "detail": "fixture no_bet",
+      "event_id": "evt-1",
+      "fighters": [
+        {
+          "corner": "a",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        },
+        {
+          "corner": "b",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        }
+      ],
+      "hashes": {
+        "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "thresholds_hash": null
+      },
+      "line_point": null,
+      "market_family": "moneyline",
+      "markets": [
+        {
+          "is_primary": true,
+          "line_point": null,
+          "market_family": "moneyline",
+          "maturity": "paper",
+          "outcome_key": "fighter_a",
+          "prices": {
+            "actionable_american": null,
+            "actionable_decimal": null,
+            "actionable_or_better": null,
+            "exact_ev": null,
+            "fair_american": null,
+            "fair_decimal": null,
+            "fair_or_better": null,
+            "line_freshness": "unknown",
+            "line_movement": null,
+            "model_fair_probability": 0.55,
+            "observed": null,
+            "price_availability": "unavailable",
+            "strong_value_american": null,
+            "strong_value_decimal": null,
+            "strong_value_or_better": null
+          },
+          "reason_plain": "fixture no_bet",
+          "reasons": [
+            {
+              "code": "no_bet",
+              "message": "no_bet"
+            }
+          ],
+          "selection_id": "evt-1:bout-repl:moneyline:fighter_a"
+        }
+      ],
+      "maturity": "paper",
+      "outcome_key": "fighter_a",
+      "performance_lane": "paper",
+      "prices": {
+        "actionable_american": null,
+        "actionable_decimal": null,
+        "actionable_or_better": null,
+        "exact_ev": null,
+        "fair_american": null,
+        "fair_decimal": null,
+        "fair_or_better": null,
+        "line_freshness": "unknown",
+        "line_movement": null,
+        "model_fair_probability": 0.55,
+        "observed": null,
+        "price_availability": "unavailable",
+        "strong_value_american": null,
+        "strong_value_decimal": null,
+        "strong_value_or_better": null
+      },
+      "primary_reason": "no_bet",
+      "primary_state": "no_bet",
+      "publication_id": "7a6366c7-dda2-4413-a05e-bb27a11b6199",
+      "reason_plain": "fixture no_bet",
+      "reasons": [
+        {
+          "code": "no_bet",
+          "message": "no_bet"
+        }
+      ],
+      "selection_id": "evt-1:bout-repl:moneyline:fighter_a"
+    },
+    {
+      "blockers": [],
+      "bout_id": "bout-stale",
+      "card_change_warnings": [],
+      "detail": "fixture price_target",
+      "event_id": "evt-1",
+      "fighters": [
+        {
+          "corner": "a",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        },
+        {
+          "corner": "b",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        }
+      ],
+      "hashes": {
+        "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "thresholds_hash": "7977ce2cb253601c6b1e210a2fc303f4771f77fb78f67b2f68e7be1619de643b"
+      },
+      "line_point": null,
+      "market_family": "moneyline",
+      "markets": [
+        {
+          "is_primary": true,
+          "line_point": null,
+          "market_family": "moneyline",
+          "maturity": "paper",
+          "outcome_key": "fighter_a",
+          "prices": {
+            "actionable_american": 110.0,
+            "actionable_decimal": 2.1,
+            "actionable_or_better": "+110 or better",
+            "exact_ev": null,
+            "fair_american": 100.0,
+            "fair_decimal": 2.0,
+            "fair_or_better": "+100 or better",
+            "line_freshness": "stale",
+            "line_movement": null,
+            "model_fair_probability": 0.55,
+            "observed": null,
+            "price_availability": "stale",
+            "strong_value_american": 120.0,
+            "strong_value_decimal": 2.2,
+            "strong_value_or_better": "+120 or better"
+          },
+          "reason_plain": "fixture price_target",
+          "reasons": [
+            {
+              "code": "price_target",
+              "message": "price_target"
+            }
+          ],
+          "selection_id": "evt-1:bout-stale:moneyline:fighter_a"
+        }
+      ],
+      "maturity": "paper",
+      "outcome_key": "fighter_a",
+      "performance_lane": "paper",
+      "prices": {
+        "actionable_american": 110.0,
+        "actionable_decimal": 2.1,
+        "actionable_or_better": "+110 or better",
+        "exact_ev": null,
+        "fair_american": 100.0,
+        "fair_decimal": 2.0,
+        "fair_or_better": "+100 or better",
+        "line_freshness": "stale",
+        "line_movement": null,
+        "model_fair_probability": 0.55,
+        "observed": null,
+        "price_availability": "stale",
+        "strong_value_american": 120.0,
+        "strong_value_decimal": 2.2,
+        "strong_value_or_better": "+120 or better"
+      },
+      "primary_reason": "price_target",
+      "primary_state": "price_target",
+      "publication_id": "d3b36dcf-56fd-4b34-a146-60746decf74b",
+      "reason_plain": "fixture price_target",
+      "reasons": [
+        {
+          "code": "price_target",
+          "message": "price_target"
+        }
+      ],
+      "selection_id": "evt-1:bout-stale:moneyline:fighter_a"
+    },
+    {
+      "blockers": [],
+      "bout_id": "bout-unavail",
+      "card_change_warnings": [],
+      "detail": "fixture price_target",
+      "event_id": "evt-1",
+      "fighters": [
+        {
+          "corner": "a",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        },
+        {
+          "corner": "b",
+          "display_name": {
+            "presence": "unknown",
+            "value": null
+          },
+          "fighter_id": {
+            "presence": "missing",
+            "value": null
+          }
+        }
+      ],
+      "hashes": {
+        "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "config_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "data_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "feature_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "model_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "policy_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "thresholds_hash": "7977ce2cb253601c6b1e210a2fc303f4771f77fb78f67b2f68e7be1619de643b"
+      },
+      "line_point": null,
+      "market_family": "moneyline",
+      "markets": [
+        {
+          "is_primary": true,
+          "line_point": null,
+          "market_family": "moneyline",
+          "maturity": "paper",
+          "outcome_key": "fighter_a",
+          "prices": {
+            "actionable_american": 110.0,
+            "actionable_decimal": 2.1,
+            "actionable_or_better": "+110 or better",
+            "exact_ev": null,
+            "fair_american": 100.0,
+            "fair_decimal": 2.0,
+            "fair_or_better": "+100 or better",
+            "line_freshness": "unknown",
+            "line_movement": null,
+            "model_fair_probability": 0.55,
+            "observed": null,
+            "price_availability": "unavailable",
+            "strong_value_american": 120.0,
+            "strong_value_decimal": 2.2,
+            "strong_value_or_better": "+120 or better"
+          },
+          "reason_plain": "fixture price_target",
+          "reasons": [
+            {
+              "code": "price_target",
+              "message": "price_target"
+            }
+          ],
+          "selection_id": "evt-1:bout-unavail:moneyline:fighter_a"
+        }
+      ],
+      "maturity": "paper",
+      "outcome_key": "fighter_a",
+      "performance_lane": "paper",
+      "prices": {
+        "actionable_american": 110.0,
+        "actionable_decimal": 2.1,
+        "actionable_or_better": "+110 or better",
+        "exact_ev": null,
+        "fair_american": 100.0,
+        "fair_decimal": 2.0,
+        "fair_or_better": "+100 or better",
+        "line_freshness": "unknown",
+        "line_movement": null,
+        "model_fair_probability": 0.55,
+        "observed": null,
+        "price_availability": "unavailable",
+        "strong_value_american": 120.0,
+        "strong_value_decimal": 2.2,
+        "strong_value_or_better": "+120 or better"
+      },
+      "primary_reason": "price_target",
+      "primary_state": "price_target",
+      "publication_id": "ff8f78c4-a2b1-4d3e-af13-c9eb3c9c04ba",
+      "reason_plain": "fixture price_target",
+      "reasons": [
+        {
+          "code": "price_target",
+          "message": "price_target"
+        }
+      ],
+      "selection_id": "evt-1:bout-unavail:moneyline:fighter_a"
+    }
+  ],
+  "no_bet_ids": [
+    "bout-nb",
+    "bout-repl"
+  ],
+  "price_target_watchlist": [
+    "bout-pt",
+    "bout-stale",
+    "bout-unavail"
+  ],
+  "schema_version": 1,
+  "series": "dwcs",
+  "ticket": "DWCS-500"
+}

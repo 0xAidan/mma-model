@@ -1,0 +1,25 @@
+{
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "descriptions": {
+    "current-event.json": "Current event identity, countdown, last update",
+    "health.json": "Dashboard health projection (separate from DWCS-403 contract)",
+    "history.json": "Time series points with bucket-separated ROI/CLV rules",
+    "manifest.json": "Ordered list of published dashboard files",
+    "matchups.json": "Matchup card with one primary state per bout",
+    "performance.json": "Separated predictive / confirmed-price / price-target metrics",
+    "release.json": "Release identity, file list, and content hashes"
+  },
+  "files": [
+    "release.json",
+    "manifest.json",
+    "current-event.json",
+    "matchups.json",
+    "performance.json",
+    "history.json",
+    "health.json"
+  ],
+  "release_id": "golden-v1",
+  "schema_version": 1,
+  "ticket": "DWCS-500"
+}

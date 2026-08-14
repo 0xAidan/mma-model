@@ -1,0 +1,1641 @@
+{
+  "$defs": {
+    "ArtifactHashes": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Hash"
+        },
+        "config_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Config Hash"
+        },
+        "data_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Hash"
+        },
+        "feature_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Hash"
+        },
+        "model_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Hash"
+        },
+        "policy_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy Hash"
+        },
+        "thresholds_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thresholds Hash"
+        }
+      },
+      "title": "ArtifactHashes",
+      "type": "object"
+    },
+    "ConfirmedPriceMetrics": {
+      "additionalProperties": false,
+      "description": "Betting results only when observed prices exist.",
+      "properties": {
+        "clv": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clv"
+        },
+        "drawdown": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Drawdown"
+        },
+        "flat_unit_roi": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flat Unit Roi"
+        },
+        "hit_rate": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hit Rate"
+        },
+        "pick_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Pick Count",
+          "type": "integer"
+        }
+      },
+      "title": "ConfirmedPriceMetrics",
+      "type": "object"
+    },
+    "CountdownFields": {
+      "additionalProperties": false,
+      "properties": {
+        "event_start_at": {
+          "$ref": "#/$defs/OptionalStringField"
+        },
+        "is_past": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Past"
+        },
+        "seconds_until_start": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Seconds Until Start"
+        }
+      },
+      "required": [
+        "event_start_at"
+      ],
+      "title": "CountdownFields",
+      "type": "object"
+    },
+    "CurrentEventDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "countdown": {
+          "$ref": "#/$defs/CountdownFields"
+        },
+        "event_date": {
+          "$ref": "#/$defs/OptionalStringField"
+        },
+        "event_id": {
+          "$ref": "#/$defs/OptionalStringField"
+        },
+        "last_successful_update_at": {
+          "$ref": "#/$defs/OptionalStringField"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "series": {
+          "const": "dwcs",
+          "default": "dwcs",
+          "title": "Series",
+          "type": "string"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        },
+        "title": {
+          "$ref": "#/$defs/OptionalStringField"
+        }
+      },
+      "required": [
+        "event_id",
+        "title",
+        "event_date",
+        "countdown",
+        "last_successful_update_at",
+        "as_of"
+      ],
+      "title": "CurrentEventDocument",
+      "type": "object"
+    },
+    "DashboardHealthComponent": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "name": {
+          "enum": [
+            "pipeline",
+            "data",
+            "identity",
+            "odds",
+            "model",
+            "grading",
+            "backup",
+            "quota",
+            "freshness"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/HealthStatusView"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "as_of"
+      ],
+      "title": "DashboardHealthComponent",
+      "type": "object"
+    },
+    "DashboardHealthDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/DashboardHealthComponent"
+          },
+          "title": "Components",
+          "type": "array"
+        },
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "series": {
+          "const": "dwcs",
+          "default": "dwcs",
+          "title": "Series",
+          "type": "string"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "as_of",
+        "components"
+      ],
+      "title": "DashboardHealthDocument",
+      "type": "object"
+    },
+    "FieldPresence": {
+      "description": "Explicit presence for sparse event metadata (never invent title/date).",
+      "enum": [
+        "known",
+        "missing",
+        "unknown"
+      ],
+      "title": "FieldPresence",
+      "type": "string"
+    },
+    "FighterSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "corner": {
+          "default": "unknown",
+          "enum": [
+            "a",
+            "b",
+            "unknown"
+          ],
+          "title": "Corner",
+          "type": "string"
+        },
+        "display_name": {
+          "$ref": "#/$defs/OptionalStringField"
+        },
+        "fighter_id": {
+          "$ref": "#/$defs/OptionalStringField"
+        }
+      },
+      "required": [
+        "fighter_id",
+        "display_name"
+      ],
+      "title": "FighterSummary",
+      "type": "object"
+    },
+    "HealthStatusView": {
+      "enum": [
+        "healthy",
+        "missing",
+        "stale",
+        "blocked",
+        "failed"
+      ],
+      "title": "HealthStatusView",
+      "type": "string"
+    },
+    "HistoryDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "filters": {
+          "$ref": "#/$defs/PerformanceFilters"
+        },
+        "points": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/HistoryPoint"
+          },
+          "title": "Points",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "series": {
+          "const": "dwcs",
+          "default": "dwcs",
+          "title": "Series",
+          "type": "string"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "as_of"
+      ],
+      "title": "HistoryDocument",
+      "type": "object"
+    },
+    "HistoryPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "minLength": 1,
+          "title": "At",
+          "type": "string"
+        },
+        "bucket": {
+          "enum": [
+            "predictive",
+            "confirmed_price",
+            "price_target_only"
+          ],
+          "title": "Bucket",
+          "type": "string"
+        },
+        "clv": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clv"
+        },
+        "flat_unit_roi": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flat Unit Roi"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "lane": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PerformanceLaneView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "at",
+        "label",
+        "bucket"
+      ],
+      "title": "HistoryPoint",
+      "type": "object"
+    },
+    "LaneMetricsBucket": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmed_price": {
+          "$ref": "#/$defs/ConfirmedPriceMetrics"
+        },
+        "lane": {
+          "$ref": "#/$defs/PerformanceLaneView"
+        },
+        "predictive": {
+          "$ref": "#/$defs/PredictiveMetrics"
+        },
+        "price_target_only": {
+          "$ref": "#/$defs/PriceTargetOnlyMetrics"
+        }
+      },
+      "required": [
+        "lane"
+      ],
+      "title": "LaneMetricsBucket",
+      "type": "object"
+    },
+    "LineFreshness": {
+      "enum": [
+        "fresh",
+        "stale",
+        "unknown"
+      ],
+      "title": "LineFreshness",
+      "type": "string"
+    },
+    "ManifestDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "descriptions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Descriptions",
+          "type": "object"
+        },
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "release_id": {
+          "minLength": 1,
+          "title": "Release Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "release_id",
+        "files"
+      ],
+      "title": "ManifestDocument",
+      "type": "object"
+    },
+    "MatchupCardChangeWarning": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "event_type": {
+          "minLength": 1,
+          "title": "Event Type",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "observed_at": {
+          "minLength": 1,
+          "title": "Observed At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "event_type",
+        "observed_at"
+      ],
+      "title": "MatchupCardChangeWarning",
+      "type": "object"
+    },
+    "MatchupMarket": {
+      "additionalProperties": false,
+      "description": "One market projection under a bout (primary or additional prediction).",
+      "properties": {
+        "is_primary": {
+          "default": false,
+          "title": "Is Primary",
+          "type": "boolean"
+        },
+        "line_point": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line Point"
+        },
+        "market_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Market Family"
+        },
+        "maturity": {
+          "$ref": "#/$defs/PerformanceLaneView"
+        },
+        "outcome_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outcome Key"
+        },
+        "prices": {
+          "$ref": "#/$defs/MatchupPrices"
+        },
+        "reason_plain": {
+          "default": "",
+          "title": "Reason Plain",
+          "type": "string"
+        },
+        "reasons": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReasonBlocker"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "selection_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selection Id"
+        }
+      },
+      "required": [
+        "prices",
+        "maturity"
+      ],
+      "title": "MatchupMarket",
+      "type": "object"
+    },
+    "MatchupPrices": {
+      "additionalProperties": false,
+      "description": "Sportsbook-agnostic thresholds plus optional observed enrichment.",
+      "properties": {
+        "actionable_american": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actionable American"
+        },
+        "actionable_decimal": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actionable Decimal"
+        },
+        "actionable_or_better": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actionable Or Better"
+        },
+        "exact_ev": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exact Ev"
+        },
+        "fair_american": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fair American"
+        },
+        "fair_decimal": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fair Decimal"
+        },
+        "fair_or_better": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fair Or Better"
+        },
+        "line_freshness": {
+          "$ref": "#/$defs/LineFreshness",
+          "default": "unknown"
+        },
+        "line_movement": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line Movement"
+        },
+        "model_fair_probability": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 1.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Fair Probability"
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservedPriceView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "price_availability": {
+          "$ref": "#/$defs/PriceAvailability",
+          "default": "unavailable"
+        },
+        "strong_value_american": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strong Value American"
+        },
+        "strong_value_decimal": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 1.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strong Value Decimal"
+        },
+        "strong_value_or_better": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Strong Value Or Better"
+        }
+      },
+      "title": "MatchupPrices",
+      "type": "object"
+    },
+    "MatchupRow": {
+      "additionalProperties": false,
+      "properties": {
+        "blockers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReasonBlocker"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "bout_id": {
+          "minLength": 1,
+          "title": "Bout Id",
+          "type": "string"
+        },
+        "card_change_warnings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MatchupCardChangeWarning"
+          },
+          "title": "Card Change Warnings",
+          "type": "array"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "fighters": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FighterSummary"
+          },
+          "title": "Fighters",
+          "type": "array"
+        },
+        "hashes": {
+          "$ref": "#/$defs/ArtifactHashes"
+        },
+        "line_point": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line Point"
+        },
+        "market_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Market Family"
+        },
+        "markets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MatchupMarket"
+          },
+          "title": "Markets",
+          "type": "array"
+        },
+        "maturity": {
+          "$ref": "#/$defs/PerformanceLaneView"
+        },
+        "outcome_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Outcome Key"
+        },
+        "performance_lane": {
+          "$ref": "#/$defs/PerformanceLaneView"
+        },
+        "prices": {
+          "$ref": "#/$defs/MatchupPrices"
+        },
+        "primary_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Primary Reason"
+        },
+        "primary_state": {
+          "$ref": "#/$defs/RecommendationStateView"
+        },
+        "publication_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publication Id"
+        },
+        "reason_plain": {
+          "default": "",
+          "title": "Reason Plain",
+          "type": "string"
+        },
+        "reasons": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReasonBlocker"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "selection_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selection Id"
+        }
+      },
+      "required": [
+        "bout_id",
+        "event_id",
+        "primary_state",
+        "performance_lane",
+        "maturity",
+        "prices"
+      ],
+      "title": "MatchupRow",
+      "type": "object"
+    },
+    "MatchupsDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "confirmed_value_ranked": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Confirmed Value Ranked",
+          "type": "array"
+        },
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "event_id": {
+          "$ref": "#/$defs/OptionalStringField"
+        },
+        "matchups": {
+          "items": {
+            "$ref": "#/$defs/MatchupRow"
+          },
+          "title": "Matchups",
+          "type": "array"
+        },
+        "no_bet_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "No Bet Ids",
+          "type": "array"
+        },
+        "price_target_watchlist": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Price Target Watchlist",
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "series": {
+          "const": "dwcs",
+          "default": "dwcs",
+          "title": "Series",
+          "type": "string"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "as_of",
+        "matchups"
+      ],
+      "title": "MatchupsDocument",
+      "type": "object"
+    },
+    "ObservedPriceView": {
+      "additionalProperties": false,
+      "properties": {
+        "american_odds": {
+          "title": "American Odds",
+          "type": "number"
+        },
+        "decimal_odds": {
+          "exclusiveMinimum": 1.0,
+          "title": "Decimal Odds",
+          "type": "number"
+        },
+        "source_label": {
+          "minLength": 1,
+          "title": "Source Label",
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/QuoteSourceTypeView"
+        },
+        "sportsbook": {
+          "minLength": 1,
+          "title": "Sportsbook",
+          "type": "string"
+        },
+        "timestamp": {
+          "minLength": 1,
+          "title": "Timestamp",
+          "type": "string"
+        }
+      },
+      "required": [
+        "decimal_odds",
+        "american_odds",
+        "sportsbook",
+        "source_type",
+        "source_label",
+        "timestamp"
+      ],
+      "title": "ObservedPriceView",
+      "type": "object"
+    },
+    "OptionalStringField": {
+      "additionalProperties": false,
+      "properties": {
+        "presence": {
+          "$ref": "#/$defs/FieldPresence"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "presence"
+      ],
+      "title": "OptionalStringField",
+      "type": "object"
+    },
+    "PerformanceDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "by_lane": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LaneMetricsBucket"
+          },
+          "title": "By Lane",
+          "type": "array"
+        },
+        "confirmed_price": {
+          "$ref": "#/$defs/ConfirmedPriceMetrics"
+        },
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "filters": {
+          "$ref": "#/$defs/PerformanceFilters"
+        },
+        "predictive": {
+          "$ref": "#/$defs/PredictiveMetrics"
+        },
+        "price_target_only": {
+          "$ref": "#/$defs/PriceTargetOnlyMetrics"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "series": {
+          "const": "dwcs",
+          "default": "dwcs",
+          "title": "Series",
+          "type": "string"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "as_of"
+      ],
+      "title": "PerformanceDocument",
+      "type": "object"
+    },
+    "PerformanceFilters": {
+      "additionalProperties": false,
+      "properties": {
+        "data_quality": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Quality"
+        },
+        "market": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Market"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "season": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Season"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        }
+      },
+      "title": "PerformanceFilters",
+      "type": "object"
+    },
+    "PerformanceLaneView": {
+      "enum": [
+        "qualified",
+        "paper",
+        "experimental"
+      ],
+      "title": "PerformanceLaneView",
+      "type": "string"
+    },
+    "PredictiveMetrics": {
+      "additionalProperties": false,
+      "description": "All model outputs \u2014 proper scoring only (no ROI/CLV).",
+      "properties": {
+        "brier": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Brier"
+        },
+        "calibration_intercept": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration Intercept"
+        },
+        "calibration_slope": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration Slope"
+        },
+        "log_loss": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Log Loss"
+        },
+        "sample_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        }
+      },
+      "title": "PredictiveMetrics",
+      "type": "object"
+    },
+    "PriceAvailability": {
+      "enum": [
+        "available",
+        "stale",
+        "unavailable"
+      ],
+      "title": "PriceAvailability",
+      "type": "string"
+    },
+    "PriceTargetOnlyMetrics": {
+      "additionalProperties": false,
+      "description": "Price-target outputs \u2014 ROI/CLV/exact EV are schema-illegal here.",
+      "properties": {
+        "pick_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Pick Count",
+          "type": "integer"
+        },
+        "sporting_grade_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Sporting Grade Count",
+          "type": "integer"
+        }
+      },
+      "title": "PriceTargetOnlyMetrics",
+      "type": "object"
+    },
+    "QuoteSourceTypeView": {
+      "enum": [
+        "automatic",
+        "user_observed"
+      ],
+      "title": "QuoteSourceTypeView",
+      "type": "string"
+    },
+    "ReasonBlocker": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ReasonBlocker",
+      "type": "object"
+    },
+    "RecommendationStateView": {
+      "enum": [
+        "confirmed_value",
+        "price_target",
+        "no_bet"
+      ],
+      "title": "RecommendationStateView",
+      "type": "string"
+    },
+    "ReleaseDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "minLength": 1,
+          "title": "As Of",
+          "type": "string"
+        },
+        "contract_id": {
+          "const": "dwcs_dashboard",
+          "default": "dwcs_dashboard",
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "default": "1.0.0",
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Event Id"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/ReleaseFileEntry"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "hashes": {
+          "$ref": "#/$defs/ArtifactHashes"
+        },
+        "publications": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Publications",
+          "type": "integer"
+        },
+        "release_id": {
+          "minLength": 1,
+          "title": "Release Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "series": {
+          "const": "dwcs",
+          "default": "dwcs",
+          "title": "Series",
+          "type": "string"
+        },
+        "ticket": {
+          "const": "DWCS-500",
+          "default": "DWCS-500",
+          "title": "Ticket",
+          "type": "string"
+        },
+        "window_slot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Slot"
+        }
+      },
+      "required": [
+        "release_id",
+        "as_of",
+        "files"
+      ],
+      "title": "ReleaseDocument",
+      "type": "object"
+    },
+    "ReleaseFileEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "title": "ReleaseFileEntry",
+      "type": "object"
+    }
+  },
+  "$id": "https://mma-model.local/contracts/dashboard-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "description": "Versioned static dashboard JSON published by the Python worker. Python Pydantic models are the source of truth.",
+  "properties": {
+    "current-event.json": {
+      "$ref": "#/$defs/CurrentEventDocument"
+    },
+    "health.json": {
+      "$ref": "#/$defs/DashboardHealthDocument"
+    },
+    "history.json": {
+      "$ref": "#/$defs/HistoryDocument"
+    },
+    "manifest.json": {
+      "$ref": "#/$defs/ManifestDocument"
+    },
+    "matchups.json": {
+      "$ref": "#/$defs/MatchupsDocument"
+    },
+    "performance.json": {
+      "$ref": "#/$defs/PerformanceDocument"
+    },
+    "release.json": {
+      "$ref": "#/$defs/ReleaseDocument"
+    }
+  },
+  "required": [
+    "release.json",
+    "manifest.json",
+    "current-event.json",
+    "matchups.json",
+    "performance.json",
+    "history.json",
+    "health.json"
+  ],
+  "schema_version": 1,
+  "ticket": "DWCS-500",
+  "title": "DWCS-500 dashboard publish contract",
+  "type": "object"
+}
