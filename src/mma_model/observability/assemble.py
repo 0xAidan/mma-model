@@ -24,9 +24,11 @@ from mma_model.observability.health import (
 )
 from mma_model.observability.publish_guard import FilesystemPublishPointer
 from mma_model.odds.events_for_schedule import load_upcoming_dwcs_events_from_db
+from mma_model.sources.espn_public.parser import ESPN_IDENTITY_SOURCE
 from mma_model.sources.policy import SourceId
 
 UFCSTATS_SOURCE = SourceId.UFCSTATS_PUBLIC.value
+LIVE_IDENTITY_SOURCES = (ESPN_IDENTITY_SOURCE, UFCSTATS_SOURCE)
 BACKUP_STALE_AFTER = timedelta(hours=36)
 PUBLISH_STALE_AFTER = timedelta(hours=26)
 QUOTA_STALE_AFTER = timedelta(hours=72)
@@ -124,7 +126,7 @@ def _identity_component(session: Session, *, as_of: datetime) -> HealthComponent
                 source = session.scalar(
                     select(FighterSourceId).where(
                         FighterSourceId.fighter_id == fighter_id,
-                        FighterSourceId.source == UFCSTATS_SOURCE,
+                        FighterSourceId.source.in_(LIVE_IDENTITY_SOURCES),
                     )
                 )
                 if source is None or not source.external_id:
@@ -136,7 +138,7 @@ def _identity_component(session: Session, *, as_of: datetime) -> HealthComponent
             HealthStatus.BLOCKED,
             detail=(
                 f"{blocked} active scoring block(s); "
-                f"{unresolved} upcoming bout(s) missing UFCStats identity"
+                f"{unresolved} upcoming bout(s) missing ESPN or UFCStats identity"
             ),
             as_of=_iso(as_of),
             counts={
@@ -156,7 +158,7 @@ def _identity_component(session: Session, *, as_of: datetime) -> HealthComponent
     return make_component(
         "identity",
         HealthStatus.HEALTHY,
-        detail=f"{checked} upcoming bout(s) have UFCStats source ids",
+        detail=f"{checked} upcoming bout(s) have ESPN or UFCStats source ids",
         as_of=_iso(as_of),
         counts={"checked_bouts": checked, "scoring_blocks": 0},
     )

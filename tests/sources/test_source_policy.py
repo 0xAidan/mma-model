@@ -61,6 +61,7 @@ def test_canonical_source_ids_are_exhaustive_and_consistent() -> None:
         assert source_id in policy.roles
     for required_id in (
         "ufcstats_public",
+        "espn_public",
         "mma_ai_bootstrap",
         "dwcs_manifest",
         "tapology_public",

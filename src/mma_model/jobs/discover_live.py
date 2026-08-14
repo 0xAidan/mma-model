@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -22,17 +21,13 @@ from mma_model.db.tables.core import (
     FighterSourceId,
 )
 from mma_model.dwcs.ids import upcoming_bout_id, upcoming_event_id, upcoming_fighter_id
+from mma_model.dwcs.names import is_dwcs_event_name, series_for_event_name
 from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.policy import SourceId
 from mma_model.sources.ufcstats_public.parser import parse_event_details
 from mma_model.ufcstats.parsers import EventRow, parse_completed_events
 
 SOURCE = SourceId.UFCSTATS_PUBLIC.value
-_DWCS_NAME = re.compile(
-    r"contender\s+series|dana\s+white.?s\s+contender|\bdwcs\b",
-    re.IGNORECASE,
-)
-_BRAZIL = re.compile(r"\bbrazil\b", re.IGNORECASE)
 _INACTIVE_BOUTS = frozenset({"cancelled", "canceled", "replaced", "scratched", "completed"})
 
 
@@ -55,16 +50,6 @@ class DiscoverResult:
     fighters_written: int = 0
     event_ids: list[str] = field(default_factory=list)
     detail: str = ""
-
-
-def is_dwcs_event_name(name: str) -> bool:
-    return bool(_DWCS_NAME.search(name or ""))
-
-
-def series_for_event_name(name: str) -> str:
-    if _BRAZIL.search(name or ""):
-        return "dwcs_brazil"
-    return "dwcs"
 
 
 def _aware(value: datetime) -> datetime:

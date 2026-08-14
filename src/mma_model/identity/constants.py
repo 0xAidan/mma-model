@@ -18,6 +18,7 @@ RULE_BLOCKED = "unresolved_blocks_scoring"
 ALLOWED_RESOLVE_SOURCES = frozenset(
     {
         "espn",
+        "espn_public",
         "ufcstats_public",
         "mma_ai_bootstrap",
         "tapology_public",

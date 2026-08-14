@@ -21,6 +21,7 @@ class SourcePolicyError(ValueError):
 
 class SourceId(StrEnum):
     UFCSTATS_PUBLIC = "ufcstats_public"
+    ESPN_PUBLIC = "espn_public"
     MMA_AI_BOOTSTRAP = "mma_ai_bootstrap"
     DWCS_MANIFEST = "dwcs_manifest"
     TAPOLOGY_PUBLIC = "tapology_public"

@@ -1,0 +1,120 @@
+{
+  "events": [
+    {
+      "id": "600060732",
+      "name": "Dana White's Contender Series: Season 10, Week 1",
+      "shortName": "DWCS S10 W1",
+      "date": "2026-08-11T23:00Z",
+      "status": {
+        "type": {
+          "id": "3",
+          "name": "STATUS_FINAL",
+          "state": "post",
+          "completed": true
+        }
+      },
+      "competitions": [
+        {
+          "id": "401903400",
+          "date": "2026-08-11T23:00Z",
+          "type": {"text": "Lightweight"},
+          "status": {
+            "type": {"name": "STATUS_FINAL", "state": "post", "completed": true}
+          },
+          "competitors": [
+            {
+              "id": "111",
+              "order": 1,
+              "athlete": {"id": "111", "displayName": "Completed Winner"}
+            },
+            {
+              "id": "222",
+              "order": 2,
+              "athlete": {"id": "222", "displayName": "Completed Loser"}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "600060493",
+      "name": "UFC Fight Night: Someone vs Other",
+      "shortName": "UFC FN",
+      "date": "2026-08-23T00:00Z",
+      "status": {
+        "type": {
+          "id": "1",
+          "name": "STATUS_SCHEDULED",
+          "state": "pre",
+          "completed": false
+        }
+      },
+      "competitions": [
+        {
+          "id": "401900001",
+          "date": "2026-08-23T00:00Z",
+          "type": {"text": "Welterweight"},
+          "venue": {
+            "fullName": "UFC APEX",
+            "address": {"city": "Las Vegas", "state": "NV", "country": "USA"}
+          },
+          "status": {
+            "type": {"name": "STATUS_SCHEDULED", "state": "pre", "completed": false}
+          },
+          "competitors": [
+            {
+              "id": "333",
+              "order": 1,
+              "athlete": {"id": "333", "displayName": "UFC Main A"}
+            },
+            {
+              "id": "444",
+              "order": 2,
+              "athlete": {"id": "444", "displayName": "UFC Main B"}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "600060733",
+      "name": "Dana White's Contender Series: Season 10, Week 2",
+      "shortName": "DWCS S10 W2",
+      "date": "2026-08-18T23:00Z",
+      "status": {
+        "type": {
+          "id": "1",
+          "name": "STATUS_SCHEDULED",
+          "state": "pre",
+          "completed": false
+        }
+      },
+      "competitions": [
+        {
+          "id": "401903489",
+          "date": "2026-08-18T23:00Z",
+          "type": {"text": "Welterweight"},
+          "venue": {
+            "fullName": "UFC APEX",
+            "address": {"city": "Las Vegas", "state": "NV", "country": "USA"}
+          },
+          "status": {
+            "type": {"name": "STATUS_SCHEDULED", "state": "pre", "completed": false}
+          },
+          "competitors": [
+            {
+              "id": "5307810",
+              "order": 1,
+              "athlete": {"id": "5307810", "displayName": "Alex Contender"}
+            },
+            {
+              "id": "5307811",
+              "order": 2,
+              "athlete": {"id": "5307811", "displayName": "Jordan Prospect"}
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

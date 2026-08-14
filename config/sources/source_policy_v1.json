@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
   "contract_id": "dwcs_source_policy",
-  "contract_version": "1.2.0",
-  "effective_date": "2026-08-12",
+  "contract_version": "1.3.0",
+  "effective_date": "2026-08-14",
   "ticket": "DWCS-003",
   "decision_recorded_by": "user_explicit_approval",
   "policy_mode": "public_first_hybrid_personal_project",
   "source_ids": [
     "ufcstats_public",
+    "espn_public",
     "mma_ai_bootstrap",
     "dwcs_manifest",
     "tapology_public",
@@ -52,6 +53,16 @@
       "acquisition": "direct_reproducible_public_snapshots",
       "bootstrap": "mma_ai_bootstrap_after_hash_count_schema_reconciliation",
       "forbidden": ["opaque_precomputed_feature_csvs_as_training_inputs"]
+    },
+    "espn_public": {
+      "role": "upcoming_dwcs_listing_and_optional_public_odds",
+      "acquisition": "undocumented_public_json_no_key",
+      "condition": "only_where_public_json_is_accessible_without_bypass",
+      "forbidden": [
+        "treat_as_licensed_book_feed",
+        "label_as_bet365",
+        "cloudflare_or_captcha_bypass"
+      ]
     },
     "mma_ai_bootstrap": {
       "role": "optional_raw_normalized_bootstrap_only_after_reconciliation",
@@ -255,6 +266,11 @@
       "schema_drift_unresolved_after_parser_version_bump",
       "reconciliation_vs_manifest_below_gates"
     ],
+    "espn_public": [
+      "http_403_or_cloudflare_on_data_urls",
+      "schema_drift_unresolved_after_parser_version_bump",
+      "persistent_block_signals"
+    ],
     "mma_ai_bootstrap": [
       "hash_count_or_schema_reconciliation_fails",
       "only_opaque_feature_csvs_available"
@@ -278,6 +294,7 @@
   },
   "deterministic_fallback_order": [
     "ufcstats_public",
+    "espn_public",
     "mma_ai_bootstrap",
     "tapology_public",
     "sherdog_public",
