@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import tempfile
 from collections.abc import Mapping, Sequence
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +22,7 @@ from mma_model.jobs.discover_live import (
     fetch_live_listing_and_pages,
     persist_from_listing,
 )
+from mma_model.jobs.horizons import PREVIEW_EVENT_HORIZON, TICK_EVENT_HORIZON
 from mma_model.jobs.types import DueJob, EventContext, HandlerResult, JobErrorClass, JobStatus
 from mma_model.modeling.registry import load_model_registry
 from mma_model.odds.events_for_schedule import load_upcoming_dwcs_events_from_db
@@ -32,8 +32,6 @@ from mma_model.sources.http.block_signals import SourceBlockedError
 from mma_model.sources.policy import SourceId
 
 UFCSTATS_SOURCE = SourceId.UFCSTATS_PUBLIC.value
-TICK_EVENT_HORIZON = timedelta(days=30)
-PREVIEW_EVENT_HORIZON = timedelta(days=120)
 SEAM_ARTIFACT = "incumbent-artifact-v1"
 
 

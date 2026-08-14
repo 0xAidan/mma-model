@@ -70,7 +70,7 @@ from mma_model.odds.schedule import (
 )
 from mma_model.jobs.snapshot_odds import run_snapshot_odds_job
 from mma_model.jobs.due import load_orchestrator_cadence
-from mma_model.jobs.live_engine import TICK_EVENT_HORIZON
+from mma_model.jobs.horizons import TICK_EVENT_HORIZON
 from mma_model.jobs.locking import FileFlockLock
 from mma_model.jobs.orchestrator import TickOverlapError, run_jobs_tick
 from mma_model.jobs.types import EventContext
