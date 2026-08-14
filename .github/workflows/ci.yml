@@ -155,19 +155,23 @@ jobs:
           npm --prefix web run build
       - name: Compose config invariants
         run: |
-          mkdir -p /tmp/mma-ci-env
-          printf 'MMA_DATA_DIR=/data\nMMA_PUBLIC_DIR=/public\n' > /tmp/mma-ci-env/mma.env
-          cat > /tmp/mma-ci-compose.override.yaml <<'EOF'
-          services:
-            worker:
-              env_file:
-                - /tmp/mma-ci-env/mma.env
-          EOF
-          docker compose -f deploy/compose.yaml -f /tmp/mma-ci-compose.override.yaml config > /tmp/mma-compose.rendered.yaml
+          set -euo pipefail
+          # Base file alone must still reference the production secrets path.
+          grep -q '/etc/mma-model/mma.env' deploy/compose.yaml
+          # Overlay uses env_file: !override so runners need no /etc/mma-model/mma.env.
+          docker compose -f deploy/compose.yaml -f deploy/compose.ci.yaml config > /tmp/mma-compose.rendered.yaml
+          # Prove the override is what made config succeed (base-only fails without the file).
+          if docker compose -f deploy/compose.yaml config >/tmp/mma-compose.base.yaml 2>/tmp/mma-compose.base.err; then
+            echo "unexpected: base compose config succeeded without /etc/mma-model/mma.env" >&2
+            exit 1
+          fi
+          grep -qi 'mma.env' /tmp/mma-compose.base.err
           python - <<'PY'
-          import re, sys, yaml
+          import re
           from pathlib import Path
+          import yaml
           raw = Path("deploy/compose.yaml").read_text(encoding="utf-8")
+          assert "/etc/mma-model/mma.env" in raw
           assert re.search(r"(?m)^\s*ports\s*:", raw) is None
           assert re.search(r"(?m)^\s*expose\s*:", raw) is None
           rendered = yaml.safe_load(Path("/tmp/mma-compose.rendered.yaml").read_text(encoding="utf-8"))
@@ -175,7 +179,9 @@ jobs:
           assert not worker.get("ports"), worker.get("ports")
           assert not worker.get("expose"), worker.get("expose")
           assert worker.get("network_mode") != "host"
-          print("compose config OK (no ports/expose/host net)")
+          env_files = worker.get("env_file") or []
+          assert "/etc/mma-model/mma.env" not in str(env_files), env_files
+          print("compose config OK (no ports/expose/host net; env_file overridden)")
           PY
       - name: Docker image build (no push)
         run: docker build -t mma-model:ci-pr .

@@ -6,6 +6,7 @@ later deploy tickets. It does **not** install or mutate the live VPS.
 | Path | Role |
 |------|------|
 | `compose.yaml` | Single `worker` service: digest-pinned image, no ports/expose/host-net, read-only + tmpfs, non-root, capped logs, data/public mounts, env_file secrets |
+| `compose.ci.yaml` + `ci-mma.env` | CI/local `docker compose config` overlay; uses `env_file: !override` so runners need no `/etc/mma-model/mma.env` |
 | `image-digest.txt` | `current` + `previous` digests for rollback |
 | `examples/` | **EXAMPLE ONLY — NOT INSTALLED** (DWCS-004); keep for topology docs/tests |
 

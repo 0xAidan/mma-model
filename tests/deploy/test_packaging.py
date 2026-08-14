@@ -96,59 +96,51 @@ def test_compose_config_renders_without_publish_surface():
     if compose_cmd is None:
         pytest.skip("docker compose not available")
 
-    env_path = Path("/tmp/mma-model-test-compose.env")
-    env_path.write_text("MMA_DATA_DIR=/data\nMMA_PUBLIC_DIR=/public\n", encoding="utf-8")
-    overlay = REPO_ROOT / "deploy" / ".compose.validate.yaml"
-    try:
-        overlay.write_text(
-            "\n".join(
-                [
-                    "services:",
-                    "  worker:",
-                    f"    env_file: [{env_path}]",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        proc = subprocess.run(
-            [
-                *compose_cmd,
-                "-f",
-                str(COMPOSE_PATH),
-                "-f",
-                str(overlay),
-                "config",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    finally:
-        if overlay.exists():
-            overlay.unlink()
-        if env_path.exists():
-            env_path.unlink()
+    ci_overlay = REPO_ROOT / "deploy" / "compose.ci.yaml"
+    ci_env = REPO_ROOT / "deploy" / "ci-mma.env"
+    assert ci_overlay.is_file()
+    assert ci_env.is_file()
+    assert "!override" in ci_overlay.read_text(encoding="utf-8")
+    prod = COMPOSE_PATH.read_text(encoding="utf-8")
+    assert "/etc/mma-model/mma.env" in prod
 
-    if proc.returncode != 0:
-        combined = (proc.stdout + proc.stderr).lower()
-        assert "published" not in combined
-        if "ports" in combined and "variable is not set" not in combined:
-            pytest.fail(f"compose config unexpected ports mention: {proc.stderr}")
-        assert (
-            "env_file" in combined
-            or "digest" in combined
-            or "pull" in combined
-            or "error" in combined
-            or "not found" in combined
-        )
-        return
+    # Base-only config must fail when production env file is absent.
+    base_only = subprocess.run(
+        [*compose_cmd, "-f", str(COMPOSE_PATH), "config"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not Path("/etc/mma-model/mma.env").is_file():
+        assert base_only.returncode != 0
+        assert "mma.env" in (base_only.stderr + base_only.stdout).lower()
+
+    proc = subprocess.run(
+        [
+            *compose_cmd,
+            "-f",
+            str(COMPOSE_PATH),
+            "-f",
+            str(ci_overlay),
+            "config",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # With compose.ci.yaml (!override env_file), config must succeed even when
+    # /etc/mma-model/mma.env is absent. Do not soft-pass on missing prod env.
+    assert proc.returncode == 0, proc.stderr + proc.stdout
 
     rendered = yaml.safe_load(proc.stdout)
     worker = rendered["services"]["worker"]
     assert not worker.get("ports")
     assert not worker.get("expose")
     assert worker.get("network_mode") != "host"
+    env_blob = str(worker.get("env_file") or [])
+    assert "/etc/mma-model/mma.env" not in env_blob
 
 
 def test_image_digest_pin_file_present():
