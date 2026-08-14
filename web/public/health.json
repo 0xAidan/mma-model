@@ -1,0 +1,64 @@
+{
+  "as_of": "2026-08-11T17:00:05Z",
+  "components": [
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "sources health not yet probed",
+      "name": "data",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "identity health not yet probed",
+      "name": "identity",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "odds health not yet probed",
+      "name": "odds",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "model health not yet probed",
+      "name": "model",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "publish health not yet probed",
+      "name": "pipeline",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "grade health not yet probed",
+      "name": "grading",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "backup health not yet probed",
+      "name": "backup",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "quota health not yet probed",
+      "name": "quota",
+      "status": "missing"
+    },
+    {
+      "as_of": "2026-08-11T17:00:05Z",
+      "detail": "staleness health not yet probed",
+      "name": "freshness",
+      "status": "missing"
+    }
+  ],
+  "contract_id": "dwcs_dashboard",
+  "contract_version": "1.0.0",
+  "schema_version": 1,
+  "series": "dwcs",
+  "ticket": "DWCS-500"
+}

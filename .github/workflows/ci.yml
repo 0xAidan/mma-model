@@ -125,7 +125,10 @@ jobs:
           --select E,F,I,UP,B,SIM
       - name: Pytest
         run: pytest -q
-      - name: Web typecheck (dashboard contracts)
+      - name: Web dashboard (lint, typecheck, test, build)
         run: |
           npm --prefix web ci
+          npm --prefix web run lint
           npm --prefix web run typecheck
+          npm --prefix web run test
+          npm --prefix web run build
