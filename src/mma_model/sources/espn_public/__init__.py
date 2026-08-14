@@ -1,6 +1,7 @@
 """ESPN undocumented public JSON for upcoming DWCS cards (no API key)."""
 
 from mma_model.sources.espn_public.errors import EspnSchemaError
+from mma_model.sources.espn_public.odds import parse_espn_odds
 from mma_model.sources.espn_public.parser import (
     ESPN_IDENTITY_SOURCE,
     EspnUpcomingEvent,
@@ -13,5 +14,6 @@ __all__ = [
     "EspnSchemaError",
     "EspnUpcomingEvent",
     "EspnUpcomingFight",
+    "parse_espn_odds",
     "parse_espn_scoreboard",
 ]

@@ -37,6 +37,7 @@ from mma_model.jobs.live_engine import (
     run_ingest_history,
     run_score,
 )
+from mma_model.odds.espn_snapshot import run_espn_odds_snapshot
 from mma_model.jobs.types import (
     DueJob,
     EventContext,
@@ -390,7 +391,13 @@ def handle_snapshot_odds(
         result = runner(session, job=job, as_of=as_of, events=events, context=context)
         if isinstance(result, HandlerResult):
             return result
-    _ = job
+    _ = (job, events)
+    if (
+        context_is_live(context)
+        or context.get("espn_odds")
+        or context.get("espn_odds_client")
+    ):
+        return run_espn_odds_snapshot(session, as_of=as_of, context=context)
     return HandlerResult(
         status=JobStatus.SUCCESS,
         counts={"snapshot": "seam"},
