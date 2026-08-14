@@ -1,5 +1,5 @@
+import type { ChangeEvent, FormEvent } from "react";
 import { useState } from "react";
-import type { FormEvent } from "react";
 import { formatAmerican, formatDecimal, formatEv } from "../lib/odds";
 import { localEvFromUserPrice } from "../lib/userObservedStorage";
 import type { UserObservedPrice } from "../lib/userObservedStorage";
@@ -40,6 +40,14 @@ export const UserObservedPriceForm = ({
     setError(null);
   };
 
+  const handleSportsbookChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setSportsbook(event.target.value);
+  };
+
+  const handleOddsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setOddsInput(event.target.value);
+  };
+
   const localEv = localEvFromUserPrice(fairProbability, existing);
 
   return (
@@ -63,7 +71,7 @@ export const UserObservedPriceForm = ({
             autoComplete="off"
             className="mt-1 w-full rounded border border-ink-300 bg-white px-2 py-1.5 text-sm text-ink-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             value={sportsbook}
-            onChange={(e) => setSportsbook(e.target.value)}
+            onChange={handleSportsbookChange}
             aria-label="Sportsbook name you observed"
           />
         </label>
@@ -76,7 +84,7 @@ export const UserObservedPriceForm = ({
             inputMode="decimal"
             className="mt-1 w-full rounded border border-ink-300 bg-white px-2 py-1.5 text-sm text-ink-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             value={oddsInput}
-            onChange={(e) => setOddsInput(e.target.value)}
+            onChange={handleOddsChange}
             aria-label="Odds you observed as decimal or American"
             placeholder="2.40 or +140"
           />

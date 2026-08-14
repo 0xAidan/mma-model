@@ -7,10 +7,15 @@ export type LoadState =
   | { status: "error"; message: string }
   | { status: "ready"; data: DashboardBundle };
 
-export const useDashboardData = (basePath = "./"): LoadState => {
+export type DashboardDataResult = {
+  state: LoadState;
+  reload: () => void;
+};
+
+export const useDashboardData = (basePath = "./"): DashboardDataResult => {
   const [state, setState] = useState<LoadState>({ status: "loading" });
 
-  const load = useCallback(() => {
+  const reload = useCallback(() => {
     setState({ status: "loading" });
     void loadDashboardBundle(basePath)
       .then((data) => {
@@ -23,8 +28,8 @@ export const useDashboardData = (basePath = "./"): LoadState => {
   }, [basePath]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    reload();
+  }, [reload]);
 
-  return state;
+  return { state, reload };
 };

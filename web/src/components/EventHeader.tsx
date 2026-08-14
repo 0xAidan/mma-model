@@ -4,6 +4,7 @@ import { readOptionalString } from "../lib/optionalString";
 
 type Props = {
   event: CurrentEventDocument;
+  modelVersionLabel: string;
 };
 
 const formatCountdown = (totalSeconds: number): string => {
@@ -21,7 +22,7 @@ const formatCountdown = (totalSeconds: number): string => {
   return parts.join(" ");
 };
 
-export const EventHeader = ({ event }: Props) => {
+export const EventHeader = ({ event, modelVersionLabel }: Props) => {
   const title = readOptionalString(event.title, "Unknown event title");
   const date = readOptionalString(event.event_date, "Unknown event date");
   const lastUpdate = readOptionalString(
@@ -56,7 +57,7 @@ export const EventHeader = ({ event }: Props) => {
       <h1 className="mt-1 font-display text-2xl font-bold text-ink-950 sm:text-3xl">
         {title.text}
       </h1>
-      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
         <div>
           <dt className="text-ink-500">Event date</dt>
           <dd className="font-medium text-ink-900">{date.text}</dd>
@@ -84,6 +85,12 @@ export const EventHeader = ({ event }: Props) => {
         <div>
           <dt className="text-ink-500">As of</dt>
           <dd className="font-medium text-ink-900">{event.as_of}</dd>
+        </div>
+        <div>
+          <dt className="text-ink-500">Model version</dt>
+          <dd className="font-medium text-ink-900" data-testid="model-version">
+            {modelVersionLabel}
+          </dd>
         </div>
       </dl>
     </header>

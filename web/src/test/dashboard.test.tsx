@@ -16,6 +16,7 @@ import { MatchupCard } from "../components/MatchupCard";
 import { ErrorState, EmptyState, LoadingState } from "../components/StatePanels";
 import { PerformancePage } from "../pages/PerformancePage";
 import { WeeklyMatchupSections } from "../pages/WeeklyPage";
+import { resolveModelVersionLabel } from "../lib/status";
 import currentEventFixture from "../../public/current-event.json";
 import matchupsFixture from "../../public/matchups.json";
 import performanceFixture from "../../public/performance.json";
@@ -41,15 +42,42 @@ const noopClear = () => undefined;
 
 describe("EventHeader OptionalStringField", () => {
   it("does not invent an event title when presence is unknown", () => {
-    render(<EventHeader event={currentEvent} />);
+    render(<EventHeader event={currentEvent} modelVersionLabel="Unknown model version" />);
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Unknown event title");
     expect(screen.getByText("Unknown event date")).toBeInTheDocument();
     expect(screen.queryByText(/DWCS Season/i)).not.toBeInTheDocument();
   });
+
+  it("shows unknown model version when hashes are missing", () => {
+    render(<EventHeader event={currentEvent} modelVersionLabel="Unknown model version" />);
+    expect(screen.getByTestId("model-version")).toHaveTextContent("Unknown model version");
+  });
+
+  it("shows shortened known model digest", () => {
+    render(
+      <EventHeader event={currentEvent} modelVersionLabel="bbbbbbbbbbbb…" />,
+    );
+    expect(screen.getByTestId("model-version")).toHaveTextContent("bbbbbbbbbbbb…");
+  });
+});
+
+describe("resolveModelVersionLabel", () => {
+  it("returns unknown when no hashes exist", () => {
+    expect(resolveModelVersionLabel({})).toBe("Unknown model version");
+  });
+
+  it("prefers release model hash", () => {
+    expect(
+      resolveModelVersionLabel({
+        releaseModelHash: "abcdefghijklmnop",
+        matchupModelHash: "zzzzzzzzzzzzzzzz",
+      }),
+    ).toBe("abcdefghijkl…");
+  });
 });
 
 describe("MatchupCard primary states", () => {
-  it("shows EV, observed line, and or-better thresholds for confirmed value", () => {
+  it("shows EV help on confirmed value and or-better thresholds", () => {
     const row = findBout("bout-cv");
     render(
       <MatchupCard
@@ -61,12 +89,15 @@ describe("MatchupCard primary states", () => {
     );
     expect(screen.getByRole("status", { name: /Confirmed value/i })).toBeInTheDocument();
     expect(screen.getByTestId("exact-ev-row")).toHaveTextContent(/Exact EV/);
+    expect(screen.getByTestId("ev-help")).toHaveTextContent(/expected profit per \$100/i);
     expect(screen.getByText(/fixture_book/)).toBeInTheDocument();
     expect(screen.getByText(/\+110 or better/)).toBeInTheDocument();
     expect(screen.getByText(/\+120 or better/)).toBeInTheDocument();
+    expect(screen.getByText(/Maturity:/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Data strength/i)).not.toBeInTheDocument();
   });
 
-  it("hides EV for price-target cards and shows watchlist thresholds", () => {
+  it("hides EV help for price-target cards and requires sportsbook comparison", () => {
     const row = findBout("bout-pt");
     render(
       <MatchupCard
@@ -80,7 +111,11 @@ describe("MatchupCard primary states", () => {
       screen.getByRole("status", { name: /Actionable price target/i }),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("exact-ev-row")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ev-help")).not.toBeInTheDocument();
     expect(screen.queryByText(/^EV:/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("compare-sportsbook-copy")).toHaveTextContent(
+      /Compare the actionable threshold with a sportsbook/i,
+    );
     expect(screen.getByText(/\+110 or better/)).toBeInTheDocument();
     expect(screen.queryByText(/ROI/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/CLV/i)).not.toBeInTheDocument();
@@ -98,6 +133,7 @@ describe("MatchupCard primary states", () => {
     );
     expect(screen.getByRole("status", { name: /No bet/i })).toBeInTheDocument();
     expect(screen.queryByTestId("exact-ev-row")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ev-help")).not.toBeInTheDocument();
   });
 
   it("shows stale price state", () => {
@@ -141,7 +177,36 @@ describe("MatchupCard primary states", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/replacement on card/i);
   });
 
-  it("expands markets with keyboard-accessible button", async () => {
+  it("renders line_movement when set and hides when null", () => {
+    const withMovement: MatchupRow = {
+      ...findBout("bout-cv"),
+      prices: {
+        ...findBout("bout-cv").prices,
+        line_movement: -0.05,
+      },
+    };
+    const { rerender } = render(
+      <MatchupCard
+        matchup={withMovement}
+        userPrice={undefined}
+        onSaveUserPrice={noopSave}
+        onClearUserPrice={noopClear}
+      />,
+    );
+    expect(screen.getByTestId("line-movement-row")).toHaveTextContent("-0.050");
+
+    rerender(
+      <MatchupCard
+        matchup={findBout("bout-cv")}
+        userPrice={undefined}
+        onSaveUserPrice={noopSave}
+        onClearUserPrice={noopClear}
+      />,
+    );
+    expect(screen.queryByTestId("line-movement-row")).not.toBeInTheDocument();
+  });
+
+  it("expands markets with keyboard-accessible button and shows reasons", async () => {
     const user = userEvent.setup();
     const row = findBout("bout-cv");
     render(
@@ -156,7 +221,43 @@ describe("MatchupCard primary states", () => {
     expect(button).toHaveAttribute("aria-expanded", "false");
     await user.click(button);
     expect(button).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("table")).toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(table).toBeInTheDocument();
+    expect(within(table).getByText(/fixture confirmed_value/i)).toBeInTheDocument();
+    expect(within(table).getByText(/confirmed_value: confirmed_value/i)).toBeInTheDocument();
+  });
+});
+
+describe("Weekly bucketing", () => {
+  it("places leftover primary_state rows into the three sections, never Other matchups", () => {
+    const orphan: MatchupRow = {
+      ...findBout("bout-pt"),
+      bout_id: "bout-orphan-pt",
+      selection_id: "evt-1:bout-orphan-pt:moneyline:fighter_a",
+    };
+    const doc: MatchupsDocument = {
+      ...matchups,
+      matchups: [...matchups.matchups, orphan],
+    };
+
+    render(
+      <WeeklyMatchupSections
+        matchups={doc}
+        getUserPrice={() => undefined}
+        onSaveUserPrice={noopSave}
+        onClearUserPrice={noopClear}
+      />,
+    );
+
+    expect(screen.queryByRole("heading", { name: /Other matchups/i })).not.toBeInTheDocument();
+    const watchlist = screen
+      .getByRole("heading", { name: /Actionable-price watchlist/i })
+      .closest("section");
+    expect(watchlist).not.toBeNull();
+    const orphanCard = document.querySelector('[data-bout-id="bout-orphan-pt"]');
+    expect(orphanCard).not.toBeNull();
+    expect(watchlist?.contains(orphanCard)).toBe(true);
+    expect(screen.getByTestId("threshold-help")).toBeInTheDocument();
   });
 });
 
@@ -211,7 +312,6 @@ describe("User-observed price", () => {
 
     expect(screen.getByText(/You entered book/i)).toBeInTheDocument();
     expect(screen.getByText("MyBook")).toBeInTheDocument();
-    // 0.55 * 2.4 - 1 = 0.32 -> +32.0%
     expect(screen.getByText(/Local display EV/i).parentElement).toHaveTextContent(/\+32\.0%/);
     expect(screen.queryByTestId("exact-ev-row")).not.toBeInTheDocument();
   });
@@ -292,13 +392,20 @@ describe("Performance page denominators", () => {
     expect(within(section).getByTestId("no-roi-clv-notice")).toBeInTheDocument();
     expect(within(section).getByText(/Pick count/i)).toBeInTheDocument();
     expect(within(section).queryByText(/Exact EV/i)).not.toBeInTheDocument();
+    expect(within(section).queryByTestId("confirmed-price-chart")).not.toBeInTheDocument();
   });
 
-  it("shows confirmed-price ROI/CLV labels in their own section only", () => {
+  it("shows confirmed-price ROI/CLV labels and accessible charts", () => {
     render(<PerformancePage performance={performance} history={history} />);
     const confirmed = screen.getByTestId("confirmed-price-section");
     expect(within(confirmed).getByTestId("confirmed-roi")).toBeInTheDocument();
     expect(within(confirmed).getByTestId("confirmed-clv")).toBeInTheDocument();
+    expect(within(confirmed).getByTestId("confirmed-price-chart")).toHaveTextContent(
+      /Confirmed-price units, ROI, CLV, and drawdown/i,
+    );
+    expect(screen.getByTestId("calibration-chart")).toHaveTextContent(
+      /Predictive calibration chart/i,
+    );
   });
 
   it("shows No filter applied when filter metadata is empty", () => {

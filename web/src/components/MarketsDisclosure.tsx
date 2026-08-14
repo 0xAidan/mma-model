@@ -60,8 +60,11 @@ export const MarketsDisclosure = ({ markets }: Props) => {
                 <th scope="col" className="py-2 pr-3">
                   EV
                 </th>
-                <th scope="col" className="py-2">
+                <th scope="col" className="py-2 pr-3">
                   Maturity
+                </th>
+                <th scope="col" className="py-2">
+                  Reasons
                 </th>
               </tr>
             </thead>
@@ -72,6 +75,11 @@ export const MarketsDisclosure = ({ markets }: Props) => {
                   `${market.market_family ?? "m"}-${market.outcome_key ?? index}`;
                 const hasObserved = market.prices.observed != null;
                 const hasEv = hasObserved && market.prices.exact_ev != null;
+                const reasonText =
+                  market.reason_plain ??
+                  (market.reasons && market.reasons.length > 0
+                    ? market.reasons.map((r) => `${r.code}: ${r.message}`).join("; ")
+                    : null);
                 return (
                   <tr key={key} className="border-b border-ink-100 align-top">
                     <td className="py-2 pr-3">
@@ -102,7 +110,19 @@ export const MarketsDisclosure = ({ markets }: Props) => {
                         ? formatEv(market.prices.exact_ev)
                         : "Hidden (no observed price)"}
                     </td>
-                    <td className="py-2">{maturityLabel(market.maturity)}</td>
+                    <td className="py-2 pr-3">{maturityLabel(market.maturity)}</td>
+                    <td className="py-2 text-xs text-ink-700">
+                      {reasonText ?? "—"}
+                      {market.reasons && market.reasons.length > 0 && market.reason_plain ? (
+                        <ul className="mt-1 list-disc pl-4">
+                          {market.reasons.map((r) => (
+                            <li key={`${r.code}-${r.message}`}>
+                              {r.code}: {r.message}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </td>
                   </tr>
                 );
               })}

@@ -1,7 +1,10 @@
 import type {
   HealthStatusView,
+  PerformanceLaneView,
+  PriceAvailability,
   RecommendationStateView,
 } from "../generated/dashboard";
+import { assertNever } from "./assertNever";
 
 export type StatusVisual = {
   label: string;
@@ -98,7 +101,7 @@ export const rollupHealthStatus = (
   return worst;
 };
 
-export const maturityLabel = (lane: "qualified" | "paper" | "experimental"): string => {
+export const maturityLabel = (lane: PerformanceLaneView): string => {
   switch (lane) {
     case "qualified":
       return "Qualified";
@@ -106,9 +109,54 @@ export const maturityLabel = (lane: "qualified" | "paper" | "experimental"): str
       return "Paper";
     case "experimental":
       return "Experimental";
-    default: {
-      const _exhaustive: never = lane;
-      return _exhaustive;
-    }
+    default:
+      return assertNever(lane);
   }
+};
+
+export const uncertaintyCopy = (lane: PerformanceLaneView): string => {
+  switch (lane) {
+    case "qualified":
+      return "Production-qualified lane — treated as the trusted decision surface.";
+    case "paper":
+      return "Higher uncertainty — paper lane; treat as provisional guidance.";
+    case "experimental":
+      return "Higher uncertainty — experimental lane; do not treat as production-ready.";
+    default:
+      return assertNever(lane);
+  }
+};
+
+export const priceAvailabilityLabel = (availability: PriceAvailability): string => {
+  switch (availability) {
+    case "available":
+      return "Available";
+    case "stale":
+      return "Stale";
+    case "unavailable":
+      return "Unavailable";
+    default:
+      return assertNever(availability);
+  }
+};
+
+export const shortenDigest = (value: string | null | undefined, chars = 12): string | null => {
+  if (!value || value.trim() === "") {
+    return null;
+  }
+  return value.length <= chars ? value : `${value.slice(0, chars)}…`;
+};
+
+export const resolveModelVersionLabel = (args: {
+  releaseModelHash?: string | null | undefined;
+  releaseArtifactHash?: string | null | undefined;
+  matchupModelHash?: string | null | undefined;
+  matchupArtifactHash?: string | null | undefined;
+}): string => {
+  const digest =
+    shortenDigest(args.releaseModelHash) ??
+    shortenDigest(args.releaseArtifactHash) ??
+    shortenDigest(args.matchupModelHash) ??
+    shortenDigest(args.matchupArtifactHash);
+  return digest ?? "Unknown model version";
 };

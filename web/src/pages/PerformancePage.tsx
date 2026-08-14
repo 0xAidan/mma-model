@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
+import type { ChangeEvent } from "react";
 import type {
   HistoryDocument,
   HistoryPoint,
   PerformanceDocument,
   PerformanceFilters,
 } from "../generated/dashboard";
+import { MetricBarChart } from "../components/MetricBarChart";
+import { calibrationClosenessWidth, ratioToBarWidth } from "../lib/chartScale";
 import { formatPercent } from "../lib/odds";
 
 type Props = {
@@ -45,8 +48,6 @@ export const PerformancePage = ({ performance, history }: Props) => {
 
   const filteredPoints = useMemo(() => {
     const points = history.points ?? [];
-    // Client-side filter over history labels when the user picks values.
-    // Metadata seasons/markets are not invented when empty.
     return points.filter((point) => {
       const hay = `${point.label} ${point.lane ?? ""} ${point.bucket}`.toLowerCase();
       if (season && !hay.includes(season.toLowerCase())) return false;
@@ -69,6 +70,69 @@ export const PerformancePage = ({ performance, history }: Props) => {
     setSource("");
     setDataQuality("");
   };
+
+  const handleSeasonChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setSeason(event.target.value);
+  };
+  const handleMarketChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setMarket(event.target.value);
+  };
+  const handleModelChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setModel(event.target.value);
+  };
+  const handleSourceChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setSource(event.target.value);
+  };
+  const handleDataQualityChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setDataQuality(event.target.value);
+  };
+
+  const calibration = calibrationClosenessWidth(
+    performance.predictive?.calibration_slope,
+    performance.predictive?.calibration_intercept,
+  );
+
+  const confirmedBars = [
+    {
+      id: "units",
+      label: "Pick count (units risked proxy)",
+      display: String(performance.confirmed_price?.pick_count ?? 0),
+      widthPct: ratioToBarWidth((performance.confirmed_price?.pick_count ?? 0) / 20, 1),
+    },
+    {
+      id: "roi",
+      label: "Flat-unit ROI",
+      display: metricOrDash(performance.confirmed_price?.flat_unit_roi, true),
+      widthPct: ratioToBarWidth(performance.confirmed_price?.flat_unit_roi, 1),
+    },
+    {
+      id: "clv",
+      label: "CLV",
+      display: metricOrDash(performance.confirmed_price?.clv, true),
+      widthPct: ratioToBarWidth(performance.confirmed_price?.clv, 1),
+    },
+    {
+      id: "drawdown",
+      label: "Drawdown",
+      display: metricOrDash(performance.confirmed_price?.drawdown, true),
+      widthPct: ratioToBarWidth(performance.confirmed_price?.drawdown, 1),
+    },
+  ];
+
+  const calibrationBars = [
+    {
+      id: "slope",
+      label: "Calibration slope closeness to 1.0",
+      display: metricOrDash(performance.predictive?.calibration_slope),
+      widthPct: calibration.slopeWidth,
+    },
+    {
+      id: "intercept",
+      label: "Calibration intercept closeness to 0",
+      display: metricOrDash(performance.predictive?.calibration_intercept),
+      widthPct: calibration.interceptWidth,
+    },
+  ];
 
   return (
     <div className="space-y-8">
@@ -94,7 +158,7 @@ export const PerformancePage = ({ performance, history }: Props) => {
             <input
               className="mt-1 w-full rounded border border-ink-300 px-2 py-1.5 text-sm"
               value={season}
-              onChange={(e) => setSeason(e.target.value)}
+              onChange={handleSeasonChange}
               aria-label="Filter by season"
             />
           </label>
@@ -103,7 +167,7 @@ export const PerformancePage = ({ performance, history }: Props) => {
             <input
               className="mt-1 w-full rounded border border-ink-300 px-2 py-1.5 text-sm"
               value={market}
-              onChange={(e) => setMarket(e.target.value)}
+              onChange={handleMarketChange}
               aria-label="Filter by market"
             />
           </label>
@@ -112,7 +176,7 @@ export const PerformancePage = ({ performance, history }: Props) => {
             <input
               className="mt-1 w-full rounded border border-ink-300 px-2 py-1.5 text-sm"
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={handleModelChange}
               aria-label="Filter by model"
             />
           </label>
@@ -121,7 +185,7 @@ export const PerformancePage = ({ performance, history }: Props) => {
             <input
               className="mt-1 w-full rounded border border-ink-300 px-2 py-1.5 text-sm"
               value={source}
-              onChange={(e) => setSource(e.target.value)}
+              onChange={handleSourceChange}
               aria-label="Filter by source"
             />
           </label>
@@ -130,7 +194,7 @@ export const PerformancePage = ({ performance, history }: Props) => {
             <input
               className="mt-1 w-full rounded border border-ink-300 px-2 py-1.5 text-sm"
               value={dataQuality}
-              onChange={(e) => setDataQuality(e.target.value)}
+              onChange={handleDataQualityChange}
               aria-label="Filter by data quality"
             />
           </label>
@@ -181,6 +245,12 @@ export const PerformancePage = ({ performance, history }: Props) => {
             </dd>
           </div>
         </dl>
+        <MetricBarChart
+          title="Predictive calibration chart"
+          summary="Bars show how close calibration slope is to 1.0 and intercept to 0. Empty bars mean the metric is missing. No animation is required."
+          bars={calibrationBars}
+          testId="calibration-chart"
+        />
         <HistoryTable points={predictivePoints} caption="Predictive history points" showRoi={false} />
       </section>
 
@@ -225,6 +295,12 @@ export const PerformancePage = ({ performance, history }: Props) => {
             </dd>
           </div>
         </dl>
+        <MetricBarChart
+          title="Confirmed-price units, ROI, CLV, and drawdown"
+          summary="Accessible bar summary of confirmed-price pick count, flat-unit ROI, CLV, and drawdown. Missing values show an empty bar. Price-target-only results are never included here."
+          bars={confirmedBars}
+          testId="confirmed-price-chart"
+        />
         <HistoryTable points={confirmedPoints} caption="Confirmed-price history" showRoi />
       </section>
 
