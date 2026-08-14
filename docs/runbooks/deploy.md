@@ -25,7 +25,7 @@ Examples remain **EXAMPLE ONLY — NOT INSTALLED**: [`../../deploy/examples/`](.
 Pinned image (immutable):
 
 ```text
-ghcr.io/0xaidan/mma-model@sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7
+ghcr.io/0xaidan/mma-model@sha256:99d0aeb4c3af1ad4d733a793ac4e0407fed0fcf84d3a8c1f3a4f0fc6b943a5ae
 ```
 
 `pull_policy: never` means `docker pull` the digest on the host before
@@ -106,7 +106,7 @@ What `install.sh` does:
 Manual equivalents:
 
 ```bash
-docker pull ghcr.io/0xaidan/mma-model@sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7
+docker pull ghcr.io/0xaidan/mma-model@sha256:99d0aeb4c3af1ad4d733a793ac4e0407fed0fcf84d3a8c1f3a4f0fc6b943a5ae
 docker compose -f deploy/compose.yaml run --rm worker \
   mma-model public sync-assets --from /opt/mma/web --to /public
 caddy hash-password   # store hash only on host; never commit

@@ -18,9 +18,9 @@
 
 services:
   worker:
-    # Immutable digest from release run 31828508540 (live engine + health).
+    # Immutable digest from release run 31832649688 (ESPN public cards + odds).
     # Keep the previous digest in deploy/image-digest.txt for rollback when set.
-    image: ghcr.io/0xaidan/mma-model@sha256:ba2641370382c9418968d2b416966bcf0bec44bb6cb70819d4c4f2d91b01cef7
+    image: ghcr.io/0xaidan/mma-model@sha256:99d0aeb4c3af1ad4d733a793ac4e0407fed0fcf84d3a8c1f3a4f0fc6b943a5ae
     pull_policy: never
     user: "10001:10001"
     read_only: true
