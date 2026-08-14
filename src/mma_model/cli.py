@@ -14,6 +14,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from mma_model.backup.service import BackupError, BackupPaths, create_backup_bundle
 from mma_model.config import get_settings
 from mma_model.db.session import (
     _attach_sqlite_listeners,
@@ -1069,6 +1070,75 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         required=True,
         help="Public static root (e.g. /public)",
+    )
+
+    p_backup = sub.add_parser(
+        "backup",
+        help="SQLite online backup bundles (DWCS-505)",
+    )
+    backup_sub = p_backup.add_subparsers(dest="backup_cmd", required=True)
+    p_backup_create = backup_sub.add_parser(
+        "create",
+        help="Create a consistent offline bundle via the SQLite backup API",
+    )
+    p_backup_create.add_argument(
+        "--database-path",
+        type=Path,
+        required=True,
+        help="Live SQLite file path (snapshotted online; never raw-copied)",
+    )
+    p_backup_create.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Empty/absent output directory for the recoverable bundle",
+    )
+    p_backup_create.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Host data root (default artifacts under <data-dir>/artifacts)",
+    )
+    p_backup_create.add_argument(
+        "--public-dir",
+        type=Path,
+        default=None,
+        help="Public static root with releases/, current, live/",
+    )
+    p_backup_create.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Model artifact directory (overrides <data-dir>/artifacts)",
+    )
+    p_backup_create.add_argument(
+        "--deploy-dir",
+        type=Path,
+        default=None,
+        help="Deploy definitions to include (compose/systemd/Caddy snippet)",
+    )
+    p_backup_create.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help="Env file to include redacted (e.g. /etc/mma-model/mma.env)",
+    )
+    p_backup_create.add_argument(
+        "--config-dir",
+        type=Path,
+        default=None,
+        help="Optional config directory whose file hashes are recorded",
+    )
+    p_backup_create.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Optional repo root (hashes config/ when present)",
+    )
+    p_backup_create.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON summary",
     )
 
     p_feat = sub.add_parser("features", help="Cutoff-aware PIT feature tools")
@@ -2833,6 +2903,53 @@ def main(argv: list[str] | None = None) -> int:
             f"copied={','.join(result.copied) or 'none'} "
             f"skipped={','.join(result.skipped) or 'none'}"
         )
+        return EXIT_OK
+
+    if args.cmd == "backup":
+        if args.backup_cmd != "create":
+            print(f"backup configuration error: unknown command {args.backup_cmd!r}")
+            return EXIT_INTERNAL
+        try:
+            result = create_backup_bundle(
+                BackupPaths(
+                    database_path=Path(args.database_path),
+                    output_dir=Path(args.output),
+                    data_dir=Path(args.data_dir) if args.data_dir else None,
+                    public_dir=Path(args.public_dir) if args.public_dir else None,
+                    artifacts_dir=(
+                        Path(args.artifacts_dir) if args.artifacts_dir else None
+                    ),
+                    deploy_dir=Path(args.deploy_dir) if args.deploy_dir else None,
+                    env_file=Path(args.env_file) if args.env_file else None,
+                    config_dir=Path(args.config_dir) if args.config_dir else None,
+                    repo_root=Path(args.repo_root) if args.repo_root else None,
+                )
+            )
+        except BackupError as exc:
+            print(f"backup create failed; live data left intact: {exc}")
+            return EXIT_INTERNAL
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "bundle_dir": str(result.bundle_dir),
+                        "sqlite_path": str(result.sqlite_path),
+                        "integrity_check": result.integrity_check,
+                        "artifact_manifest_count": result.artifact_manifest_count,
+                        "release_ids": list(result.release_ids),
+                        "started_at": result.started_at,
+                        "finished_at": result.finished_at,
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(
+                f"backup create ok bundle={result.bundle_dir} "
+                f"integrity={result.integrity_check.splitlines()[0]} "
+                f"releases={','.join(result.release_ids) or 'none'} "
+                f"artifacts={result.artifact_manifest_count}"
+            )
         return EXIT_OK
 
     if args.cmd == "features":

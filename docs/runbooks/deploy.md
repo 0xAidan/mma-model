@@ -185,7 +185,6 @@ Host copy of rollback notes may also live at `/root/mma-dwcs503-rollback.sh`
 
 ## Out of scope
 
-- restic / backup restore internals → DWCS-505
 - Changing the root site
 - Auto-deploy from PRs
 
@@ -200,3 +199,13 @@ sudo ./deploy/install.sh --apply-scheduler
 ```
 
 Examples under `deploy/examples/systemd/` stay **EXAMPLE ONLY — NOT INSTALLED**.
+
+## Backup / restore (DWCS-505)
+
+Runbook: [`backup-restore.md`](backup-restore.md).  
+Evidence: [`../deployment/dwcs-505-evidence.md`](../deployment/dwcs-505-evidence.md).
+
+```bash
+sudo /opt/mma-model/deploy/run-job.sh backup
+sudo /opt/mma-model/deploy/restore.sh --target /tmp/mma-restore-empty
+```
