@@ -63,7 +63,7 @@ def _minimal_examples(tmp_path: Path, compose_body: str) -> Path:
     (examples / "Caddyfile.mma.snippet").write_text(
         "# EXAMPLE ONLY — NOT INSTALLED\n"
         "mma.shermandavison.com {\n"
-        "  basic_auth { mma PLACEHOLDER_HASH }\n"
+        "  basicauth { mma PLACEHOLDER_HASH }\n"
         "  root * /srv/mma/public\n"
         "  file_server\n"
         "}\n",
@@ -378,7 +378,8 @@ def test_docs_current_state_and_target_topology_exist():
     assert "loopback" in current_text.lower()
     assert "ruff check" in current_text.lower()
     assert "/srv/mma/public" in target_text
-    assert "basic_auth" in target_text
+    # Host Caddy is 2.6.2 (basicauth); docs may also mention basic_auth as 2.8+ alias.
+    assert "basicauth" in target_text.lower() or "basic_auth" in target_text
     assert "rollback" in target_text.lower()
     assert "host networking" in target_text.lower() or "network_mode" in target_text.lower()
     assert "0.0.0.0" not in target_text

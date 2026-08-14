@@ -1,11 +1,14 @@
-# EXAMPLE ONLY — NOT INSTALLED (DWCS-004)
+# EXAMPLE ONLY — NOT INSTALLED (DWCS-004 / updated for DWCS-503 notes)
 # Merge this as an additional site block into the EXISTING host Caddyfile.
 # Do not start a second reverse proxy. Existing host Caddy keeps public HTTP/HTTPS.
+#
+# Production host runs Caddy 2.6.2 → use basicauth (not basic_auth / Caddy 2.8+).
+# Production snippet with cache + CSP: deploy/Caddyfile.mma
 
 mma.shermandavison.com {
 	# Generate with: caddy hash-password
 	# Commit only placeholders — never a live hash or plaintext password.
-	basic_auth {
+	basicauth {
 		mma_dashboard REDACTED_HASH_PLACEHOLDER
 	}
 
@@ -17,8 +20,7 @@ mma.shermandavison.com {
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
-		# Tighten further in the deploy ticket after measuring asset needs.
-		# Content-Security-Policy "default-src 'self'"
+		# Production CSP lives in deploy/Caddyfile.mma
 	}
 
 	log {
