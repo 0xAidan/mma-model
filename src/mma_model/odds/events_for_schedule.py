@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from mma_model.db.tables.core import CanonicalEvent
+from mma_model.db.tables.core import CanonicalBout, CanonicalEvent
 from mma_model.dwcs.manifest import load_dwcs_event_manifest
 from mma_model.odds.normalize import ensure_utc
 from mma_model.odds.schedule import load_default_schedule_contract
@@ -17,6 +17,9 @@ _DWCS_SERIES = frozenset({"dwcs", "dwcs_brazil"})
 _UPCOMING_EVENT_STATUS = frozenset({"scheduled", "upcoming"})
 _COMPLETED_EVENT_STATUS = frozenset({"completed", "complete"})
 _CANCELLED_EVENT_STATUS = frozenset({"cancelled", "canceled"})
+_INACTIVE_BOUT_STATUS = frozenset(
+    {"cancelled", "canceled", "replaced", "scratched", "completed"}
+)
 
 
 def _db_utc(value: datetime, *, field: str) -> datetime:
@@ -99,6 +102,20 @@ def load_upcoming_dwcs_events_from_db(
         .order_by(CanonicalEvent.scheduled_start_at.asc(), CanonicalEvent.id.asc())
     ).all()
 
+    event_ids = [event.id for event in events]
+    bouts_by_event: dict[str, list[str]] = {event_id: [] for event_id in event_ids}
+    if event_ids:
+        bout_rows = session.scalars(
+            select(CanonicalBout)
+            .where(CanonicalBout.event_id.in_(tuple(event_ids)))
+            .order_by(CanonicalBout.id.asc())
+        ).all()
+        for bout in bout_rows:
+            status = (bout.status or "scheduled").strip().casefold()
+            if status in _INACTIVE_BOUT_STATUS:
+                continue
+            bouts_by_event.setdefault(bout.event_id, []).append(bout.id)
+
     rows: list[dict[str, Any]] = []
     for event in events:
         start = _db_utc(event.scheduled_start_at, field="scheduled_start_at")  # type: ignore[arg-type]
@@ -111,6 +128,7 @@ def load_upcoming_dwcs_events_from_db(
                 "status": event.status,
                 "series": event.series,
                 "source": "canonical_db",
+                "bout_ids": tuple(bouts_by_event.get(event.id, ())),
             }
         )
     return rows

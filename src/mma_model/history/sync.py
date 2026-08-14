@@ -172,12 +172,13 @@ def load_upcoming_dwcs_fighters(
         return json_seeds
     upcoming = session.scalars(
         select(CanonicalEvent).where(
-            CanonicalEvent.series == "dwcs",
+            CanonicalEvent.series.in_(("dwcs", "dwcs_brazil")),
             CanonicalEvent.status.in_(tuple(UPCOMING_EVENT_STATUSES)),
         )
     ).all()
     if not upcoming:
-        return json_seeds
+        # Never fall through to the sample JSON roster when a session is bound.
+        return []
     event_ids = [event.id for event in upcoming]
     bouts = session.scalars(
         select(CanonicalBout).where(CanonicalBout.event_id.in_(event_ids))

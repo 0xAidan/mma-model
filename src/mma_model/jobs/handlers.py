@@ -27,6 +27,16 @@ from mma_model.grade.service import (
     record_observed_price,
     settle_recommendations,
 )
+from mma_model.jobs.live_engine import (
+    context_is_live,
+    has_discover_input,
+    has_ingest_input,
+    is_preview_publish,
+    run_discover,
+    run_identity,
+    run_ingest_history,
+    run_score,
+)
 from mma_model.jobs.types import (
     DueJob,
     EventContext,
@@ -299,7 +309,9 @@ def handle_discover(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
-    _ = (session, job, as_of, context)
+    _ = job
+    if has_discover_input(context):
+        return run_discover(session, as_of=as_of, context=context)
     return HandlerResult(
         status=JobStatus.SUCCESS,
         counts={"events_seen": len(events)},
@@ -315,7 +327,9 @@ def handle_ingest_history(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
-    _ = (session, job, as_of, events, context)
+    _ = (job, events)
+    if has_ingest_input(context):
+        return run_ingest_history(session, as_of=as_of, context=context)
     return HandlerResult(
         status=JobStatus.SUCCESS,
         counts={"profiles": 0, "histories": 0},
@@ -331,7 +345,9 @@ def handle_identity(
     events: Sequence[EventContext],
     context: Mapping[str, Any],
 ) -> HandlerResult:
-    _ = (session, as_of)
+    _ = as_of
+    if context_is_live(context):
+        return run_identity(session, job=job, events=events, context=context)
     registry: HandlerRegistry | None = context.get("registry")  # type: ignore[assignment]
     event = next((e for e in events if e.event_id == job.event_id), None)
     unresolved: list[str] = []
@@ -410,6 +426,15 @@ def handle_score(
             counts={"scored": 0, "blocked": len(blocked)},
             blocked_bout_ids=tuple(blocked),
             blocks_downstream=True,
+        )
+    if context_is_live(context):
+        return run_score(
+            session,
+            job=job,
+            events=events,
+            context=context,
+            prior_digest=prior,
+            blocked=blocked,
         )
     scored = 0
     if event is not None:
@@ -704,7 +729,13 @@ def handle_publish(
             or 0
         )
     # Empty card with known bouts must not replace last-known-good current.
-    if event is not None and event.bout_ids and pub_count == 0:
+    # Preview publishes (discover) may replace demo JSON with paper / empty.
+    if (
+        event is not None
+        and event.bout_ids
+        and pub_count == 0
+        and not is_preview_publish(job, context)
+    ):
         return HandlerResult(
             status=JobStatus.FAILED,
             error_class=JobErrorClass.DEPENDENCY_BLOCKED,
