@@ -16,9 +16,10 @@
 #
 # Pinned-image note (DWCS-503 digest): the console script resolves alembic /
 # contracts relative to site-packages. The worker therefore runs the CLI from
-# /app via PYTHONPATH=src until a later digest fixes packaging. The CLI also
-# refuses URLs ending in data/mma.db; production jobs use MMA_JOBS_DATABASE_URL
-# (default sqlite:////data/dwcs.db).
+# /app via PYTHONPATH=src. Until a later digest includes the DWCS-504 DB guard,
+# run-job may overlay only jobs/db_guard.py + cli.py onto /app/src/mma_model.
+# Never bind-mount the whole host repo as tick_root (circular import failure).
+# Production jobs use explicit sqlite:////data/mma.db (canonical /data/mma.db).
 
 set -euo pipefail
 
@@ -53,11 +54,20 @@ MONITORING_ENV="${MMA_MONITORING_ENV:-/etc/mma-model/monitoring.env}"
 LOG_DIR="${MMA_LOG_DIR:-/var/log/mma-model}"
 BACKUP_HOOK="${MMA_BACKUP_HOOK:-${REPO_ROOT}/deploy/backup-hook.sh}"
 RUNTIME_BOUND_SEC="${MMA_JOB_TIMEOUT_SEC:-1500}"
-# Absolute container DB path that the CLI will accept (not *data/mma.db).
-JOBS_DATABASE_URL="${MMA_JOBS_DATABASE_URL:-sqlite:////data/dwcs.db}"
+# Canonical absolute container DB (four slashes). Relative sqlite:///data/mma.db
+# remains refused by the CLI guard.
+CANONICAL_JOBS_DB_URL="sqlite:////data/mma.db"
 
 mkdir -p "${LOG_DIR}"
 chmod 755 "${LOG_DIR}" 2>/dev/null || true
+
+# shellcheck disable=SC1090
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ENV_FILE}"
+  set +a
+fi
 
 # shellcheck disable=SC1090
 if [[ -f "${MONITORING_ENV}" ]]; then
@@ -65,6 +75,14 @@ if [[ -f "${MONITORING_ENV}" ]]; then
   # shellcheck disable=SC1091
   source "${MONITORING_ENV}"
   set +a
+fi
+
+# Prefer explicit override, then mma.env MMA_DATABASE_URL, then canonical absolute.
+JOBS_DATABASE_URL="${MMA_JOBS_DATABASE_URL:-${MMA_DATABASE_URL:-${CANONICAL_JOBS_DB_URL}}}"
+# Never silently fall back to a relative live URL from a mis-set env.
+if [[ "${JOBS_DATABASE_URL}" == "sqlite:///data/mma.db" \
+   || "${JOBS_DATABASE_URL}" == "sqlite:///./data/mma.db" ]]; then
+  JOBS_DATABASE_URL="${CANONICAL_JOBS_DB_URL}"
 fi
 
 redact() {
@@ -133,10 +151,28 @@ require_compose() {
 run_compose_tick() {
   local now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # Run CLI from /app so alembic migrations + contracts resolve inside the
-  # current digest-pinned image (site-packages console script path is wrong).
+  # Default: image /app + PYTHONPATH=src (working path proven at 17:40Z).
+  # Do NOT bind-mount the whole host git tree as tick_root — that causes
+  # circular module load failures (compute_code_hash / modeling.artifacts).
+  #
+  # Until the next digest includes the DWCS-504 DB guard, overlay only:
+  #   jobs/db_guard.py  and  cli.py  (the guard call site)
+  # onto /app/src/mma_model/... when those host files exist.
+  local -a volume_args=()
+  local host_cli="${REPO_ROOT}/src/mma_model/cli.py"
+  local host_guard="${REPO_ROOT}/src/mma_model/jobs/db_guard.py"
+  if [[ -f "${host_guard}" && -f "${host_cli}" ]]; then
+    volume_args=(
+      -v "${host_guard}:/app/src/mma_model/jobs/db_guard.py:ro"
+      -v "${host_cli}:/app/src/mma_model/cli.py:ro"
+    )
+    log "overlay: db_guard.py + cli.py onto /app/src/mma_model"
+  else
+    log "overlay: skipped (host guard/cli missing; using image sources)"
+  fi
   local -a cmd=(
     docker compose -f "${COMPOSE_FILE}" run --rm --no-deps
+    "${volume_args[@]}"
     --entrypoint /bin/sh
     worker
     -c
@@ -169,7 +205,7 @@ execute_job() {
 
 main() {
   require_compose
-  log "starting job=${JOB} force_fail=${FORCE_FAIL} lock=${LOCK_FILE}"
+  log "starting job=${JOB} force_fail=${FORCE_FAIL} lock=${LOCK_FILE} db=${JOBS_DATABASE_URL}"
 
   # Non-blocking exclusive lock: concurrent writers are rejected.
   exec 9>"${LOCK_FILE}"

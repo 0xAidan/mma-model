@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -121,19 +122,80 @@ def test_run_job_script_invariants():
     assert "[REDACTED]" in text
     assert "--force-fail" in text
     assert "exit 75" in text
+    assert "sqlite:////data/mma.db" in text
+    assert "dwcs.db" not in text
     assert "ports" not in text.lower() or "no ports" in text.lower()
 
 
-def test_backup_hook_is_stub_not_restic():
+def test_run_job_uses_image_app_not_whole_repo_mount():
+    """Tick must use image /app; never whole-repo /opt/mma-model-src as tick_root."""
+    text = _read(RUN_JOB)
+    assert "cd /app && PYTHONPATH=src" in text
+    assert "/opt/mma-model-src" not in text
+    assert 'tick_root="/opt/mma-model-src"' not in text
+    assert 'tick_root=/opt/mma-model-src' not in text
+    # Narrow overlay only (guard + cli), not the entire host tree.
+    assert "/app/src/mma_model/jobs/db_guard.py:ro" in text
+    assert "/app/src/mma_model/cli.py:ro" in text
+    assert "host_guard" in text and "host_cli" in text
+    # Must not mount REPO_ROOT as a directory tick_root.
+    assert not re.search(
+        r'-v\s+"\$\{REPO_ROOT\}:/opt/mma-model-src',
+        text,
+    )
+    assert not re.search(
+        r'-v\s+"\$\{REPO_ROOT\}:[^"\s]+:ro"',
+        text,
+    )
+
+
+def test_backup_hook_delegates_to_real_backup():
     text = _read(BACKUP_HOOK)
     assert BACKUP_HOOK.stat().st_mode & 0o111
-    assert "DWCS-505" in text
-    assert "backup.last_ok" in text
-    # May mention restic only as future replacement; must not invoke it.
-    assert "restic backup" not in text.lower()
-    assert "restic check" not in text.lower()
-    assert "PRAGMA" not in text
-    assert re.search(r"(?m)^\s*restic\b", text) is None
+    assert "backup.sh" in text
+    backup_sh = REPO_ROOT / "deploy" / "backup.sh"
+    assert backup_sh.is_file()
+    assert backup_sh.stat().st_mode & 0o111
+    body = _read(backup_sh)
+    assert "create_backup_bundle" in body or "backup create" in body
+    assert "restic backup" in body.lower()
+    assert "keep-daily" in body
+    assert "backup.last_ok" in body
+    assert "untouched" in body.lower()
+
+
+def test_restore_script_requires_empty_target():
+    restore = REPO_ROOT / "deploy" / "restore.sh"
+    assert restore.is_file()
+    assert restore.stat().st_mode & 0o111
+    text = _read(restore)
+    assert "empty" in text.lower()
+    assert "restic restore" in text.lower()
+    assert "integrity" in text.lower()
+
+
+def test_backup_runbook_and_evidence_exist_without_secrets():
+    runbook = REPO_ROOT / "docs" / "runbooks" / "backup-restore.md"
+    evidence = REPO_ROOT / "docs" / "deployment" / "dwcs-505-evidence.md"
+    assert runbook.is_file()
+    assert evidence.is_file()
+    for path in (runbook, evidence):
+        text = _read(path)
+        lowered = text.lower()
+        for token in FORBIDDEN_DOC_TOKENS:
+            assert token.lower() not in lowered, f"{path.name} discloses {token}"
+        for pattern in SECRET_PATTERNS:
+            for m in pattern.finditer(text):
+                token = m.group(0)
+                assert (
+                    "PLACEHOLDER" in token.upper() or "REDACTED" in token.upper()
+                ), f"{path.name} possible secret: {token}"
+    text = _read(runbook)
+    assert "online backup" in text.lower() or "online backup api" in text.lower()
+    assert "7 daily" in text or "keep-daily" in text.lower()
+    assert "corrupted" in text.lower()
+    assert "lost vps" in text.lower() or "lost VPS" in text
+    assert "unavailable backup" in text.lower() or "unavailable" in text.lower()
 
 
 def test_monitor_check_covers_required_signals():
@@ -243,28 +305,34 @@ def test_run_job_redaction_filters_secrets():
     assert "[REDACTED]" in out
 
 
-def test_backup_hook_writes_stamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_backup_hook_writes_stamp_via_backup_sh_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Hook delegates to backup.sh; without restic credentials it must fail closed."""
     stamp_dir = tmp_path / "data"
     log_dir = tmp_path / "logs"
     stamp_dir.mkdir()
     log_dir.mkdir()
     env = {
+        **os.environ,
         "MMA_DATA_DIR_HOST": str(stamp_dir),
         "MMA_LOG_DIR": str(log_dir),
         "MMA_BACKUP_STAMP": str(stamp_dir / "backup.last_ok"),
+        # Force missing restic config so the real hook fails without side effects.
+        "MMA_RESTIC_ENV": str(tmp_path / "missing-restic.env"),
+        "RESTIC_REPOSITORY": "",
+        "RESTIC_PASSWORD": "",
+        "RESTIC_PASSWORD_FILE": "",
     }
     proc = subprocess.run(
         ["bash", str(BACKUP_HOOK)],
         capture_output=True,
         text=True,
         check=False,
-        env={**dict(**{k: v for k, v in __import__("os").environ.items()}), **env},
+        env=env,
     )
-    assert proc.returncode == 0, proc.stderr + proc.stdout
-    stamp = stamp_dir / "backup.last_ok"
-    assert stamp.is_file()
-    assert stamp.read_text(encoding="utf-8").strip().endswith("Z")
-    assert "DWCS-505" in proc.stdout or "stub ok" in proc.stdout
+    assert proc.returncode != 0
+    assert not (stamp_dir / "backup.last_ok").exists()
 
 
 def test_systemd_analyze_verify_when_available():

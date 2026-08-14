@@ -358,8 +358,9 @@ EOF
 }
 
 sync_opt_tree() {
-  # Keep /opt/mma-model deploy scripts + units aligned with this checkout.
+  # Keep /opt/mma-model deploy scripts, CLI sources, and units aligned.
   mkdir -p "${OPT_ROOT}/deploy" "${OPT_ROOT}/docs/runbooks" "${OPT_ROOT}/docs/deployment"
+  mkdir -p "${OPT_ROOT}/src" "${OPT_ROOT}/migrations" "${OPT_ROOT}/config"
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete \
       --exclude '.git' \
@@ -374,6 +375,23 @@ sync_opt_tree() {
     if [[ -d "${REPO_ROOT}/docs/deployment" ]]; then
       rsync -a "${REPO_ROOT}/docs/deployment/" "${OPT_ROOT}/docs/deployment/"
     fi
+    # Host-mounted CLI tree for jobs tick until the next digest includes the
+    # DWCS-504 DB guard (run-job.sh bind-mounts REPO_ROOT when present).
+    if [[ -d "${REPO_ROOT}/src" ]]; then
+      rsync -a --delete \
+        --exclude '__pycache__' \
+        --exclude '*.pyc' \
+        "${REPO_ROOT}/src/" "${OPT_ROOT}/src/"
+    fi
+    if [[ -d "${REPO_ROOT}/migrations" ]]; then
+      rsync -a --delete "${REPO_ROOT}/migrations/" "${OPT_ROOT}/migrations/"
+    fi
+    if [[ -d "${REPO_ROOT}/config" ]]; then
+      rsync -a --delete "${REPO_ROOT}/config/" "${OPT_ROOT}/config/"
+    fi
+    if [[ -f "${REPO_ROOT}/alembic.ini" ]]; then
+      cp -a "${REPO_ROOT}/alembic.ini" "${OPT_ROOT}/alembic.ini"
+    fi
   else
     rm -rf "${OPT_ROOT}/deploy"
     cp -a "${REPO_ROOT}/deploy" "${OPT_ROOT}/deploy"
@@ -385,13 +403,30 @@ sync_opt_tree() {
       rm -rf "${OPT_ROOT}/docs/deployment"
       cp -a "${REPO_ROOT}/docs/deployment" "${OPT_ROOT}/docs/deployment"
     fi
+    if [[ -d "${REPO_ROOT}/src" ]]; then
+      rm -rf "${OPT_ROOT}/src"
+      cp -a "${REPO_ROOT}/src" "${OPT_ROOT}/src"
+    fi
+    if [[ -d "${REPO_ROOT}/migrations" ]]; then
+      rm -rf "${OPT_ROOT}/migrations"
+      cp -a "${REPO_ROOT}/migrations" "${OPT_ROOT}/migrations"
+    fi
+    if [[ -d "${REPO_ROOT}/config" ]]; then
+      rm -rf "${OPT_ROOT}/config"
+      cp -a "${REPO_ROOT}/config" "${OPT_ROOT}/config"
+    fi
+    if [[ -f "${REPO_ROOT}/alembic.ini" ]]; then
+      cp -a "${REPO_ROOT}/alembic.ini" "${OPT_ROOT}/alembic.ini"
+    fi
   fi
   chmod +x "${OPT_ROOT}/deploy/run-job.sh" \
     "${OPT_ROOT}/deploy/backup-hook.sh" \
+    "${OPT_ROOT}/deploy/backup.sh" \
+    "${OPT_ROOT}/deploy/restore.sh" \
     "${OPT_ROOT}/deploy/monitor-check.sh" \
     "${OPT_ROOT}/deploy/install.sh" \
     "${OPT_ROOT}/deploy/rollback.sh" 2>/dev/null || true
-  log "synced deploy tree to ${OPT_ROOT}"
+  log "synced deploy + CLI tree to ${OPT_ROOT}"
 }
 
 apply_scheduler() {

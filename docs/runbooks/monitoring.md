@@ -14,7 +14,7 @@ Companion deploy runbook: [`deploy.md`](deploy.md).
 | Unit | Role |
 |------|------|
 | `mma-scheduler.timer` / `.service` | Every 5 minutes, `Persistent=true`; runs `deploy/run-job.sh tick` under one global `flock` |
-| `mma-backup.timer` / `.service` | Nightly `03:15` UTC, `Persistent=true`; runs `deploy/run-job.sh backup` (calls the DWCS-505 stub hook) |
+| `mma-backup.timer` / `.service` | Nightly `03:15` UTC, `Persistent=true`; runs `deploy/run-job.sh backup` → SQLite online backup + restic (DWCS-505) |
 | `/etc/logrotate.d/mma-model` | Rotates `/var/log/mma-model/*.log` |
 | `/etc/mma-model/monitoring.env` | Root-owned `0600` Healthchecks URL placeholders |
 
@@ -23,7 +23,8 @@ Scripts (under `/opt/mma-model/deploy/` after install):
 | Script | Role |
 |--------|------|
 | `run-job.sh` | Global `/run/mma-writer.lock`, Compose worker invoke, start/success/fail heartbeats, secret redaction, bounded runtime |
-| `backup-hook.sh` | **Stub** — stamps `/srv/mma/data/backup.last_ok`; DWCS-505 replaces with SQLite + restic |
+| `backup-hook.sh` / `backup.sh` | SQLite online backup + encrypted restic; stamps `/srv/mma/data/backup.last_ok` |
+| `restore.sh` | Empty-target restore drill (see [`backup-restore.md`](backup-restore.md)) |
 | `monitor-check.sh` | Disk >80%, backup age >26h, published `health.json` signals, TLS days left, dashboard HTTPS, repeated scheduler failures |
 
 ---
@@ -160,29 +161,49 @@ the service ran (journal + `systemctl status`) because `Persistent=true`.
 
 ## Pinned worker invoke
 
-`run-job.sh tick` calls the digest-pinned Compose worker under flock. The current
-DWCS-503 image console script resolves alembic paths incorrectly, so the runner
-executes:
+`run-job.sh tick` calls the digest-pinned Compose worker under flock. Default
+invocation (working path):
 
 ```text
 docker compose -f /opt/mma-model/deploy/compose.yaml run --rm --no-deps \
   --entrypoint /bin/sh worker -c \
-  "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick --now <utc> \
-   --database-url sqlite:////data/dwcs.db"
+  "cd /app && PYTHONPATH=src python -m mma_model.cli jobs tick \
+   --now <utc> --database-url sqlite:////data/mma.db"
 ```
 
-Jobs DB defaults to `sqlite:////data/dwcs.db` because the CLI refuses URLs ending
-in `data/mma.db`. Override with `MMA_JOBS_DATABASE_URL` in `monitoring.env` if needed.
+Until the next digest includes the DWCS-504 DB guard, `run-job.sh` may
+bind-mount **only** these host files onto the image tree:
+
+- `/opt/mma-model/src/mma_model/jobs/db_guard.py` → `/app/src/mma_model/jobs/db_guard.py`
+- `/opt/mma-model/src/mma_model/cli.py` → `/app/src/mma_model/cli.py`
+
+Do **not** mount the whole host repo as `tick_root` (that caused circular
+import failures).
+
+`--database-url` is required. Relative live URLs (`sqlite:///data/mma.db`,
+`sqlite:///./data/mma.db`) remain refused. The explicit absolute container URL
+`sqlite:////data/mma.db` (four slashes → `/data/mma.db`) is allowed and is the
+canonical production path. `run-job.sh` reads `MMA_DATABASE_URL` from
+`/etc/mma-model/mma.env` (fallback `sqlite:////data/mma.db`).
 
 Compose remains unpublished (no ports / expose / host-network).
 
 ---
 
-## Backup stub vs DWCS-505
+## Backup and restore (DWCS-505)
 
-`backup-hook.sh` only stamps `backup.last_ok` and logs. It does **not** run
-restic or SQLite backup APIs. DWCS-505 replaces the hook body; keep the same
-systemd timer / `run-job.sh backup` / flock / heartbeat wiring.
+`backup-hook.sh` delegates to `backup.sh`, which:
+
+1. Builds a consistent bundle via the SQLite **online backup API**
+2. Runs `PRAGMA integrity_check`
+3. Pushes encrypted restic snapshots (retention 7 daily / 4 weekly / 6 monthly)
+4. Stamps `backup.last_ok` only on success
+
+Failure exits non-zero so `run-job.sh` can ping Healthchecks `/fail`, and does
+**not** delete live `/srv/mma` data.
+
+Full recovery playbooks (corrupt DB, lost VPS, missing env, unavailable repo,
+image/release rollback): [`backup-restore.md`](backup-restore.md).
 
 ---
 
@@ -204,6 +225,6 @@ Leave `/srv/mma`, Caddy, and `/etc/mma-model/mma.env` intact.
 
 ## Out of scope
 
-- restic / SQLite backup internals → DWCS-505
 - Changing root site or MMA Caddy site block
 - Phase 6 evidence / go-live
+- Provider account recovery (see backup-restore runbook)

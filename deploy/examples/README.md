@@ -24,6 +24,8 @@ These snippets document the intended production seam for later tickets
 | `Caddyfile.mma.snippet` | Separate site block to merge into the existing Caddyfile later |
 | `docker-compose.yml` | Immutable worker image, mounts only, no ports |
 | `mma.env.example` | Placeholder env keys (never real credentials) |
+| `monitoring.env.example` | Healthchecks URL placeholders (DWCS-504) |
+| `restic.env.example` | restic repository/password placeholders (DWCS-505) |
 | `systemd/*.service` / `*.timer` | Scheduler + backup timer shape with flock (**EXAMPLE ONLY**) |
 
 Production DWCS-504 units live in [`../systemd/`](../systemd/), not here.

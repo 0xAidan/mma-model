@@ -13,7 +13,7 @@ mutate a live host only when an operator runs them deliberately (see
 | `Caddyfile.mma` | Production site block for existing host Caddy **2.6.2** (`basicauth`, CSP, cache rules) |
 | `install.sh` / `rollback.sh` | Host path/image/Caddy helpers; `--apply-scheduler` installs DWCS-504 timers |
 | `systemd/` | **Production** scheduler + backup units (DWCS-504) |
-| `run-job.sh` / `backup-hook.sh` / `monitor-check.sh` | Flock runner, backup stub, host monitors |
+| `run-job.sh` / `backup-hook.sh` / `backup.sh` / `restore.sh` / `monitor-check.sh` | Flock runner, SQLite online + restic backup, empty-target restore, host monitors |
 | `logrotate/mma-model` | File log rotation for `/var/log/mma-model` |
 | `examples/` | **EXAMPLE ONLY — NOT INSTALLED** (DWCS-004); keep for topology docs/tests |
 
@@ -54,4 +54,4 @@ then falls back to `./` for local Vite fixtures.
 - Install: `sudo ./deploy/install.sh --apply-scheduler`
 - Runbook: `docs/runbooks/monitoring.md`
 - Evidence: `docs/deployment/dwcs-504-evidence.md`
-- Backup internals remain DWCS-505 (`backup-hook.sh` is a stamp stub).
+- Backup / restore: `docs/runbooks/backup-restore.md` (DWCS-505)
