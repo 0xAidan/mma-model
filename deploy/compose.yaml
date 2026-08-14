@@ -20,7 +20,7 @@ services:
   worker:
     # Replace DIGEST_PLACEHOLDER after a main-branch release workflow publishes to GHCR.
     # Keep the previous digest in deploy/image-digest.txt for rollback.
-    image: ghcr.io/0xAidan/mma-model@sha256:DIGEST_PLACEHOLDER_REPLACE_AFTER_CI_PUBLISH
+    image: ghcr.io/0xaidan/mma-model@sha256:DIGEST_PLACEHOLDER_REPLACE_AFTER_CI_PUBLISH
     pull_policy: never
     user: "10001:10001"
     read_only: true

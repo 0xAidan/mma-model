@@ -147,7 +147,30 @@ def test_image_digest_pin_file_present():
     text = DIGEST_PATH.read_text(encoding="utf-8")
     assert "current=" in text
     assert "previous=" in text
-    assert "ghcr.io/0xAidan/mma-model" in text
+    assert "ghcr.io/0xaidan/mma-model" in text
+
+
+def test_ghcr_image_repository_is_lowercase():
+    """Docker/OCI rejects mixed-case GHCR repository names."""
+    expected = "ghcr.io/0xaidan/mma-model"
+    release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    compose = COMPOSE_PATH.read_text(encoding="utf-8")
+    digest = DIGEST_PATH.read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "deploy" / "README.md").read_text(encoding="utf-8")
+
+    assert f"IMAGE_NAME: {expected}" in release
+    assert expected in compose
+    assert f"image_repo={expected}" in digest
+    assert expected in readme
+    assert "ghcr.io/0xAidan" not in release
+    assert "ghcr.io/0xAidan" not in compose
+    assert "ghcr.io/0xAidan" not in digest
+    assert "ghcr.io/0xAidan" not in readme
+    # Full image reference must be lowercase (registry + owner + name).
+    assert expected == expected.lower()
+    assert re.fullmatch(r"ghcr\.io/[a-z0-9._/-]+", expected)
 
 
 def test_release_workflow_retains_previous_digest():
@@ -421,6 +444,7 @@ def test_ci_and_release_workflows():
     assert "codegen --check" in ci or "test_codegen" in ci or "tests/publish" in ci
     assert "pull_request:" not in release
     assert "packages: write" in release
-    assert "ghcr.io/0xAidan/mma-model" in release
+    assert "ghcr.io/0xaidan/mma-model" in release
+    assert "ghcr.io/0xAidan" not in release
     assert "No deploy" in release
     assert "docker push" not in ci

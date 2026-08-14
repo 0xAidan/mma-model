@@ -14,7 +14,8 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/0xAidan/mma-model
+  # OCI/Docker repository names must be lowercase.
+  IMAGE_NAME: ghcr.io/0xaidan/mma-model
 
 jobs:
   publish-image:
