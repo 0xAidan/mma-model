@@ -74,10 +74,7 @@ def _targets(session: Session, *, as_of: datetime) -> tuple[_BoutOddsTarget, ...
         if event_src is None:
             continue
         start = event.scheduled_start_at
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=UTC)
-        else:
-            start = start.astimezone(UTC)
+        start = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
         for bout_id in item.get("bout_ids") or ():
             bout = session.get(CanonicalBout, str(bout_id))
             if bout is None:
