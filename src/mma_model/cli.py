@@ -2586,6 +2586,15 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     with Session() as session:
                         fighters = load_upcoming_dwcs_fighters(session=session)
+                    # Weekly ingest stays fail-closed on an empty card. This
+                    # operator command may still use the frozen seed roster
+                    # when the caller passed fixtures and did not ask for live.
+                    if (
+                        not fighters
+                        and args.fixture_root is not None
+                        and not bool(getattr(args, "live", False))
+                    ):
+                        fighters = load_upcoming_dwcs_fighters()
                     report = sync_regional_history(
                         repo=repo,
                         session_factory=Session,
